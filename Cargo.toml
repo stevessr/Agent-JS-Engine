@@ -1,0 +1,14 @@
+[package]
+name = "ai-agent"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+thiserror = "2.0.18"
+[[bin]]
+name = "parse_error_stats"
+path = "parse_error_stats.rs"
+
+[[bin]]
+name = "parse_error_stats_runner"
+path = "parse_error_stats_runner.rs"
