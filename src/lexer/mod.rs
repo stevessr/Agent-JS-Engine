@@ -1,6 +1,4 @@
 use thiserror::Error;
-use std::iter::Peekable;
-use std::str::CharIndices;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'a> {
@@ -99,7 +97,6 @@ impl<'a> Lexer<'a> {
             return Ok(Token::Eof);
         }
 
-        let start = self.pos;
         let c = self.peek().unwrap();
 
         if c.is_ascii_alphabetic() || c == '_' || c == '$' {

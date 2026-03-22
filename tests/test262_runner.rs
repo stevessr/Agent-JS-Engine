@@ -1,71 +1,385 @@
+use ai_agent::engine::{EngineError, EvalOptions, JsEngine};
+use serde::Deserialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use ai_agent::lexer::Lexer;
-use ai_agent::parser::Parser;
-use ai_agent::engine::Interpreter;
+use walkdir::WalkDir;
 
-pub fn extract_test(code: &str) -> String {
-    code.to_string()
+const DEFAULT_TEST262_DIR: &str = "test262";
+const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
+const PROGRESS_INTERVAL: usize = 2_000;
+const SAMPLE_LIMIT: usize = 12;
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct Test262Metadata {
+    #[serde(default)]
+    includes: Vec<String>,
+    #[serde(default)]
+    flags: Vec<String>,
+    #[serde(default)]
+    negative: Option<NegativeMetadata>,
 }
 
-pub fn run_test(path: &Path) -> (bool, bool) {
-    let source = fs::read_to_string(path).unwrap();
-    let code = extract_test(&source);
-    let lexer = Lexer::new(&code);
-    
-    let parsed = match Parser::new(lexer) {
-        Ok(mut parser) => {
-            match parser.parse_program() {
-                Ok(ast) => {
-                    let mut interpreter = Interpreter::new();
-                    let evaluated = interpreter.eval_program(&ast).is_ok();
-                    (true, evaluated)
-                }
-                Err(_) => {
-                    (false, false)
-                }
-            }
-        },
-        Err(_) => (false, false)
-    };
-    parsed
+#[derive(Debug, Clone, Default, Deserialize)]
+struct NegativeMetadata {
+    phase: Option<String>,
+    #[serde(rename = "type")]
+    error_type: Option<String>,
 }
 
-#[test]
-fn test262_runner_main() {
-    let test262_dir = Path::new("test262/test");
-    if !test262_dir.exists() {
-        println!("test262 directory not found!");
-        return;
+#[derive(Debug, Clone)]
+struct TestCase {
+    path: PathBuf,
+    source: String,
+    metadata: Test262Metadata,
+}
+
+#[derive(Debug, Clone)]
+struct HarnessCache {
+    files: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(Debug, Clone)]
+struct CaseResult {
+    outcome: Outcome,
+    reason: Option<String>,
+}
+
+impl Test262Metadata {
+    fn has_flag(&self, flag: &str) -> bool {
+        self.flags.iter().any(|value| value == flag)
+    }
+}
+
+impl HarnessCache {
+    fn load(root: &Path) -> Self {
+        let mut files = HashMap::new();
+
+        for entry in WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let Ok(contents) = fs::read_to_string(entry.path()) else {
+                continue;
+            };
+
+            let key = entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default()
+                .to_string();
+            files.insert(key, contents);
+        }
+
+        Self { files }
     }
 
-    let mut total_attempts = 0;
-    let mut parse_success = 0;
-    let mut eval_success = 0;
+    fn get(&self, name: &str) -> Option<&str> {
+        self.files.get(name).map(String::as_str)
+    }
+}
 
-    fn visit_dirs(dir: &Path, total: &mut usize, p_succ: &mut usize, e_succ: &mut usize) {
-        if dir.is_dir() {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        visit_dirs(&path, total, p_succ, e_succ);
-                    } else if path.extension().and_then(|s| s.to_str()) == Some("js") {
-                        *total += 1;
-                        let (parsed, evaluated) = run_test(&path);
-                        if parsed { *p_succ += 1; }
-                        if evaluated { *e_succ += 1; }
-                    }
-                }
-            }
+fn extract_metadata(source: &str) -> Test262Metadata {
+    let Some(frontmatter_start) = source.find("/*---") else {
+        return Test262Metadata::default();
+    };
+    let Some(frontmatter_end) = source[frontmatter_start + 5..].find("---*/") else {
+        return Test262Metadata::default();
+    };
+    let yaml = &source[frontmatter_start + 5..frontmatter_start + 5 + frontmatter_end];
+    serde_yaml::from_str(yaml).unwrap_or_default()
+}
+
+fn discover_cases(test_root: &Path) -> Vec<TestCase> {
+    let mut cases = WalkDir::new(test_root)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("js"))
+        .filter_map(|entry| {
+            let path = entry.into_path();
+            let source = fs::read_to_string(&path).ok()?;
+            let metadata = extract_metadata(&source);
+            Some(TestCase {
+                path,
+                source,
+                metadata,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    cases.sort_by(|left, right| left.path.cmp(&right.path));
+    cases
+}
+
+fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
+    let relative = case
+        .path
+        .strip_prefix(suite_root)
+        .unwrap_or(case.path.as_path());
+
+    if relative.starts_with("test/staging") {
+        return Some("staging");
+    }
+    if relative.starts_with("test/intl402") {
+        return Some("intl402");
+    }
+    if relative.starts_with("test/built-ins/Temporal") {
+        return Some("temporal");
+    }
+    if case.metadata.has_flag("module") {
+        return Some("module");
+    }
+    if case.source.contains("$262.createRealm")
+        || case.source.contains("$262.detachArrayBuffer")
+        || case.source.contains("$262.agent")
+    {
+        return Some("$262-host-hooks");
+    }
+
+    None
+}
+
+fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
+    if case.metadata.has_flag("raw") {
+        return case.source.clone();
+    }
+
+    if matches!(
+        case.metadata.negative.as_ref().and_then(|negative| negative.phase.as_deref()),
+        Some("parse")
+    ) {
+        return case.source.clone();
+    }
+
+    let mut include_order = vec!["sta.js".to_string(), "assert.js".to_string()];
+    if case.metadata.has_flag("async") {
+        include_order.push("doneprintHandle.js".to_string());
+    }
+    include_order.extend(case.metadata.includes.iter().cloned());
+
+    let mut seen = HashSet::new();
+    let mut combined = String::new();
+
+    for include in include_order {
+        if !seen.insert(include.clone()) {
+            continue;
+        }
+        if let Some(contents) = harness.get(&include) {
+            combined.push_str(contents);
+            combined.push('\n');
         }
     }
 
-    visit_dirs(test262_dir, &mut total_attempts, &mut parse_success, &mut eval_success);
+    combined.push_str(&case.source);
+    combined
+}
 
-    println!("Total test attempted: {}", total_attempts);
-    println!("Passed parsing: {}", parse_success);
-    println!("Passed execution: {}", eval_success);
-    println!("Parse Pass Rate: {:.2}%", parse_success as f64 / total_attempts as f64 * 100.0);
-    println!("Eval Pass Rate: {:.2}%", eval_success as f64 / total_attempts as f64 * 100.0);
+fn expected_error_matches(expected: Option<&str>, actual: &EngineError) -> bool {
+    expected.is_none_or(|name| name == actual.name)
+}
+
+fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseResult {
+    if let Some(reason) = skip_reason(case, suite_root) {
+        return CaseResult {
+            outcome: Outcome::Skipped,
+            reason: Some(reason.to_string()),
+        };
+    }
+
+    let engine = JsEngine::new();
+    let source = build_source(case, harness);
+    let options = EvalOptions {
+        strict: case.metadata.has_flag("onlyStrict"),
+        bootstrap_test262: !case.metadata.has_flag("raw"),
+        loop_iteration_limit: Some(LOOP_ITERATION_LIMIT),
+    };
+
+    let result = catch_unwind(AssertUnwindSafe(|| engine.eval_with_options(&source, &options)));
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => {
+            let reason = if let Some(message) = payload.downcast_ref::<&str>() {
+                format!("panic: {message}")
+            } else if let Some(message) = payload.downcast_ref::<String>() {
+                format!("panic: {message}")
+            } else {
+                "panic: non-string payload".to_string()
+            };
+
+            return CaseResult {
+                outcome: Outcome::Failed,
+                reason: Some(reason),
+            };
+        }
+    };
+
+    let outcome = match (&case.metadata.negative, result) {
+        (Some(negative), Err(error)) => {
+            if expected_error_matches(negative.error_type.as_deref(), &error) {
+                Outcome::Passed
+            } else {
+                Outcome::Failed
+            }
+        }
+        (Some(_), Ok(_)) => Outcome::Failed,
+        (None, Err(_)) => Outcome::Failed,
+        (None, Ok(output)) if case.metadata.has_flag("async") => {
+            let has_failure = output
+                .printed
+                .iter()
+                .any(|line| line.starts_with("Test262:AsyncTestFailure:"));
+            let has_completion = output
+                .printed
+                .iter()
+                .any(|line| line == "Test262:AsyncTestComplete");
+            if !has_failure && has_completion {
+                Outcome::Passed
+            } else {
+                Outcome::Failed
+            }
+        }
+        (None, Ok(_)) => Outcome::Passed,
+    };
+
+    CaseResult {
+        outcome,
+        reason: match outcome {
+            Outcome::Failed => Some("assertion or runtime mismatch".to_string()),
+            _ => None,
+        },
+    }
+}
+
+#[test]
+fn test262_metadata_smoke() {
+    let source = r#"/*---
+includes: [compareArray.js]
+flags: [onlyStrict, async]
+negative:
+  phase: runtime
+  type: TypeError
+---*/
+42;
+"#;
+    let metadata = extract_metadata(source);
+
+    assert!(metadata.has_flag("onlyStrict"));
+    assert!(metadata.has_flag("async"));
+    assert_eq!(metadata.includes, vec!["compareArray.js"]);
+    assert_eq!(
+        metadata
+            .negative
+            .as_ref()
+            .and_then(|negative| negative.error_type.as_deref()),
+        Some("TypeError")
+    );
+}
+
+#[test]
+#[ignore = "long-running test262 sweep"]
+fn test262_core_profile() {
+    let suite_root = PathBuf::from(
+        std::env::var("TEST262_DIR").unwrap_or_else(|_| DEFAULT_TEST262_DIR.to_string()),
+    );
+    let test_root = suite_root.join("test");
+    let harness_root = suite_root.join("harness");
+
+    if !test_root.exists() || !harness_root.exists() {
+        eprintln!(
+            "test262 suite not found. Set TEST262_DIR or run ./run_test262.sh to fetch it first."
+        );
+        return;
+    }
+
+    let harness = HarnessCache::load(&harness_root);
+    let cases = discover_cases(&test_root);
+
+    let mut total = 0usize;
+    let mut executed = 0usize;
+    let mut passed = 0usize;
+    let mut skipped = 0usize;
+    let mut skip_reasons = BTreeMap::<String, usize>::new();
+    let mut samples = Vec::new();
+
+    for (index, case) in cases.iter().enumerate() {
+        total += 1;
+        let result = run_case(case, &harness, &suite_root);
+        match result.outcome {
+            Outcome::Passed => {
+                executed += 1;
+                passed += 1;
+            }
+            Outcome::Failed => {
+                executed += 1;
+                if samples.len() < SAMPLE_LIMIT {
+                    let detail = result.reason.unwrap_or_else(|| "failed".to_string());
+                    samples.push(format!("{} ({detail})", case.path.display()));
+                }
+            }
+            Outcome::Skipped => {
+                skipped += 1;
+                if let Some(reason) = result.reason {
+                    *skip_reasons.entry(reason).or_default() += 1;
+                }
+            }
+        }
+
+        if (index + 1) % PROGRESS_INTERVAL == 0 {
+            let current_pass_rate = passed as f64 / total as f64 * 100.0;
+            eprintln!(
+                "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
+                index + 1,
+                cases.len(),
+                passed,
+                skipped,
+                current_pass_rate
+            );
+        }
+    }
+
+    let total_pass_rate = if total == 0 {
+        0.0
+    } else {
+        passed as f64 / total as f64 * 100.0
+    };
+    let executed_pass_rate = if executed == 0 {
+        0.0
+    } else {
+        passed as f64 / executed as f64 * 100.0
+    };
+
+    println!("Total cases: {total}");
+    println!("Executed: {executed}");
+    println!("Passed: {passed}");
+    println!("Skipped: {skipped}");
+    println!("Total pass rate: {total_pass_rate:.2}%");
+    println!("Executed pass rate: {executed_pass_rate:.2}%");
+    if !skip_reasons.is_empty() {
+        println!("Skip reasons:");
+        for (reason, count) in skip_reasons {
+            println!("  {reason}: {count}");
+        }
+    }
+    if !samples.is_empty() {
+        println!("Sample failures:");
+        for sample in samples {
+            println!("  {sample}");
+        }
+    }
+
+    assert!(
+        total_pass_rate >= 60.0,
+        "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
+    );
 }

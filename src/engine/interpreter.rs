@@ -148,7 +148,7 @@ impl Interpreter {
                 
                 final_val
             }
-            Statement::FunctionDeclaration(func) => {
+            Statement::FunctionDeclaration(_func) => {
                 // A very simplified function representation via Environment.
                 // We will store AST nodes in Environment instead in later patches, for now skip.
                 Ok(JsValue::Undefined)
@@ -240,19 +240,19 @@ impl Interpreter {
                     UnaryOperator::Delete => Ok(JsValue::Boolean(true)), // Stub for now
                 }
             }
-            Expression::ArrayExpression(elements) => {
+            Expression::ArrayExpression(_elements) => {
                 // Return dummy array for now. Proper Array needs object/heap management.
                 Ok(JsValue::Undefined)
             }
-            Expression::ObjectExpression(properties) => {
+            Expression::ObjectExpression(_properties) => {
                 // Return dummy object
                 Ok(JsValue::Undefined)
             }
-            Expression::MemberExpression(mem) => {
+            Expression::MemberExpression(_mem) => {
                 // Stub
                 Ok(JsValue::Undefined)
             }
-            Expression::CallExpression(call) => {
+            Expression::CallExpression(_call) => {
                 // Stub
                 Ok(JsValue::Undefined)
             }
@@ -272,7 +272,7 @@ impl Interpreter {
             }
             Expression::ArrowFunctionExpression(_) => { Ok(JsValue::Undefined) }
             Expression::ClassExpression(_) => { Ok(JsValue::Undefined) }
-            Expression::FunctionExpression(func) => {
+            Expression::FunctionExpression(_func) => {
                 Ok(JsValue::Undefined)
             }
             Expression::ThisExpression => {
@@ -293,7 +293,7 @@ impl Interpreter {
                     self.eval_expression(alternate, env.clone())
                 }
             }
-            Expression::NewExpression(new_exp) => {
+            Expression::NewExpression(_new_exp) => {
                 Ok(JsValue::Undefined)
             }
         }
@@ -305,4 +305,3 @@ impl Drop for Interpreter {
         self.global_env.borrow_mut().variables.clear();
     }
 }
-

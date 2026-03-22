@@ -262,7 +262,7 @@ impl<'a> Parser<'a> {
             };
 
             let init = if self.current_token == Some(Token::Assign) || self.current_token == Some(Token::PlusAssign) || self.current_token == Some(Token::MinusAssign) || self.current_token == Some(Token::MultiplyAssign) || self.current_token == Some(Token::DivideAssign) || self.current_token == Some(Token::PercentAssign) {
-            let operator = match self.current_token.clone().unwrap() {
+            let _operator = match self.current_token.clone().unwrap() {
                 Token::PlusAssign => AssignmentOperator::PlusAssign,
                 Token::MinusAssign => AssignmentOperator::MinusAssign,
                 Token::MultiplyAssign => AssignmentOperator::MultiplyAssign,
@@ -324,7 +324,7 @@ impl<'a> Parser<'a> {
         let left = self.parse_conditional_expression()?;
         
         if self.current_token == Some(Token::Assign) || self.current_token == Some(Token::PlusAssign) || self.current_token == Some(Token::MinusAssign) || self.current_token == Some(Token::MultiplyAssign) || self.current_token == Some(Token::DivideAssign) || self.current_token == Some(Token::PercentAssign) {
-            let operator = match self.current_token.clone().unwrap() {
+            let _operator = match self.current_token.clone().unwrap() {
                 Token::PlusAssign => AssignmentOperator::PlusAssign,
                 Token::MinusAssign => AssignmentOperator::MinusAssign,
                 Token::MultiplyAssign => AssignmentOperator::MultiplyAssign,

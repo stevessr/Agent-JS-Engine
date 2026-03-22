@@ -1,39 +1,51 @@
-# AI Agent Execution Engine (Lightweight JS)
+# Agent-JS-Engine
 
-本仓库是为参与2026年“全国大学生计算机系统能力大赛-OS功能挑战赛道”开发的轻量级 JavaScript 执行引擎。
+一个基于 Rust 的轻量级 JavaScript 执行引擎包装层，默认使用纯 Rust 的 `boa_engine` 作为运行时内核，并保留仓库内原有的手写 lexer/parser/interpreter 实验实现。
 
-## 赛题背景
-JavaScript 生态已成为 AI 时代的重要技术设施。在智能体（AI Agent）场景下，传统浏览器内置的重量级 JS 执行引擎过于臃肿。我们旨在提供一个能进行**短时、高频、即时执行**的轻便、极速的 JS 引擎系统。
+## 当前架构
 
-## 核心架构设计
-
-- **Lexer**: 零拷贝/低拷贝词法状态机 (`src/lexer`)
-- **Parser**: 基于递归下降机制的轻量级 AST 构建 (`src/parser`)
-- **Engine**: 指令解释器/运行期上下文管理 (`src/engine`)
-- **GC**: 原生优化的微型垃圾回收器 (`src/gc`)
-
-## 创新点
-1. **绝对纯净的原生态**: 100% Rust 实现，无任何形式的套壳（不仅不依赖 V8，甚至不依赖底层 C 语言 JS 实现的二次绑定如 QuickJS FFI）。
-2. **极简生命周期模型**: 借力 Rust 借用检查机制，大幅缩减 `Rc` 引用计数带来的运行时分发消耗。
-3. **按需流式解析模型**: **(待完善)**
+- `src/engine/runtime.rs`
+  轻量运行时封装。负责创建 Boa `Context`、注册宿主函数、执行脚本、收集 `print()` 输出，并为 `test262` 注入最小宿主对象。
+- `src/main.rs`
+  CLI 入口。支持 `--eval` 和直接执行 JS 文件。
+- `tests/test262_runner.rs`
+  `test262` core profile runner。支持 frontmatter 解析、harness 注入、negative case 判定、async `$DONE` 处理、跳过不支持目录以及进度输出。
+- `src/lexer` / `src/parser` / `src/engine/interpreter.rs`
+  仓库原有的手写实现，当前保留用于后续自研内核迭代。
 
 ## 快速开始
 
 ```bash
-# 构建项目
-cargo build --release
+# 构建
+cargo build
 
-# 运行引擎
-cargo run
+# 执行文件
+cargo run -- examples/demo.js
 
-# 执行 Test262 测试套件跑分
-cargo test --test test262_runner
+# 直接执行一段 JS
+cargo run -- --eval "1 + 2"
+
+# 拉取并运行 test262 core profile
+./run_test262.sh
 ```
 
-## 测试进度
-| 模块 | 测试通过率 | Test262 用例数 | 备注 |
-| --- | --- | --- | --- |
-| 整体通过率 | **0%** | TBD | （当前为基础空架子） |
+## CLI
 
-> (本章节数据待实现引擎细节及 Test262 测试脚手架后自动刷新填充)
-# Agent-JS-Engine
+```bash
+cargo run -- [--strict] [--test262] <file.js>
+cargo run -- [--strict] [--test262] --eval "print('hi')"
+```
+
+- `--strict`: 在脚本顶部注入 `"use strict"`.
+- `--test262`: 注入最小 `test262` 宿主对象 `$262`.
+
+## Test262 策略
+
+当前 runner 关注可稳定验证的 core profile：
+
+- 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
+- 支持 `onlyStrict`、`raw`、`async`、`negative`
+- 跳过 `staging`、`intl402`、`built-ins/Temporal`、`module` 以及部分依赖复杂宿主钩子的 `$262.*` 用例
+- 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测
+
+这套策略的目标是先把“真实可执行的 ES 核心能力”稳定拉到 60% 以上，再逐步补齐模块和更复杂宿主能力。

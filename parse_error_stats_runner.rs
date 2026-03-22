@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
 use ai_agent::engine::Interpreter;

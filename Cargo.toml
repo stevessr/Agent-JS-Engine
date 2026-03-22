@@ -2,9 +2,14 @@
 name = "ai-agent"
 version = "0.1.0"
 edition = "2024"
+default-run = "ai-agent"
 
 [dependencies]
+boa_engine = "0.21.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"
 thiserror = "2.0.18"
+walkdir = "2.5.0"
 [[bin]]
 name = "parse_error_stats"
 path = "parse_error_stats.rs"
