@@ -53,6 +53,12 @@ static STATIC_SOURCE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static source-phase import regex must compile")
 });
+static STATIC_DEFER_NAMESPACE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)import\s+defer\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+(['"])([^'"]+)(['"])(?:\s+with\s*\{\s*\})?\s*;?"#,
+    )
+    .expect("static import-defer namespace regex must compile")
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ModuleResourceKind {
@@ -512,9 +518,16 @@ fn finalize_script_source(source: &str, strict: bool, source_path: Option<&Path>
 fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> String {
     let source = rewrite_static_import_attributes(source);
     let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
+    let (source, rewrote_import_defer_calls) = rewrite_dynamic_import_defer_calls(&source);
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
-    if rewrote_dynamic_imports || rewrote_import_source_calls || rewrote_static_source_imports {
+    let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
+    if rewrote_dynamic_imports
+        || rewrote_import_defer_calls
+        || rewrote_import_source_calls
+        || rewrote_static_source_imports
+        || rewrote_static_defer_imports
+    {
         format!("{}\n{source}", build_import_compat_helper(source_path))
     } else {
         source
@@ -566,6 +579,14 @@ const __agentjs_import__ = function(specifier, options) {{
       specifier = String(specifier) + "{IMPORT_RESOURCE_MARKER}" + resourceType;
     }}
 
+    return import(specifier);
+  }} catch (error) {{
+    return Promise.reject(error);
+  }}
+}};
+const __agentjs_import_defer__ = function(specifier) {{
+  try {{
+    specifier = String(specifier);
     return import(specifier);
   }} catch (error) {{
     return Promise.reject(error);
@@ -692,6 +713,45 @@ fn rewrite_dynamic_import_source_calls(source: &str) -> (String, bool) {
     (rewritten, true)
 }
 
+fn rewrite_dynamic_import_defer_calls(source: &str) -> (String, bool) {
+    let bytes = source.as_bytes();
+    let mut rewritten = String::with_capacity(source.len());
+    let mut changed = false;
+    let mut i = 0;
+    let mut last = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_js_string(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i = skip_line_comment(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i = skip_block_comment(bytes, i);
+            }
+            b'i' if matches_dynamic_import_defer(bytes, i) => {
+                rewritten.push_str(&source[last..i]);
+                rewritten.push_str("__agentjs_import_defer__");
+                i += "import.defer".len();
+                last = i;
+                changed = true;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    if !changed {
+        return (source.to_string(), false);
+    }
+
+    rewritten.push_str(&source[last..]);
+    (rewritten, true)
+}
+
 fn rewrite_static_source_phase_imports(source: &str) -> (String, bool) {
     let mut changed = false;
     let rewritten = STATIC_SOURCE_IMPORT_RE.replace_all(source, |captures: &Captures<'_>| {
@@ -711,6 +771,26 @@ fn rewrite_static_source_phase_imports(source: &str) -> (String, bool) {
     (rewritten.into_owned(), changed)
 }
 
+fn rewrite_static_defer_namespace_imports(source: &str) -> (String, bool) {
+    let mut changed = false;
+    let rewritten =
+        STATIC_DEFER_NAMESPACE_IMPORT_RE.replace_all(source, |captures: &Captures<'_>| {
+            changed = true;
+            let binding = captures
+                .get(1)
+                .expect("binding capture is required")
+                .as_str();
+            let quote = captures.get(2).expect("quote capture is required").as_str();
+            let specifier = captures
+                .get(3)
+                .expect("specifier capture is required")
+                .as_str();
+            format!("import * as {binding} from {quote}{specifier}{quote};")
+        });
+
+    (rewritten.into_owned(), changed)
+}
+
 fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
     const IMPORT: &[u8] = b"import";
     if bytes.len() < start + IMPORT.len() || &bytes[start..start + IMPORT.len()] != IMPORT {
@@ -724,6 +804,25 @@ fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
     }
 
     let mut cursor = start + IMPORT.len();
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    bytes.get(cursor) == Some(&b'(')
+}
+
+fn matches_dynamic_import_defer(bytes: &[u8], start: usize) -> bool {
+    const IMPORT_DEFER: &[u8] = b"import.defer";
+    if bytes.len() < start + IMPORT_DEFER.len()
+        || &bytes[start..start + IMPORT_DEFER.len()] != IMPORT_DEFER
+    {
+        return false;
+    }
+    if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+
+    let mut cursor = start + IMPORT_DEFER.len();
     while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }

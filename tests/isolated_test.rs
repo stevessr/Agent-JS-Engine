@@ -191,6 +191,66 @@ fn engine_accepts_static_source_phase_import_syntax() {
 }
 
 #[test]
+fn engine_supports_dynamic_import_defer_abrupt_rejects() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.js");
+    fs::write(
+        &entry_path,
+        r#"
+        const obj = {
+          toString() {
+            throw "custom error";
+          }
+        };
+
+        import.defer(obj).catch((error) => print(String(error)));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_script_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["custom error".to_string()]);
+}
+
+#[test]
+fn engine_supports_static_import_defer_namespace_syntax() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    let module_path = temp_root.join("dep.mjs");
+    fs::write(&module_path, "export const value = 41;").unwrap();
+    fs::write(
+        &entry_path,
+        "import defer * as ns from './dep.mjs' with { };\nprint(String(ns.value + 1));",
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["42".to_string()]);
+}
+
+#[test]
 fn engine_enforces_immutable_array_buffer_wrappers() {
     let engine = JsEngine::new();
     let output = engine

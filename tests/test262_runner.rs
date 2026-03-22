@@ -179,9 +179,41 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
 
 fn supports_feature_case(relative: &Path, feature: &str) -> bool {
     match feature {
+        "import-defer" => supports_import_defer_case(relative),
         "source-phase-imports" => supports_source_phase_import_case(relative),
         _ => false,
     }
+}
+
+fn supports_import_defer_case(relative: &Path) -> bool {
+    is_import_defer_dynamic_catch_case(relative)
+        || is_import_defer_dynamic_valid_syntax_case(relative)
+        || is_import_defer_static_syntax_case(relative)
+}
+
+fn is_import_defer_dynamic_catch_case(relative: &Path) -> bool {
+    relative.starts_with("test/language/expressions/dynamic-import/catch")
+        && relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.contains("import-defer-specifier-tostring-abrupt-rejects"))
+}
+
+fn is_import_defer_dynamic_valid_syntax_case(relative: &Path) -> bool {
+    relative.starts_with("test/language/expressions/dynamic-import/syntax/valid")
+        && relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.contains("import-defer"))
+}
+
+fn is_import_defer_static_syntax_case(relative: &Path) -> bool {
+    matches!(
+        relative,
+        path if path == Path::new("test/language/import/import-defer/syntax/valid-defer-namespace.js")
+            || path == Path::new("test/language/import/import-defer/syntax/valid-default-binding-named-defer.js")
+            || path == Path::new("test/language/import/import-defer/syntax/import-attributes.js")
+    ) || relative.starts_with("test/language/import/import-defer/errors/syntax-error")
 }
 
 fn supports_source_phase_import_case(relative: &Path) -> bool {
