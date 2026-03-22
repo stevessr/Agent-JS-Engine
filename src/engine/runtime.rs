@@ -900,6 +900,22 @@ fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
     bytes.get(cursor) == Some(&b'(')
 }
 
+fn is_preceded_by_new(bytes: &[u8], start: usize) -> bool {
+    if start == 0 {
+        return false;
+    }
+    let mut cursor = start - 1;
+    while cursor > 0 && bytes[cursor].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor >= 2 && &bytes[cursor - 2..=cursor] == b"new" {
+        if cursor - 2 == 0 || !is_identifier_byte(bytes[cursor - 3]) {
+            return true;
+        }
+    }
+    false
+}
+
 fn matches_dynamic_import_defer(bytes: &[u8], start: usize) -> bool {
     const IMPORT_DEFER: &[u8] = b"import.defer";
     if bytes.len() < start + IMPORT_DEFER.len()
@@ -908,6 +924,9 @@ fn matches_dynamic_import_defer(bytes: &[u8], start: usize) -> bool {
         return false;
     }
     if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+    if is_preceded_by_new(bytes, start) {
         return false;
     }
 
@@ -940,6 +959,9 @@ fn matches_dynamic_import_source(bytes: &[u8], start: usize) -> bool {
         return false;
     }
     if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+    if is_preceded_by_new(bytes, start) {
         return false;
     }
 
@@ -1482,8 +1504,61 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
     install_data_view_immutable_hooks(context)?;
+    install_reg_exp_legacy_accessors(context)?;
     Ok(())
 }
+
+fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
+    let regexp_ctor = context.intrinsics().constructors().reg_exp().constructor();
+
+    for i in 1..=9 {
+        let name = format!("${}", i);
+        let getter = build_builtin_function(
+            context,
+            js_string!(format!("get {}", name)),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(BoaValue::from(js_string!("")))),
+        );
+        regexp_ctor.define_property_or_throw(
+            js_string!(name),
+            PropertyDescriptor::builder()
+                .get(getter)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
+
+    let static_props = [
+        ("input", "$_"),
+        ("lastMatch", "$&"),
+        ("lastParen", "$+"),
+        ("leftContext", "$`"),
+        ("rightContext", "$'"),
+    ];
+
+    for (full, short) in static_props {
+        let getter = build_builtin_function(
+            context,
+            js_string!(format!("get {}", full)),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| Ok(BoaValue::from(js_string!("")))),
+        );
+        for name in [full, short] {
+            regexp_ctor.define_property_or_throw(
+                js_string!(name),
+                PropertyDescriptor::builder()
+                    .get(getter.clone())
+                    .enumerable(false)
+                    .configurable(true),
+                context,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
 
 fn install_array_buffer_detached_getter(context: &mut Context) -> boa_engine::JsResult<()> {
     let prototype = context
