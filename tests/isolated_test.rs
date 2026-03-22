@@ -100,6 +100,69 @@ fn engine_supports_static_text_module_imports() {
 }
 
 #[test]
+fn engine_supports_static_bytes_module_imports() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    let bytes_path = temp_root.join("value.bin");
+    fs::write(&bytes_path, [0_u8, 1, 2, 3]).unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import value from './value.bin' with { type: 'bytes' };
+        print(String(value instanceof Uint8Array));
+        print(String(value.buffer.immutable));
+        print(String(Array.from(value).join(',')));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "true".to_string(),
+            "true".to_string(),
+            "0,1,2,3".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn engine_enforces_immutable_array_buffer_wrappers() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const immutable = new ArrayBuffer(8).transferToImmutable();
+            const view = new DataView(immutable);
+
+            let resizeThrows = false;
+            let transferThrows = false;
+            let setThrows = false;
+            try { immutable.resize(0); } catch (error) { resizeThrows = error instanceof TypeError; }
+            try { immutable.transfer(); } catch (error) { transferThrows = error instanceof TypeError; }
+            try { view.setUint8(0, 1); } catch (error) { setThrows = error instanceof TypeError; }
+
+            immutable.immutable && resizeThrows && transferThrows && setThrows;
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
+}
+
+#[test]
 fn engine_bootstraps_abstract_module_source_for_test262() {
     let engine = JsEngine::new();
     let output = engine

@@ -46,15 +46,20 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 
 - 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
 - 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()`、`$262.agent` 和 `$262.AbstractModuleSource`
-- 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`
+- 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`
+- 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
-- 跳过 `staging`、`intl402`、`built-ins/Temporal` 以及暂未落地的 `import-defer` / `source-phase-imports` 语法主体 / `import-bytes`
+- 跳过 `staging`、`intl402`、`built-ins/Temporal` 以及暂未落地的 `import-defer` / `source-phase-imports` 语法主体
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测
 
 已验证样本：
 
 - `test/language/import/import-attributes/`: `17 / 17` 通过
 - `test/language/expressions/dynamic-import/import-attributes/`: `23 / 23` 通过
+- `test/language/import/import-bytes/`: `5 / 5` 通过
 - `test/built-ins/AbstractModuleSource/`: `8 / 8` 通过
+- immutable `ArrayBuffer` 相关 20 个样本：`20 / 20` 通过
+- `test/built-ins/ArrayBuffer/prototype/transfer/`: `24 / 24` 通过
+- `test/built-ins/ArrayBuffer/prototype/transferToFixedLength/`: `24 / 24` 通过
 
 这套策略的目标是先把“真实可执行的 ES 核心能力”稳定拉到 60% 以上，再逐步补齐剩余高级模块语义和宿主能力。

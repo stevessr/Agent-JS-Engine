@@ -2,7 +2,7 @@ use ai_agent::engine::{EngineError, EvalOptions, JsEngine};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -10,11 +10,7 @@ const DEFAULT_TEST262_DIR: &str = "test262";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
-const UNSUPPORTED_FEATURES: &[&str] = &[
-    "source-phase-imports",
-    "import-bytes",
-    "import-defer",
-];
+const UNSUPPORTED_FEATURES: &[&str] = &["source-phase-imports", "import-defer"];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Test262Metadata {
@@ -187,15 +183,13 @@ fn supports_feature_case(relative: &Path, feature: &str) -> bool {
 }
 
 fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) -> bool {
-    if metadata.has_feature("import-bytes")
-        || metadata.has_feature("source-phase-imports")
-        || metadata.has_feature("import-defer")
-    {
+    if metadata.has_feature("source-phase-imports") || metadata.has_feature("import-defer") {
         return false;
     }
 
     relative.starts_with("test/language/expressions/dynamic-import")
         || relative.starts_with("test/language/import/import-attributes")
+        || relative.starts_with("test/language/import/import-bytes")
 }
 
 fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
