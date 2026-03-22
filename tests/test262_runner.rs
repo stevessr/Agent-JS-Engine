@@ -185,86 +185,12 @@ fn supports_feature_case(relative: &Path, feature: &str) -> bool {
     }
 }
 
-fn supports_import_defer_case(relative: &Path) -> bool {
-    is_import_defer_dynamic_catch_case(relative)
-        || is_import_defer_dynamic_valid_syntax_case(relative)
-        || is_import_defer_dynamic_sync_case(relative)
-        || is_import_defer_static_syntax_case(relative)
-        || relative.starts_with("test/language/import/import-defer/deferred-namespace-object")
-        || supports_import_defer_evaluation_trigger_case(relative)
-        || relative.starts_with("test/language/import/import-defer/evaluation-sync")
-        || relative.starts_with("test/language/import/import-defer/errors/module-throws")
-        || relative
-            == Path::new("test/language/import/import-defer/errors/get-self-while-evaluating.js")
-        || relative
-            .starts_with("test/language/import/import-defer/errors/get-other-while-evaluating")
-        || relative
-            .starts_with("test/language/import/import-defer/errors/get-self-while-defer-evaluating")
-        || relative
-            .starts_with("test/language/import/import-defer/errors/get-other-while-dep-evaluating")
+fn supports_import_defer_case(_relative: &Path) -> bool {
+    true
 }
 
-fn is_import_defer_dynamic_catch_case(relative: &Path) -> bool {
-    relative.starts_with("test/language/expressions/dynamic-import/catch")
-        && relative
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.contains("import-defer-specifier-tostring-abrupt-rejects"))
-}
-
-fn is_import_defer_dynamic_valid_syntax_case(relative: &Path) -> bool {
-    relative.starts_with("test/language/expressions/dynamic-import/syntax/valid")
-        && relative
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.contains("import-defer"))
-}
-
-fn is_import_defer_static_syntax_case(relative: &Path) -> bool {
-    relative.starts_with("test/language/import/import-defer/syntax")
-        || relative.starts_with("test/language/import/import-defer/errors/resolution-error")
-        || relative.starts_with("test/language/import/import-defer/errors/syntax-error")
-}
-
-fn is_import_defer_dynamic_sync_case(relative: &Path) -> bool {
-    relative.starts_with("test/language/expressions/dynamic-import/import-defer/sync")
-}
-
-fn supports_import_defer_evaluation_trigger_case(relative: &Path) -> bool {
-    if !relative.starts_with("test/language/import/import-defer/evaluation-triggers") {
-        return false;
-    }
-
-    !matches!(
-        relative,
-        path if path
-            == Path::new(
-                "test/language/import/import-defer/evaluation-triggers/ignore-private-name-access.js"
-            )
-            || path
-                == Path::new(
-                    "test/language/import/import-defer/evaluation-triggers/ignore-super-property-set-exported.js"
-                )
-            || path
-                == Path::new(
-                    "test/language/import/import-defer/evaluation-triggers/ignore-super-property-set-not-exported.js"
-                )
-    )
-}
-
-fn supports_source_phase_import_case(relative: &Path) -> bool {
-    relative.starts_with("test/built-ins/AbstractModuleSource")
-        || relative == Path::new("test/language/module-code/source-phase-import/import-source.js")
-        || relative.starts_with("test/language/expressions/dynamic-import/catch")
-        || is_valid_dynamic_import_source_syntax_case(relative)
-}
-
-fn is_valid_dynamic_import_source_syntax_case(relative: &Path) -> bool {
-    relative.starts_with("test/language/expressions/dynamic-import/syntax/valid")
-        && relative
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.contains("import-source"))
+fn supports_source_phase_import_case(_relative: &Path) -> bool {
+    true
 }
 
 fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) -> bool {
@@ -364,9 +290,9 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
         }
     };
 
-    let outcome = match (&case.metadata.negative, result) {
+    let outcome = match (&case.metadata.negative, &result) {
         (Some(negative), Err(error)) => {
-            if expected_error_matches(negative.error_type.as_deref(), &error) {
+            if expected_error_matches(negative.error_type.as_deref(), error) {
                 Outcome::Passed
             } else {
                 Outcome::Failed
@@ -395,7 +321,13 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
     CaseResult {
         outcome,
         reason: match outcome {
-            Outcome::Failed => Some("assertion or runtime mismatch".to_string()),
+            Outcome::Failed => {
+                let actual = match &result {
+                    Ok(out) => format!("Ok: {:?}", out.value),
+                    Err(err) => format!("Err: {err}"),
+                };
+                Some(format!("assertion or runtime mismatch (actual: {actual})"))
+            }
             _ => None,
         },
     }

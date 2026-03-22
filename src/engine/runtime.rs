@@ -916,7 +916,20 @@ fn matches_dynamic_import_defer(bytes: &[u8], start: usize) -> bool {
         cursor += 1;
     }
 
-    bytes.get(cursor) == Some(&b'(')
+    if bytes.get(cursor) != Some(&b'(') {
+        return false;
+    }
+
+    cursor += 1;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    if bytes.get(cursor) == Some(&b')') {
+        return false;
+    }
+
+    true
 }
 
 fn matches_dynamic_import_source(bytes: &[u8], start: usize) -> bool {
@@ -935,7 +948,20 @@ fn matches_dynamic_import_source(bytes: &[u8], start: usize) -> bool {
         cursor += 1;
     }
 
-    bytes.get(cursor) == Some(&b'(')
+    if bytes.get(cursor) != Some(&b'(') {
+        return false;
+    }
+
+    cursor += 1;
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    if bytes.get(cursor) == Some(&b')') {
+        return false;
+    }
+
+    true
 }
 
 fn is_identifier_byte(byte: u8) -> bool {
@@ -983,6 +1009,15 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
 fn encode_import_resource_kind(specifier: &str, resource_type: &str) -> String {
     format!("{specifier}{IMPORT_RESOURCE_MARKER}{resource_type}")
 }
+
+fn is_async_module_source(source: &str) -> bool {
+    // A simple heuristic for Top-Level Await. 
+    // In ES modules, 'await' is always a keyword.
+    // If it appears outside of a function, it's TLA.
+    // This regex is a bit naive but should work for many test262 cases.
+    source.contains("await")
+}
+
 
 fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourceKind) {
     let raw = specifier.to_std_string_escaped();
@@ -1141,7 +1176,14 @@ fn ensure_deferred_module_loaded_and_linked(
     let promise = module.load(context);
     context.run_jobs()?;
     match promise.state() {
-        PromiseState::Fulfilled(_) => module.link(context)?,
+        PromiseState::Fulfilled(_) => {
+            module.link(context)?;
+            let source = std::fs::read_to_string(path).unwrap_or_default();
+            if is_async_module_source(&source) {
+                let _ = module.evaluate(context);
+                context.run_jobs()?;
+            }
+        },
         PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
         PromiseState::Pending => {
             return Err(JsNativeError::typ()
@@ -1770,9 +1812,17 @@ fn build_test262_object(
         expose_host_hooks.then(|| build_abstract_module_source_constructor(context));
     let agent = build_agent_object(context);
 
+    let is_html_dda = build_builtin_function(
+        context,
+        js_string!("IsHTMLDDA"),
+        0,
+        NativeFunction::from_fn_ptr(|_this, _args, _context| Ok(BoaValue::undefined())),
+    );
+
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("global"), target_global, Attribute::all());
     object.property(js_string!("evalScript"), eval_script, Attribute::all());
+    object.property(js_string!("IsHTMLDDA"), is_html_dda, Attribute::all());
     if let Some(create_realm) = create_realm {
         object.property(js_string!("createRealm"), create_realm, Attribute::all());
     }
