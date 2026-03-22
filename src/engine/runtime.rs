@@ -11,7 +11,7 @@ use boa_engine::{
     property::{Attribute, PropertyDescriptor},
     realm::Realm,
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString,
-    JsValue as BoaValue, Module, NativeFunction, Source, Trace,
+    JsSymbol, JsValue as BoaValue, Module, NativeFunction, Source, Trace,
 };
 use boa_engine::module::SyntheticModuleInitializer;
 use regex::{Captures, Regex};
@@ -918,6 +918,8 @@ fn build_test262_object(
             NativeFunction::from_fn_ptr(host_detach_array_buffer),
         )
     });
+    let abstract_module_source =
+        expose_host_hooks.then(|| build_abstract_module_source_constructor(context));
     let agent = build_agent_object(context);
 
     let mut object = ObjectInitializer::new(context);
@@ -930,6 +932,13 @@ fn build_test262_object(
         object.property(
             js_string!("detachArrayBuffer"),
             detach_array_buffer,
+            Attribute::all(),
+        );
+    }
+    if let Some(abstract_module_source) = abstract_module_source {
+        object.property(
+            js_string!("AbstractModuleSource"),
+            abstract_module_source,
             Attribute::all(),
         );
     }
@@ -1047,6 +1056,59 @@ fn build_builtin_function(
         .constructor(false)
         .build()
         .into()
+}
+
+fn build_abstract_module_source_constructor(context: &mut Context) -> JsObject {
+    let constructor = build_builtin_function(
+        context,
+        js_string!("AbstractModuleSource"),
+        0,
+        NativeFunction::from_fn_ptr(host_abstract_module_source_constructor),
+    );
+
+    let prototype = ObjectInitializer::new(context).build();
+    let to_string_tag = build_builtin_function(
+        context,
+        js_string!("get [Symbol.toStringTag]"),
+        0,
+        NativeFunction::from_fn_ptr(host_abstract_module_source_to_string_tag),
+    );
+
+    prototype
+        .define_property_or_throw(
+            js_string!("constructor"),
+            PropertyDescriptor::builder()
+                .value(constructor.clone())
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("AbstractModuleSource.prototype.constructor definition must succeed");
+    prototype
+        .define_property_or_throw(
+            JsSymbol::to_string_tag(),
+            PropertyDescriptor::builder()
+                .get(to_string_tag)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("AbstractModuleSource.prototype[@@toStringTag] definition must succeed");
+
+    constructor
+        .define_property_or_throw(
+            js_string!("prototype"),
+            PropertyDescriptor::builder()
+                .value(prototype)
+                .writable(false)
+                .enumerable(false)
+                .configurable(false),
+            context,
+        )
+        .expect("AbstractModuleSource.prototype definition must succeed");
+
+    constructor
 }
 
 fn ensure_agent_runtime(context: &mut Context) -> Arc<AgentRuntime> {
@@ -1196,6 +1258,24 @@ fn host_array_buffer_detached_getter(
             .with_message("get ArrayBuffer.prototype.detached called with invalid `this`")
     })?;
     Ok(buffer.data().is_none().into())
+}
+
+fn host_abstract_module_source_constructor(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Err(JsNativeError::typ()
+        .with_message("%AbstractModuleSource% constructor cannot be invoked directly")
+        .into())
+}
+
+fn host_abstract_module_source_to_string_tag(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(BoaValue::undefined())
 }
 
 fn host_agent_start(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {

@@ -100,6 +100,48 @@ fn engine_supports_static_text_module_imports() {
 }
 
 #[test]
+fn engine_bootstraps_abstract_module_source_for_test262() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            const ctor = $262.AbstractModuleSource;
+            const prototypeDescriptor = Object.getOwnPropertyDescriptor(ctor, 'prototype');
+            const tagDescriptor = Object.getOwnPropertyDescriptor(
+              ctor.prototype,
+              Symbol.toStringTag
+            );
+
+            let throwsTypeError = false;
+            try {
+              new ctor();
+            } catch (error) {
+              throwsTypeError = error.constructor === TypeError;
+            }
+
+            typeof ctor === 'function' &&
+              Object.getPrototypeOf(ctor) === Function.prototype &&
+              Object.getPrototypeOf(ctor.prototype) === Object.prototype &&
+              prototypeDescriptor.writable === false &&
+              prototypeDescriptor.enumerable === false &&
+              prototypeDescriptor.configurable === false &&
+              tagDescriptor.enumerable === false &&
+              tagDescriptor.configurable === true &&
+              typeof tagDescriptor.get === 'function' &&
+              tagDescriptor.get.call(ctor.prototype) === undefined &&
+              throwsTypeError;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
+}
+
+#[test]
 fn engine_bootstraps_create_realm_for_test262() {
     let engine = JsEngine::new();
     let output = engine

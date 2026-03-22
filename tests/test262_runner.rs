@@ -169,7 +169,7 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         return Some("temporal");
     }
     for feature in UNSUPPORTED_FEATURES {
-        if case.metadata.has_feature(feature) {
+        if case.metadata.has_feature(feature) && !supports_feature_case(relative, feature) {
             return Some(feature);
         }
     }
@@ -179,6 +179,11 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         return Some("import-attributes");
     }
     None
+}
+
+fn supports_feature_case(relative: &Path, feature: &str) -> bool {
+    matches!(feature, "source-phase-imports")
+        && relative.starts_with("test/built-ins/AbstractModuleSource")
 }
 
 fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) -> bool {

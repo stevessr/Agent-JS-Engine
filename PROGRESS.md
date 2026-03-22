@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`；仍会跳过 `intl402`、`Temporal`、`staging` 和少数更重的高级模块扩展。
+- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`；仍会跳过 `intl402`、`Temporal`、`staging` 和少数更重的高级模块扩展。
 
 ## Completed Work
 
@@ -33,10 +33,12 @@
 9. 新增高级模块 smoke tests，并验证：
    - `test/language/import/import-attributes/`：`17 / 17` 通过
    - `test/language/expressions/dynamic-import/import-attributes/`：`23 / 23` 通过
+10. 补上 `$262.AbstractModuleSource` 宿主对象，放行不依赖新语法的 `source-phase-imports` built-ins 测试，并验证：
+   - `test/built-ins/AbstractModuleSource/`：`8 / 8` 通过
 
 ## Next Steps
 
 - [ ] 继续补剩余高级模块特性，如 `import-defer` / `source-phase-imports` / `import-bytes`。
-- [ ] 继续扩充其余 host hooks，例如 `gc` / `AbstractModuleSource` 等较少见的测试接口。
+- [ ] 继续扩充其余 host hooks，例如 `gc` 等较少见的测试接口。
 - [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。
