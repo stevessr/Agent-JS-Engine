@@ -208,12 +208,8 @@ fn is_import_defer_dynamic_valid_syntax_case(relative: &Path) -> bool {
 }
 
 fn is_import_defer_static_syntax_case(relative: &Path) -> bool {
-    matches!(
-        relative,
-        path if path == Path::new("test/language/import/import-defer/syntax/valid-defer-namespace.js")
-            || path == Path::new("test/language/import/import-defer/syntax/valid-default-binding-named-defer.js")
-            || path == Path::new("test/language/import/import-defer/syntax/import-attributes.js")
-    ) || relative.starts_with("test/language/import/import-defer/errors/syntax-error")
+    relative.starts_with("test/language/import/import-defer/syntax")
+        || relative.starts_with("test/language/import/import-defer/errors/syntax-error")
 }
 
 fn supports_source_phase_import_case(relative: &Path) -> bool {

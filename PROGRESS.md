@@ -57,9 +57,9 @@
 13. 扩充 `import-defer` 兼容子集：
    - 支持 `import.defer(...)` 兼容 helper，保留 `ToString(specifier)` 的 abrupt reject 行为
    - 支持最小静态 `import defer * as ns from ...` 语法降级，并兼容空 `with { }`
-   - runner 现在会放行 `import-defer` 的动态 catch、dynamic import valid syntax、静态 syntax 子集，以及 `syntax-error` 这类链接期失败 case
+   - runner 现在会放行 `import-defer` 的动态 catch、dynamic import valid syntax、整个静态 syntax 目录，以及 `syntax-error` 这类链接期失败 case
    - 验证：
-     - `TEST262_FILTER='import-defer'`：`62 / 62` 执行通过，`161` 个依赖真实 deferred semantics 的 case 继续跳过
+     - `TEST262_FILTER='import-defer'`：`68 / 68` 执行通过，`155` 个依赖真实 deferred semantics 的 case 继续跳过
      - `test/language/import/import-defer/errors/syntax-error/import-defer-of-syntax-error-fails.js`：`1 / 1` 通过
 
 ## Next Steps
