@@ -188,7 +188,20 @@ fn supports_feature_case(relative: &Path, feature: &str) -> bool {
 fn supports_import_defer_case(relative: &Path) -> bool {
     is_import_defer_dynamic_catch_case(relative)
         || is_import_defer_dynamic_valid_syntax_case(relative)
+        || is_import_defer_dynamic_sync_case(relative)
         || is_import_defer_static_syntax_case(relative)
+        || relative.starts_with("test/language/import/import-defer/deferred-namespace-object")
+        || supports_import_defer_evaluation_trigger_case(relative)
+        || relative.starts_with("test/language/import/import-defer/evaluation-sync")
+        || relative.starts_with("test/language/import/import-defer/errors/module-throws")
+        || relative
+            == Path::new("test/language/import/import-defer/errors/get-self-while-evaluating.js")
+        || relative
+            .starts_with("test/language/import/import-defer/errors/get-other-while-evaluating")
+        || relative
+            .starts_with("test/language/import/import-defer/errors/get-self-while-defer-evaluating")
+        || relative
+            .starts_with("test/language/import/import-defer/errors/get-other-while-dep-evaluating")
 }
 
 fn is_import_defer_dynamic_catch_case(relative: &Path) -> bool {
@@ -209,7 +222,34 @@ fn is_import_defer_dynamic_valid_syntax_case(relative: &Path) -> bool {
 
 fn is_import_defer_static_syntax_case(relative: &Path) -> bool {
     relative.starts_with("test/language/import/import-defer/syntax")
+        || relative.starts_with("test/language/import/import-defer/errors/resolution-error")
         || relative.starts_with("test/language/import/import-defer/errors/syntax-error")
+}
+
+fn is_import_defer_dynamic_sync_case(relative: &Path) -> bool {
+    relative.starts_with("test/language/expressions/dynamic-import/import-defer/sync")
+}
+
+fn supports_import_defer_evaluation_trigger_case(relative: &Path) -> bool {
+    if !relative.starts_with("test/language/import/import-defer/evaluation-triggers") {
+        return false;
+    }
+
+    !matches!(
+        relative,
+        path if path
+            == Path::new(
+                "test/language/import/import-defer/evaluation-triggers/ignore-private-name-access.js"
+            )
+            || path
+                == Path::new(
+                    "test/language/import/import-defer/evaluation-triggers/ignore-super-property-set-exported.js"
+                )
+            || path
+                == Path::new(
+                    "test/language/import/import-defer/evaluation-triggers/ignore-super-property-set-not-exported.js"
+                )
+    )
 }
 
 fn supports_source_phase_import_case(relative: &Path) -> bool {
@@ -269,6 +309,10 @@ fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
             combined.push_str(contents);
             combined.push('\n');
         }
+    }
+
+    if case.metadata.has_flag("async") && case.metadata.has_flag("module") {
+        combined.push_str("globalThis.$DONE = $DONE;\n");
     }
 
     combined.push_str(&case.source);
@@ -380,6 +424,32 @@ negative:
             .and_then(|negative| negative.error_type.as_deref()),
         Some("TypeError")
     );
+}
+
+#[test]
+fn async_module_source_exports_done_to_global() {
+    let case = TestCase {
+        path: PathBuf::from("sample.mjs"),
+        source: "asyncTest(async () => {});".to_string(),
+        metadata: Test262Metadata {
+            flags: vec!["module".to_string(), "async".to_string()],
+            ..Default::default()
+        },
+    };
+    let harness = HarnessCache {
+        files: HashMap::from([
+            ("sta.js".to_string(), String::new()),
+            ("assert.js".to_string(), String::new()),
+            (
+                "doneprintHandle.js".to_string(),
+                "function $DONE() {}".to_string(),
+            ),
+        ]),
+    };
+
+    let built = build_source(&case, &harness);
+
+    assert!(built.contains("globalThis.$DONE = $DONE;"));
 }
 
 #[test]

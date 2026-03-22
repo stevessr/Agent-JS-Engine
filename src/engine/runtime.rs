@@ -8,17 +8,18 @@ use boa_engine::{
     js_string,
     module::{ModuleLoader, Referrer, resolve_module_specifier},
     object::{
-        FunctionObjectBuilder, JsObject, ObjectInitializer,
-        builtins::{JsArrayBuffer, JsSharedArrayBuffer, JsUint8Array},
+        FunctionObjectBuilder, IntegrityLevel, JsObject, ObjectInitializer,
+        builtins::{JsArray, JsArrayBuffer, JsProxy, JsSharedArrayBuffer, JsUint8Array},
     },
-    property::{Attribute, PropertyDescriptor},
+    property::{Attribute, PropertyDescriptor, PropertyKey},
     realm::Realm,
 };
 use regex::{Captures, Regex};
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Cursor;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::LazyLock;
@@ -29,12 +30,14 @@ use std::time::{Duration, Instant};
 
 thread_local! {
     static PRINT_BUFFER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static DEFERRED_LOAD_GUARD: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
 }
+
+static PANIC_HOOK_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 const IMPORT_RESOURCE_MARKER: &str = "?__agentjs_type=";
 const SOURCE_PHASE_UNAVAILABLE_MESSAGE: &str =
     "source phase imports are not supported for source text modules";
-
 static STATIC_IMPORT_FROM_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?s)(from\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*type\s*:\s*(['"])(json|text|bytes)(['"])\s*\}"#,
@@ -59,10 +62,36 @@ static STATIC_DEFER_NAMESPACE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static import-defer namespace regex must compile")
 });
+static MODULE_IMPORT_FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^\s*import\s+(?:defer\s+\*\s+as\s+[A-Za-z_$][A-Za-z0-9_$]*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
+        .expect("module import-from regex must compile")
+});
+static MODULE_BARE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^\s*import\s+(['"])([^'"]+)(['"])"#)
+        .expect("module bare import regex must compile")
+});
+static MODULE_EXPORT_FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^\s*export\s+(?:\*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
+        .expect("module export-from regex must compile")
+});
+static MODULE_EXPORT_BINDING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)\bexport\s+(?:(?:default\s+)?async\s+function(?:\s*\*)?|default\s+function(?:\s*\*)?|function(?:\s*\*)?|default\s+class|class|const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)"#,
+    )
+    .expect("module export binding regex must compile")
+});
+static MODULE_EXPORT_LIST_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)\bexport\s*\{([^}]*)\}"#).expect("module export list regex must compile")
+});
+static MODULE_EXPORT_NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)\bexport\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+(['"])([^'"]+)(['"])"#)
+        .expect("module export namespace regex must compile")
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ModuleResourceKind {
     JavaScript,
+    Deferred,
     Json,
     Text,
     Bytes,
@@ -78,6 +107,46 @@ struct ModuleCacheKey {
 struct CompatModuleLoader {
     root: PathBuf,
     module_map: RefCell<HashMap<ModuleCacheKey, Module>>,
+}
+
+#[derive(Debug, Clone)]
+struct DeferredNamespaceTarget {
+    path: PathBuf,
+    exports: Vec<String>,
+}
+
+impl JsData for DeferredNamespaceTarget {}
+impl Finalize for DeferredNamespaceTarget {}
+
+// Safety: the target metadata only stores Rust-owned strings and paths.
+unsafe impl Trace for DeferredNamespaceTarget {
+    boa_engine::gc::empty_trace!();
+}
+
+#[derive(Debug)]
+struct DeferredLoadScope {
+    path: PathBuf,
+}
+
+impl DeferredLoadScope {
+    fn enter(path: &Path) -> Option<Self> {
+        let path = path.to_path_buf();
+        DEFERRED_LOAD_GUARD.with(|guard| {
+            let mut guard = guard.borrow_mut();
+            if !guard.insert(path.clone()) {
+                return None;
+            }
+            Some(Self { path })
+        })
+    }
+}
+
+impl Drop for DeferredLoadScope {
+    fn drop(&mut self) {
+        DEFERRED_LOAD_GUARD.with(|guard| {
+            guard.borrow_mut().remove(&self.path);
+        });
+    }
 }
 
 impl CompatModuleLoader {
@@ -127,6 +196,13 @@ impl ModuleLoader for CompatModuleLoader {
         )?;
 
         if let Some(module) = self.get(&path, kind) {
+            return Ok(module);
+        }
+
+        if kind == ModuleResourceKind::Deferred {
+            let module = load_deferred_namespace_module(&path, &mut context.borrow_mut())?;
+            self.insert(path.clone(), kind, module.clone());
+            ensure_deferred_module_loaded_and_linked(&path, &mut context.borrow_mut())?;
             return Ok(module);
         }
 
@@ -587,7 +663,16 @@ const __agentjs_import__ = function(specifier, options) {{
 const __agentjs_import_defer__ = function(specifier) {{
   try {{
     specifier = String(specifier);
-    return import(specifier);
+    const cachedNamespace = globalThis.__agentjs_get_cached_import__(
+      specifier,
+      "defer",
+      __agentjs_referrer__
+    );
+    if (cachedNamespace !== undefined) {{
+      return Promise.resolve(cachedNamespace);
+    }}
+    specifier = specifier + "{IMPORT_RESOURCE_MARKER}" + "defer";
+    return import(specifier).then((module) => module.default);
   }} catch (error) {{
     return Promise.reject(error);
   }}
@@ -785,7 +870,11 @@ fn rewrite_static_defer_namespace_imports(source: &str) -> (String, bool) {
                 .get(3)
                 .expect("specifier capture is required")
                 .as_str();
-            format!("import * as {binding} from {quote}{specifier}{quote};")
+            let temp_binding = format!("__agentjs_deferred_namespace__{binding}");
+            let rewritten = encode_import_resource_kind(specifier, "defer");
+            format!(
+                "import {temp_binding} from {quote}{rewritten}{quote}; const {binding} = {temp_binding};"
+            )
         });
 
     (rewritten.into_owned(), changed)
@@ -902,6 +991,7 @@ fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourc
     };
 
     let kind = match resource_type {
+        "defer" => ModuleResourceKind::Deferred,
         "json" => ModuleResourceKind::Json,
         "text" => ModuleResourceKind::Text,
         "bytes" => ModuleResourceKind::Bytes,
@@ -938,6 +1028,7 @@ fn load_module_from_path(
                     .into()
             })
         }
+        ModuleResourceKind::Deferred => load_deferred_namespace_module(path, context),
         ModuleResourceKind::Json => {
             let source = std::fs::read_to_string(path).map_err(|error| {
                 JsNativeError::typ()
@@ -1002,6 +1093,110 @@ fn load_module_from_path(
             ))
         }
     }
+}
+
+fn load_deferred_namespace_module(path: &Path, context: &mut Context) -> JsResult<Module> {
+    let proxy = build_deferred_namespace_proxy(path, context)?;
+
+    Ok(Module::synthetic(
+        &[js_string!("default")],
+        SyntheticModuleInitializer::from_copy_closure_with_captures(
+            |module, value, _context| {
+                module.set_export(&js_string!("default"), value.clone())?;
+                Ok(())
+            },
+            BoaValue::from(proxy),
+        ),
+        Some(path.to_path_buf()),
+        None,
+        context,
+    ))
+}
+
+fn ensure_deferred_module_loaded_and_linked(
+    path: &Path,
+    context: &mut Context,
+) -> JsResult<Module> {
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Err(JsNativeError::typ()
+            .with_message("deferred namespace imports require a module loader")
+            .into());
+    };
+
+    if let Some(module) = loader.get(path, ModuleResourceKind::JavaScript) {
+        return Ok(module);
+    }
+
+    let module = load_module_from_path(path, ModuleResourceKind::JavaScript, context)?;
+    loader.insert(
+        path.to_path_buf(),
+        ModuleResourceKind::JavaScript,
+        module.clone(),
+    );
+
+    let Some(_scope) = DeferredLoadScope::enter(path) else {
+        return Ok(module);
+    };
+
+    let promise = module.load(context);
+    context.run_jobs()?;
+    match promise.state() {
+        PromiseState::Fulfilled(_) => module.link(context)?,
+        PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
+        PromiseState::Pending => {
+            return Err(JsNativeError::typ()
+                .with_message("deferred namespace module remained pending during load")
+                .into());
+        }
+    }
+
+    Ok(module)
+}
+
+fn build_deferred_namespace_proxy(path: &Path, context: &mut Context) -> JsResult<JsProxy> {
+    let exports = parse_deferred_module_export_names(path)?;
+    let target = JsObject::from_proto_and_data(
+        None,
+        DeferredNamespaceTarget {
+            path: path.to_path_buf(),
+            exports: exports.clone(),
+        },
+    );
+    for export in exports {
+        target.define_property_or_throw(
+            JsString::from(export.as_str()),
+            PropertyDescriptor::builder()
+                .value(BoaValue::undefined())
+                .writable(true)
+                .enumerable(true)
+                .configurable(true),
+            context,
+        )?;
+    }
+    target.define_property_or_throw(
+        JsSymbol::to_string_tag(),
+        PropertyDescriptor::builder()
+            .value(js_string!("Deferred Module"))
+            .writable(false)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    target.set_integrity_level(IntegrityLevel::Sealed, context)?;
+
+    Ok(JsProxy::builder(target)
+        .get(host_deferred_namespace_get)
+        .get_own_property_descriptor(host_deferred_namespace_get_own_property_descriptor)
+        .get_prototype_of(host_deferred_namespace_get_prototype_of)
+        .has(host_deferred_namespace_has)
+        .is_extensible(host_deferred_namespace_is_extensible)
+        .own_keys(host_deferred_namespace_own_keys)
+        .prevent_extensions(host_deferred_namespace_prevent_extensions)
+        .define_property(host_deferred_namespace_define_property)
+        .delete_property(host_deferred_namespace_delete_property)
+        .set(host_deferred_namespace_set)
+        .set_prototype_of(host_deferred_namespace_set_prototype_of)
+        .build(context))
 }
 
 fn maybe_build_source_phase_module(
@@ -2411,6 +2606,7 @@ fn host_get_cached_import(
         .to_std_string_lossy();
 
     let kind = match resource_type.as_str() {
+        "defer" => ModuleResourceKind::Deferred,
         "json" => ModuleResourceKind::Json,
         "text" => ModuleResourceKind::Text,
         "bytes" => ModuleResourceKind::Bytes,
@@ -2431,10 +2627,15 @@ fn host_get_cached_import(
         context,
     )?;
 
-    Ok(loader
-        .get(&path, kind)
-        .map(|module| module.namespace(context).into())
-        .unwrap_or_default())
+    let Some(module) = loader.get(&path, kind) else {
+        return Ok(BoaValue::undefined());
+    };
+
+    if kind == ModuleResourceKind::Deferred {
+        return module.namespace(context).get(js_string!("default"), context);
+    }
+
+    Ok(module.namespace(context).into())
 }
 
 fn host_assert_import_source(
@@ -2459,6 +2660,450 @@ fn host_assert_import_source(
     };
     let _ = resolve_module_specifier(Some(&loader.root), &specifier, referrer, context)?;
     Ok(BoaValue::undefined())
+}
+
+fn host_deferred_namespace_get(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+    if is_symbol_like_deferred_namespace_key(&key) {
+        return deferred_namespace_ordinary_get(&metadata, &key);
+    }
+
+    let module = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    if !deferred_namespace_exports_include(&metadata, &key) {
+        return Ok(BoaValue::undefined());
+    }
+
+    module.namespace(context).get(key, context)
+}
+
+fn host_deferred_namespace_get_own_property_descriptor(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+
+    if is_symbol_like_deferred_namespace_key(&key) {
+        return deferred_namespace_ordinary_get_own_property_descriptor(&metadata, &key, context);
+    }
+
+    let module = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    if !deferred_namespace_exports_include(&metadata, &key) {
+        return Ok(BoaValue::undefined());
+    }
+
+    build_data_descriptor_object(
+        module.namespace(context).get(key, context)?,
+        true,
+        true,
+        false,
+        context,
+    )
+}
+
+fn host_deferred_namespace_get_prototype_of(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(BoaValue::null())
+}
+
+fn host_deferred_namespace_has(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+
+    if is_symbol_like_deferred_namespace_key(&key) {
+        return Ok(deferred_namespace_ordinary_has(&metadata, &key).into());
+    }
+
+    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    Ok(deferred_namespace_exports_include(&metadata, &key).into())
+}
+
+fn host_deferred_namespace_is_extensible(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(false.into())
+}
+
+fn host_deferred_namespace_own_keys(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+
+    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    let keys = metadata
+        .exports
+        .iter()
+        .cloned()
+        .map(JsString::from)
+        .map(PropertyKey::from)
+        .map(BoaValue::from)
+        .chain(std::iter::once(BoaValue::from(PropertyKey::from(
+            JsSymbol::to_string_tag(),
+        ))));
+    Ok(JsArray::from_iter(keys, context).into())
+}
+
+fn host_deferred_namespace_prevent_extensions(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(true.into())
+}
+
+fn host_deferred_namespace_define_property(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+
+    if !is_symbol_like_deferred_namespace_key(&key) {
+        let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    }
+
+    Ok(false.into())
+}
+
+fn host_deferred_namespace_delete_property(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let target = args
+        .get_or_undefined(0)
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
+    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let metadata = deferred_namespace_target_metadata(&target)?;
+
+    if is_symbol_like_deferred_namespace_key(&key) {
+        return Ok(deferred_namespace_delete_symbol_like_key(&metadata, &key).into());
+    }
+
+    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    Ok(false.into())
+}
+
+fn host_deferred_namespace_set(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(false.into())
+}
+
+fn host_deferred_namespace_set_prototype_of(
+    _: &BoaValue,
+    args: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(args.get_or_undefined(1).is_null().into())
+}
+
+fn deferred_namespace_target_metadata(target: &JsObject) -> JsResult<DeferredNamespaceTarget> {
+    target
+        .downcast_ref::<DeferredNamespaceTarget>()
+        .map(|metadata| metadata.clone())
+        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing").into())
+}
+
+fn deferred_namespace_ordinary_get(
+    metadata: &DeferredNamespaceTarget,
+    key: &PropertyKey,
+) -> JsResult<BoaValue> {
+    match key {
+        PropertyKey::Symbol(symbol) if symbol == &JsSymbol::to_string_tag() => {
+            Ok(js_string!("Deferred Module").into())
+        }
+        _ if deferred_namespace_exports_include(metadata, key) => Ok(BoaValue::undefined()),
+        _ => Ok(BoaValue::undefined()),
+    }
+}
+
+fn deferred_namespace_ordinary_get_own_property_descriptor(
+    metadata: &DeferredNamespaceTarget,
+    key: &PropertyKey,
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    match key {
+        PropertyKey::Symbol(symbol) if symbol == &JsSymbol::to_string_tag() => {
+            build_data_descriptor_object(
+                js_string!("Deferred Module").into(),
+                false,
+                false,
+                false,
+                context,
+            )
+        }
+        _ if deferred_namespace_exports_include(metadata, key) => {
+            build_data_descriptor_object(BoaValue::undefined(), true, true, false, context)
+        }
+        _ => Ok(BoaValue::undefined()),
+    }
+}
+
+fn deferred_namespace_ordinary_has(
+    metadata: &DeferredNamespaceTarget,
+    key: &PropertyKey,
+) -> bool {
+    match key {
+        PropertyKey::Symbol(symbol) => symbol == &JsSymbol::to_string_tag(),
+        _ => deferred_namespace_exports_include(metadata, key),
+    }
+}
+
+fn deferred_namespace_delete_symbol_like_key(
+    metadata: &DeferredNamespaceTarget,
+    key: &PropertyKey,
+) -> bool {
+    match key {
+        PropertyKey::Symbol(symbol) => symbol != &JsSymbol::to_string_tag(),
+        _ => !deferred_namespace_exports_include(metadata, key),
+    }
+}
+
+fn build_data_descriptor_object(
+    value: BoaValue,
+    writable: bool,
+    enumerable: bool,
+    configurable: bool,
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let descriptor = ObjectInitializer::new(context)
+        .property(js_string!("value"), value, Attribute::all())
+        .property(js_string!("writable"), writable, Attribute::all())
+        .property(js_string!("enumerable"), enumerable, Attribute::all())
+        .property(js_string!("configurable"), configurable, Attribute::all())
+        .build();
+    Ok(descriptor.into())
+}
+
+fn is_symbol_like_deferred_namespace_key(key: &PropertyKey) -> bool {
+    match key {
+        PropertyKey::Symbol(_) => true,
+        PropertyKey::String(string) => string.to_std_string_lossy() == "then",
+        PropertyKey::Index(_) => false,
+    }
+}
+
+fn deferred_namespace_exports_include(metadata: &DeferredNamespaceTarget, key: &PropertyKey) -> bool {
+    let Some(name) = deferred_namespace_export_name(key) else {
+        return false;
+    };
+    metadata.exports.iter().any(|export| export == &name)
+}
+
+fn deferred_namespace_export_name(key: &PropertyKey) -> Option<String> {
+    match key {
+        PropertyKey::String(string) => Some(string.to_std_string_lossy()),
+        PropertyKey::Index(index) => Some(index.get().to_string()),
+        PropertyKey::Symbol(_) => None,
+    }
+}
+
+fn parse_deferred_module_export_names(path: &Path) -> JsResult<Vec<String>> {
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        JsNativeError::typ()
+            .with_message(format!("could not open file `{}`", path.display()))
+            .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+    })?;
+
+    let mut exports = HashSet::new();
+
+    for captures in MODULE_EXPORT_BINDING_RE.captures_iter(&source) {
+        exports.insert(
+            captures
+                .get(1)
+                .expect("binding capture is required")
+                .as_str()
+                .to_string(),
+        );
+    }
+
+    if source.contains("export default") {
+        exports.insert("default".to_string());
+    }
+
+    for captures in MODULE_EXPORT_LIST_RE.captures_iter(&source) {
+        let bindings = captures
+            .get(1)
+            .expect("export list capture is required")
+            .as_str();
+        for binding in bindings.split(',').map(str::trim).filter(|binding| !binding.is_empty()) {
+            let Some(name) = binding.split_whitespace().last() else {
+                continue;
+            };
+            exports.insert(name.to_string());
+        }
+    }
+
+    for captures in MODULE_EXPORT_NAMESPACE_RE.captures_iter(&source) {
+        exports.insert(
+            captures
+                .get(1)
+                .expect("namespace capture is required")
+                .as_str()
+                .to_string(),
+        );
+    }
+
+    let mut exports = exports.into_iter().collect::<Vec<_>>();
+    exports.sort();
+    Ok(exports)
+}
+
+fn evaluate_deferred_namespace_module(path: &Path, context: &mut Context) -> JsResult<Module> {
+    let active_paths = current_executing_module_paths(context);
+    if !is_ready_for_sync_execution(path, &active_paths, &mut HashSet::new(), context)? {
+        return Err(JsNativeError::typ()
+            .with_message("deferred namespace is not ready for synchronous evaluation")
+            .into());
+    }
+
+    let module = ensure_deferred_module_loaded_and_linked(path, context)?;
+    let promise = catch_silent_panic(|| module.evaluate(context)).map_err(|_| {
+        JsNativeError::typ()
+            .with_message("deferred namespace is not ready for synchronous evaluation")
+    })?;
+    catch_silent_panic(|| context.run_jobs())
+        .map_err(|_| {
+            JsNativeError::typ()
+                .with_message("deferred namespace evaluation panicked while running jobs")
+        })?
+        .map_err(|error| error)?;
+    match promise.state() {
+        PromiseState::Fulfilled(_) => Ok(module),
+        PromiseState::Rejected(reason) => Err(JsError::from_opaque(reason.clone())),
+        PromiseState::Pending => Err(JsNativeError::typ()
+            .with_message("deferred namespace module remained pending during evaluation")
+            .into()),
+    }
+}
+
+fn current_executing_module_paths(context: &Context) -> HashSet<PathBuf> {
+    context
+        .stack_trace()
+        .filter_map(|frame| {
+            let rendered = frame.position().path.to_string();
+            let candidate = PathBuf::from(rendered);
+            if candidate.exists() {
+                Some(candidate.canonicalize().unwrap_or(candidate))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn requested_module_paths(path: &Path, context: &mut Context) -> JsResult<Vec<PathBuf>> {
+    let source = std::fs::read_to_string(path).map_err(|error| {
+        JsNativeError::typ()
+            .with_message(format!("could not open file `{}`", path.display()))
+            .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+    })?;
+
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(Vec::new());
+    };
+
+    let mut paths = HashSet::new();
+    for regex in [
+        &*MODULE_IMPORT_FROM_RE,
+        &*MODULE_BARE_IMPORT_RE,
+        &*MODULE_EXPORT_FROM_RE,
+    ] {
+        for captures in regex.captures_iter(&source) {
+            let specifier = captures
+                .get(2)
+                .expect("specifier capture is required")
+                .as_str();
+            let resolved = resolve_module_specifier(
+                Some(&loader.root),
+                &JsString::from(specifier),
+                Some(path),
+                context,
+            )?;
+            paths.insert(resolved);
+        }
+    }
+
+    Ok(paths.into_iter().collect())
+}
+
+fn is_ready_for_sync_execution(
+    path: &Path,
+    active_paths: &HashSet<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    context: &mut Context,
+) -> JsResult<bool> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(path.clone()) {
+        return Ok(true);
+    }
+    if active_paths.contains(&path) {
+        return Ok(false);
+    }
+
+    for dependency in requested_module_paths(&path, context)? {
+        if !is_ready_for_sync_execution(&dependency, active_paths, seen, context)? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn catch_silent_panic<F, T>(f: F) -> std::thread::Result<T>
+where
+    F: FnOnce() -> T,
+{
+    let _guard = PANIC_HOOK_LOCK
+        .lock()
+        .expect("panic hook mutex must not be poisoned");
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let result = catch_unwind(AssertUnwindSafe(f));
+    std::panic::set_hook(previous);
+    result
 }
 
 fn host_worker_leaving(_: &BoaValue, _: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {

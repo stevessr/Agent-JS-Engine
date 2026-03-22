@@ -47,7 +47,7 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
 - 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()`、`$262.agent` 和 `$262.AbstractModuleSource`
 - 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`
-- 支持 `import-defer` 的兼容子集：`import.defer(...)` 动态调用、`import defer * as ns from ...` 语法降级，以及对应的 test262 dynamic syntax / abrupt-reject / static syntax / syntax-error 组
+- 支持 `import-defer` 的兼容子集：`import.defer(...)` 动态调用，以及基于 deferred wrapper module 的最小 `import defer * as ns from ...` 语义；当前可覆盖 dynamic syntax / abrupt-reject / dynamic sync module graph / static syntax / deferred namespace exotic object / evaluation-triggers 大部分子组 / resolution-error / evaluation-sync / module-throws / 同步 re-entrancy 错误组
 - 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`、以及对应的 test262 `import-source` 动态 catch / valid syntax / module-code parse 组
 - 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
@@ -60,7 +60,7 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - `test/language/expressions/dynamic-import/import-attributes/`: `23 / 23` 通过
 - `test/language/import/import-bytes/`: `5 / 5` 通过
 - `test/built-ins/AbstractModuleSource/`: `8 / 8` 通过
-- `import-defer` 子集样本：`68 / 68` 执行通过，另有 `155` 个依赖真实 deferred semantics 的 case 继续跳过
+- `import-defer` 子集样本：`146 / 146` 执行通过，另有 `77` 个更重的 async/TLA / deferred evaluation case 继续跳过
 - `import-source` 子集样本：`91 / 91` 执行通过，另有 `85` 个更重的 `source-phase-imports` case 仍按策略跳过
 - immutable `ArrayBuffer` 相关 20 个样本：`20 / 20` 通过
 - `test/built-ins/ArrayBuffer/prototype/transfer/`: `24 / 24` 通过

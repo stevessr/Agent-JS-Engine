@@ -251,6 +251,154 @@ fn engine_supports_static_import_defer_namespace_syntax() {
 }
 
 #[test]
+fn engine_defers_module_evaluation_until_property_access() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(temp_root.join("setup.mjs"), "globalThis.evaluations = [];").unwrap();
+    fs::write(
+        temp_root.join("dep_1_1.mjs"),
+        "globalThis.evaluations.push(1.1);",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep_1_2.mjs"),
+        "globalThis.evaluations.push(1.2); export const foo = 1;",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep_1.mjs"),
+        "import './dep_1_1.mjs'; import defer * as ns_1_2 from './dep_1_2.mjs'; globalThis.evaluations.push(1); export { ns_1_2 };",
+    )
+    .unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import './setup.mjs';
+        import defer * as ns1 from './dep_1.mjs';
+
+        print(String(globalThis.evaluations.length));
+        const deferred = ns1.ns_1_2;
+        print(String(globalThis.evaluations.join(',')));
+        deferred.foo;
+        print(String(globalThis.evaluations.join(',')));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "0".to_string(),
+            "1.1,1".to_string(),
+            "1.1,1,1.2".to_string()
+        ]
+    );
+}
+
+#[test]
+fn engine_handles_self_referential_deferred_imports_without_recursing() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        import defer * as self from './entry.mjs';
+
+        try {
+          self.foo;
+        } catch (error) {
+          print(error.name);
+        }
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["TypeError".to_string()]);
+}
+
+#[test]
+#[ignore = "covered by the real test262 get-other-while-dep-evaluating case; this hand-written repro diverges from the module graph timing"]
+fn engine_blocks_deferred_namespace_when_dependency_is_currently_evaluating() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("main.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        import './dep1.mjs';
+        print(String(globalThis['evaluating dep2.foo error']?.name));
+        print(String(globalThis['evaluating dep2.foo evaluates dep3']));
+        print(String(globalThis.dep3evaluated));
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep1.mjs"),
+        r#"
+        import defer * as dep2 from './dep2.mjs';
+        globalThis.dep3evaluated = false;
+        try { dep2.foo; } catch (error) { globalThis['evaluating dep2.foo error'] = error; }
+        globalThis['evaluating dep2.foo evaluates dep3'] = globalThis.dep3evaluated;
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep2.mjs"),
+        "import './dep3.mjs'; import './main.mjs';",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep3.mjs"),
+        "globalThis.dep3evaluated = true;",
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "TypeError".to_string(),
+            "false".to_string(),
+            "false".to_string()
+        ]
+    );
+}
+
+#[test]
 fn engine_enforces_immutable_array_buffer_wrappers() {
     let engine = JsEngine::new();
     let output = engine

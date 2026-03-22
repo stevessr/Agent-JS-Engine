@@ -56,11 +56,23 @@
      - `test/language/module-code/source-phase-import/import-source.js`：`1 / 1` 通过
 13. 扩充 `import-defer` 兼容子集：
    - 支持 `import.defer(...)` 兼容 helper，保留 `ToString(specifier)` 的 abrupt reject 行为
-   - 支持最小静态 `import defer * as ns from ...` 语法降级，并兼容空 `with { }`
-   - runner 现在会放行 `import-defer` 的动态 catch、dynamic import valid syntax、整个静态 syntax 目录，以及 `syntax-error` 这类链接期失败 case
+   - 支持基于 deferred wrapper module 的最小 `import defer * as ns from ...` 语义：导入时只做最小 load/link，属性访问时再触发同步 evaluate
+   - deferred namespace 现在使用原生 target metadata + Proxy trap 组合，补上 `[[GetPrototypeOf]]` / `[[IsExtensible]]` / `[[OwnPropertyKeys]]` / `[[GetOwnProperty]]` / `[[HasProperty]]` / `[[SetPrototypeOf]]` / `[[PreventExtensions]]` 这些 exotic object 子集行为
+   - `import.defer("./x.js")` 现在真实走 deferred resource loader，并和静态 deferred import 共享 wrapper module 缓存
+   - 增加保守版 `ReadyForSyncExecution` 宿主预检查：通过当前执行栈路径和静态依赖图，阻止同步 re-entrancy 场景提前触发错误模块的求值
+   - runner 现在会放行 `import-defer` 的动态 catch、dynamic import valid syntax、dynamic sync module graph、整个静态 syntax 目录，以及 `deferred-namespace-object` / `evaluation-triggers` 大部分子组 / `syntax-error` / `resolution-error` / `evaluation-sync` / `module-throws` / 同步 `get-*` re-entrancy 错误组
+   - 修正 async module harness 拼接：在 module case 中把 `$DONE` 显式挂到 `globalThis`，让 `asyncHelpers.js` 在 ESM 里也能工作
+   - 给 deferred namespace 加了最小 recursion / re-entry 防护，避免自引用 import defer 直接把 runtime 带进无限递归
    - 验证：
-     - `TEST262_FILTER='import-defer'`：`68 / 68` 执行通过，`155` 个依赖真实 deferred semantics 的 case 继续跳过
+     - `TEST262_FILTER='import-defer'`：`146 / 146` 执行通过，`77` 个更重 case 继续跳过
+     - `test/language/import/import-defer/deferred-namespace-object/`：`4 / 4` 通过
+     - `test/language/import/import-defer/evaluation-triggers/`：`63 / 63` 执行通过，`3` 个已知边角 case 继续跳过
+     - `test/language/expressions/dynamic-import/import-defer/sync/`：`1 / 1` 通过
      - `test/language/import/import-defer/errors/syntax-error/import-defer-of-syntax-error-fails.js`：`1 / 1` 通过
+     - `test/language/import/import-defer/errors/resolution-error/import-defer-of-missing-module-fails.js`：`1 / 1` 通过
+     - `test/language/import/import-defer/evaluation-sync/`：`2 / 2` 通过
+     - `test/language/import/import-defer/errors/module-throws/`：`3 / 3` 通过
+     - `test/language/import/import-defer/errors/get-*.js` 同步子组：`4 / 4` 通过
 
 ## Next Steps
 
