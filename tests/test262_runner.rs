@@ -2,7 +2,7 @@ use ai_agent::engine::{EngineError, EvalOptions, JsEngine};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -175,9 +175,6 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         if case.metadata.has_feature(feature) {
             return Some(feature);
         }
-    }
-    if case.source.contains("$262.detachArrayBuffer") {
-        return Some("$262.detachArrayBuffer");
     }
     if case.source.contains("$262.agent") {
         return Some("$262.agent");

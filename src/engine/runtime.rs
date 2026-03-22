@@ -1,11 +1,11 @@
 use boa_engine::{
-    Context, JsArgs, JsError, JsResult, JsValue as BoaValue, Module, NativeFunction, Source,
     builtins::promise::PromiseState,
     js_string,
     module::SimpleModuleLoader,
-    object::{FunctionObjectBuilder, JsObject, ObjectInitializer},
+    object::{builtins::JsArrayBuffer, FunctionObjectBuilder, JsObject, ObjectInitializer},
     property::Attribute,
     realm::Realm,
+    Context, JsArgs, JsError, JsResult, JsValue as BoaValue, Module, NativeFunction, Source,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -178,7 +178,7 @@ fn install_test262_globals(context: &mut Context) -> boa_engine::JsResult<()> {
 fn build_test262_object(
     target_realm: Realm,
     target_global: JsObject,
-    expose_create_realm: bool,
+    expose_host_hooks: bool,
     context: &mut Context,
 ) -> JsObject {
     let eval_script = build_builtin_function(
@@ -190,12 +190,20 @@ fn build_test262_object(
             target_realm,
         ),
     );
-    let create_realm = expose_create_realm.then(|| {
+    let create_realm = expose_host_hooks.then(|| {
         build_builtin_function(
             context,
             js_string!("createRealm"),
             0,
             NativeFunction::from_fn_ptr(host_create_realm),
+        )
+    });
+    let detach_array_buffer = expose_host_hooks.then(|| {
+        build_builtin_function(
+            context,
+            js_string!("detachArrayBuffer"),
+            1,
+            NativeFunction::from_fn_ptr(host_detach_array_buffer),
         )
     });
 
@@ -204,6 +212,13 @@ fn build_test262_object(
     object.property(js_string!("evalScript"), eval_script, Attribute::all());
     if let Some(create_realm) = create_realm {
         object.property(js_string!("createRealm"), create_realm, Attribute::all());
+    }
+    if let Some(detach_array_buffer) = detach_array_buffer {
+        object.property(
+            js_string!("detachArrayBuffer"),
+            detach_array_buffer,
+            Attribute::all(),
+        );
     }
     object.build()
 }
@@ -248,6 +263,19 @@ fn host_create_realm(_: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsR
     })?;
     let wrapper = build_test262_object(new_realm, new_global, false, context);
     Ok(wrapper.into())
+}
+
+fn host_detach_array_buffer(
+    _: &BoaValue,
+    args: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    let buffer = args.get_or_undefined(0).as_object().ok_or_else(|| {
+        boa_engine::JsNativeError::typ().with_message("detachArrayBuffer requires an ArrayBuffer")
+    })?;
+    let buffer = JsArrayBuffer::from_object(buffer)?;
+    buffer.detach(&BoaValue::undefined())?;
+    Ok(BoaValue::undefined())
 }
 
 fn with_realm<T, F>(context: &mut Context, realm: Realm, operation: F) -> JsResult<T>

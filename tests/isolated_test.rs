@@ -62,6 +62,26 @@ fn engine_bootstraps_create_realm_for_test262() {
     assert_eq!(output.value.as_deref(), Some("true"));
 }
 
+#[test]
+fn engine_bootstraps_detach_array_buffer_for_test262() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            const buffer = new ArrayBuffer(8);
+            $262.detachArrayBuffer(buffer);
+            buffer.byteLength;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("0"));
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
