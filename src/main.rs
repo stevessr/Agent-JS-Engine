@@ -59,8 +59,8 @@ fn run() -> Result<(), String> {
             (source, inline_path)
         }
         (None, Some(path)) => {
-            let source = fs::read_to_string(&path)
-                .map_err(|err| format!("failed to read {path}: {err}"))?;
+            let source =
+                fs::read_to_string(&path).map_err(|err| format!("failed to read {path}: {err}"))?;
             (source, PathBuf::from(path))
         }
         (Some(_), Some(_)) => {
@@ -74,12 +74,16 @@ fn run() -> Result<(), String> {
 
     let engine = JsEngine::new();
     let output = if is_module {
-        let module_root = source_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let module_root = source_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         engine
             .eval_module_with_options(&source, &source_path, module_root, &eval_options)
             .map_err(|err| err.to_string())?
     } else {
-        let module_root = source_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let module_root = source_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
         engine
             .eval_script_with_options(&source, &source_path, module_root, &eval_options)
             .map_err(|err| err.to_string())?

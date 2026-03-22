@@ -108,7 +108,7 @@ pub enum Expression<'a> {
     ConditionalExpression {
         test: Box<Expression<'a>>,
         consequent: Box<Expression<'a>>,
-        alternate: Box<Expression<'a>>
+        alternate: Box<Expression<'a>>,
     },
 }
 
@@ -118,9 +118,7 @@ pub enum ObjectKey<'a> {
     String(&'a str),
 }
 
-#[derive(Debug, Clone)]
-
-#[derive(PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum UpdateOperator {
     PlusPlus,
     MinusMinus,

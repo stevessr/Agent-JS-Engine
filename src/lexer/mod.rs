@@ -2,20 +2,108 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token<'a> {
-    Var, Let, Const, If, Else, Function, Return, Throw, Try, Catch, Finally,
-    For, While, Do, Break, Continue, New, This, Typeof, Void, Delete, Switch,
-    Case, Default, In, Instanceof, Class, Extends, Super, Yield, Await, Async,
-    Import, Export, True, False, Null, Undefined, Debugger, With,
-    Identifier(&'a str), Number(f64), String(&'a str), Template(&'a str), Regex(&'a str, &'a str),
-    Plus, Minus, Asterisk, Slash, Percent,
-    PlusPlus, MinusMinus, Power, LeftShift, RightShift, UnsignedRightShift,
-    EqEq, EqEqEq, NotEq, NotEqEq, Less, LessEq, Greater, GreaterEq,
-    LogicNot, LogicAnd, LogicOr, BitNot, BitAnd, BitOr, BitXor,
-    Assign, PlusAssign, MinusAssign, MultiplyAssign, DivideAssign, PercentAssign,
-    PowerAssign, LeftShiftAssign, RightShiftAssign, UnsignedRightShiftAssign,
-    BitAndAssign, BitOrAssign, BitXorAssign, LogicAndAssign, LogicOrAssign, NullishAssign,
-    Nullish, OptionalChain, Arrow, Semicolon, Comma, Dot, DotDotDot, Colon, Question,
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    Var,
+    Let,
+    Const,
+    If,
+    Else,
+    Function,
+    Return,
+    Throw,
+    Try,
+    Catch,
+    Finally,
+    For,
+    While,
+    Do,
+    Break,
+    Continue,
+    New,
+    This,
+    Typeof,
+    Void,
+    Delete,
+    Switch,
+    Case,
+    Default,
+    In,
+    Instanceof,
+    Class,
+    Extends,
+    Super,
+    Yield,
+    Await,
+    Async,
+    Import,
+    Export,
+    True,
+    False,
+    Null,
+    Undefined,
+    Debugger,
+    With,
+    Identifier(&'a str),
+    Number(f64),
+    String(&'a str),
+    Template(&'a str),
+    Regex(&'a str, &'a str),
+    Plus,
+    Minus,
+    Asterisk,
+    Slash,
+    Percent,
+    PlusPlus,
+    MinusMinus,
+    Power,
+    LeftShift,
+    RightShift,
+    UnsignedRightShift,
+    EqEq,
+    EqEqEq,
+    NotEq,
+    NotEqEq,
+    Less,
+    LessEq,
+    Greater,
+    GreaterEq,
+    LogicNot,
+    LogicAnd,
+    LogicOr,
+    BitNot,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Assign,
+    PlusAssign,
+    MinusAssign,
+    MultiplyAssign,
+    DivideAssign,
+    PercentAssign,
+    PowerAssign,
+    LeftShiftAssign,
+    RightShiftAssign,
+    UnsignedRightShiftAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    LogicAndAssign,
+    LogicOrAssign,
+    NullishAssign,
+    Nullish,
+    OptionalChain,
+    Arrow,
+    Semicolon,
+    Comma,
+    Dot,
+    DotDotDot,
+    Colon,
+    Question,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
     Eof,
 }
 
@@ -72,14 +160,18 @@ impl<'a> Lexer<'a> {
                         self.advance();
                         self.advance();
                         while let Some(c) = self.advance() {
-                            if c == '\n' || c == '\r' { break; }
+                            if c == '\n' || c == '\r' {
+                                break;
+                            }
                         }
                     } else if self.peek_n(1) == Some('*') {
                         self.advance();
                         self.advance();
                         let mut prev_ast = false;
                         while let Some(c) = self.advance() {
-                            if prev_ast && c == '/' { break; }
+                            if prev_ast && c == '/' {
+                                break;
+                            }
                             prev_ast = c == '*';
                         }
                     } else {
@@ -103,7 +195,12 @@ impl<'a> Lexer<'a> {
             return Ok(self.lex_identifier());
         }
 
-        if c.is_ascii_digit() || (c == '.' && self.peek_n(1).map_or(false, |next_c| next_c.is_ascii_digit())) {
+        if c.is_ascii_digit()
+            || (c == '.'
+                && self
+                    .peek_n(1)
+                    .map_or(false, |next_c| next_c.is_ascii_digit()))
+        {
             return Ok(self.lex_number());
         }
 
@@ -115,102 +212,179 @@ impl<'a> Lexer<'a> {
 
         match c {
             '+' => {
-                if self.peek() == Some('+') { self.advance(); Ok(Token::PlusPlus) }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::PlusAssign) }
-                else { Ok(Token::Plus) }
+                if self.peek() == Some('+') {
+                    self.advance();
+                    Ok(Token::PlusPlus)
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::PlusAssign)
+                } else {
+                    Ok(Token::Plus)
+                }
             }
             '-' => {
-                if self.peek() == Some('-') { self.advance(); Ok(Token::MinusMinus) }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::MinusAssign) }
-                else { Ok(Token::Minus) }
+                if self.peek() == Some('-') {
+                    self.advance();
+                    Ok(Token::MinusMinus)
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::MinusAssign)
+                } else {
+                    Ok(Token::Minus)
+                }
             }
             '*' => {
                 if self.peek() == Some('*') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::PowerAssign) }
-                    else { Ok(Token::Power) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::PowerAssign)
+                    } else {
+                        Ok(Token::Power)
+                    }
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::MultiplyAssign)
+                } else {
+                    Ok(Token::Asterisk)
                 }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::MultiplyAssign) }
-                else { Ok(Token::Asterisk) }
             }
             '/' => {
-                if self.peek() == Some('=') { self.advance(); Ok(Token::DivideAssign) }
-                else { Ok(Token::Slash) }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::DivideAssign)
+                } else {
+                    Ok(Token::Slash)
+                }
             }
             '%' => {
-                if self.peek() == Some('=') { self.advance(); Ok(Token::PercentAssign) }
-                else { Ok(Token::Percent) }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::PercentAssign)
+                } else {
+                    Ok(Token::Percent)
+                }
             }
             '=' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::EqEqEq) }
-                    else { Ok(Token::EqEq) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::EqEqEq)
+                    } else {
+                        Ok(Token::EqEq)
+                    }
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    Ok(Token::Arrow)
+                } else {
+                    Ok(Token::Assign)
                 }
-                else if self.peek() == Some('>') { self.advance(); Ok(Token::Arrow) }
-                else { Ok(Token::Assign) }
             }
             '!' => {
                 if self.peek() == Some('=') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::NotEqEq) }
-                    else { Ok(Token::NotEq) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::NotEqEq)
+                    } else {
+                        Ok(Token::NotEq)
+                    }
+                } else {
+                    Ok(Token::LogicNot)
                 }
-                else { Ok(Token::LogicNot) }
             }
             '<' => {
                 if self.peek() == Some('<') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::LeftShiftAssign) }
-                    else { Ok(Token::LeftShift) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::LeftShiftAssign)
+                    } else {
+                        Ok(Token::LeftShift)
+                    }
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::LessEq)
+                } else {
+                    Ok(Token::Less)
                 }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::LessEq) }
-                else { Ok(Token::Less) }
             }
             '>' => {
                 if self.peek() == Some('>') {
                     self.advance();
                     if self.peek() == Some('>') {
                         self.advance();
-                        if self.peek() == Some('=') { self.advance(); Ok(Token::UnsignedRightShiftAssign) }
-                        else { Ok(Token::UnsignedRightShift) }
+                        if self.peek() == Some('=') {
+                            self.advance();
+                            Ok(Token::UnsignedRightShiftAssign)
+                        } else {
+                            Ok(Token::UnsignedRightShift)
+                        }
+                    } else if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::RightShiftAssign)
+                    } else {
+                        Ok(Token::RightShift)
                     }
-                    else if self.peek() == Some('=') { self.advance(); Ok(Token::RightShiftAssign) }
-                    else { Ok(Token::RightShift) }
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::GreaterEq)
+                } else {
+                    Ok(Token::Greater)
                 }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::GreaterEq) }
-                else { Ok(Token::Greater) }
             }
             '&' => {
                 if self.peek() == Some('&') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::LogicAndAssign) }
-                    else { Ok(Token::LogicAnd) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::LogicAndAssign)
+                    } else {
+                        Ok(Token::LogicAnd)
+                    }
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::BitAndAssign)
+                } else {
+                    Ok(Token::BitAnd)
                 }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::BitAndAssign) }
-                else { Ok(Token::BitAnd) }
             }
             '|' => {
                 if self.peek() == Some('|') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::LogicOrAssign) }
-                    else { Ok(Token::LogicOr) }
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::LogicOrAssign)
+                    } else {
+                        Ok(Token::LogicOr)
+                    }
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::BitOrAssign)
+                } else {
+                    Ok(Token::BitOr)
                 }
-                else if self.peek() == Some('=') { self.advance(); Ok(Token::BitOrAssign) }
-                else { Ok(Token::BitOr) }
             }
             '^' => {
-                if self.peek() == Some('=') { self.advance(); Ok(Token::BitXorAssign) }
-                else { Ok(Token::BitXor) }
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Ok(Token::BitXorAssign)
+                } else {
+                    Ok(Token::BitXor)
+                }
             }
             '~' => Ok(Token::BitNot),
             '?' => {
                 if self.peek() == Some('?') {
                     self.advance();
-                    if self.peek() == Some('=') { self.advance(); Ok(Token::NullishAssign) }
-                    else { Ok(Token::Nullish) }
-                }
-                else if self.peek() == Some('.') {
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Ok(Token::NullishAssign)
+                    } else {
+                        Ok(Token::Nullish)
+                    }
+                } else if self.peek() == Some('.') {
                     // Could be optional chain
                     let next = self.peek_n(1);
                     if let Some(n) = next {
@@ -220,12 +394,14 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     Ok(Token::Question)
+                } else {
+                    Ok(Token::Question)
                 }
-                else { Ok(Token::Question) }
             }
             '.' => {
                 if self.peek() == Some('.') && self.peek_n(1) == Some('.') {
-                    self.advance(); self.advance();
+                    self.advance();
+                    self.advance();
                     Ok(Token::DotDotDot)
                 } else {
                     Ok(Token::Dot)
@@ -255,19 +431,45 @@ impl<'a> Lexer<'a> {
         }
         let term = &self.input[start..self.pos];
         match term {
-            "var" => Token::Var, "let" => Token::Let, "const" => Token::Const,
-            "if" => Token::If, "else" => Token::Else, "function" => Token::Function,
-            "return" => Token::Return, "throw" => Token::Throw, "try" => Token::Try,
-            "catch" => Token::Catch, "finally" => Token::Finally, "for" => Token::For,
-            "while" => Token::While, "do" => Token::Do, "break" => Token::Break,
-            "continue" => Token::Continue, "new" => Token::New, "this" => Token::This,
-            "typeof" => Token::Typeof, "void" => Token::Void, "delete" => Token::Delete,
-            "switch" => Token::Switch, "case" => Token::Case, "default" => Token::Default,
-            "in" => Token::In, "instanceof" => Token::Instanceof, "class" => Token::Class,
-            "extends" => Token::Extends, "super" => Token::Super, "yield" => Token::Yield,
-            "await" => Token::Await, "async" => Token::Async, "import" => Token::Import,
-            "export" => Token::Export, "true" => Token::True, "false" => Token::False,
-            "null" => Token::Null, "undefined" => Token::Undefined, "debugger" => Token::Debugger,
+            "var" => Token::Var,
+            "let" => Token::Let,
+            "const" => Token::Const,
+            "if" => Token::If,
+            "else" => Token::Else,
+            "function" => Token::Function,
+            "return" => Token::Return,
+            "throw" => Token::Throw,
+            "try" => Token::Try,
+            "catch" => Token::Catch,
+            "finally" => Token::Finally,
+            "for" => Token::For,
+            "while" => Token::While,
+            "do" => Token::Do,
+            "break" => Token::Break,
+            "continue" => Token::Continue,
+            "new" => Token::New,
+            "this" => Token::This,
+            "typeof" => Token::Typeof,
+            "void" => Token::Void,
+            "delete" => Token::Delete,
+            "switch" => Token::Switch,
+            "case" => Token::Case,
+            "default" => Token::Default,
+            "in" => Token::In,
+            "instanceof" => Token::Instanceof,
+            "class" => Token::Class,
+            "extends" => Token::Extends,
+            "super" => Token::Super,
+            "yield" => Token::Yield,
+            "await" => Token::Await,
+            "async" => Token::Async,
+            "import" => Token::Import,
+            "export" => Token::Export,
+            "true" => Token::True,
+            "false" => Token::False,
+            "null" => Token::Null,
+            "undefined" => Token::Undefined,
+            "debugger" => Token::Debugger,
             "with" => Token::With,
             _ => Token::Identifier(term),
         }
@@ -278,31 +480,47 @@ impl<'a> Lexer<'a> {
         if self.peek() == Some('0') {
             let next = self.peek_n(1);
             if next == Some('x') || next == Some('X') {
-                self.advance(); self.advance(); // consume 0x
+                self.advance();
+                self.advance(); // consume 0x
                 while let Some(c) = self.peek() {
-                    if c.is_ascii_hexdigit() { self.advance(); } else { break; }
+                    if c.is_ascii_hexdigit() {
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
-                let val = i64::from_str_radix(&self.input[start+2..self.pos], 16).unwrap_or(0);
+                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 16).unwrap_or(0);
                 return Token::Number(val as f64);
             } else if next == Some('o') || next == Some('O') {
-                self.advance(); self.advance(); // consume 0o
+                self.advance();
+                self.advance(); // consume 0o
                 while let Some(c) = self.peek() {
-                    if c >= '0' && c <= '7' { self.advance(); } else { break; }
+                    if c >= '0' && c <= '7' {
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
-                let val = i64::from_str_radix(&self.input[start+2..self.pos], 8).unwrap_or(0);
+                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 8).unwrap_or(0);
                 return Token::Number(val as f64);
             } else if next == Some('b') || next == Some('B') {
-                self.advance(); self.advance(); // consume 0b
+                self.advance();
+                self.advance(); // consume 0b
                 while let Some(c) = self.peek() {
-                    if c == '0' || c == '1' { self.advance(); } else { break; }
+                    if c == '0' || c == '1' {
+                        self.advance();
+                    } else {
+                        break;
+                    }
                 }
-                let val = i64::from_str_radix(&self.input[start+2..self.pos], 2).unwrap_or(0);
+                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 2).unwrap_or(0);
                 return Token::Number(val as f64);
             }
         }
 
         while let Some(c) = self.peek() {
-            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || (c == '-' || c == '+') { // simple float handling
+            if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || (c == '-' || c == '+') {
+                // simple float handling
                 self.advance();
             } else {
                 break;

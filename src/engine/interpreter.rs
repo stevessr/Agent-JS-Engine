@@ -1,8 +1,8 @@
-use crate::parser::ast::*;
-use crate::engine::value::JsValue;
 use crate::engine::env::Environment;
-use std::rc::Rc;
+use crate::engine::value::JsValue;
+use crate::parser::ast::*;
 use std::cell::RefCell;
+use std::rc::Rc;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
@@ -46,7 +46,9 @@ impl Interpreter {
         let mut last_val = JsValue::Undefined;
         for stmt in &program.body {
             match self.eval_statement(stmt, Rc::clone(&self.global_env)) {
-                Ok(val) => { last_val = val; }
+                Ok(val) => {
+                    last_val = val;
+                }
                 Err(RuntimeError::Return(val)) => return Ok(val),
                 Err(e) => return Err(e),
             }
@@ -54,7 +56,11 @@ impl Interpreter {
         Ok(last_val)
     }
 
-    pub fn eval_statement(&mut self, stmt: &Statement, env: Rc<RefCell<Environment>>) -> Result<JsValue, RuntimeError> {
+    pub fn eval_statement(
+        &mut self,
+        stmt: &Statement,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<JsValue, RuntimeError> {
         match stmt {
             Statement::VariableDeclaration(decl) => {
                 for d in &decl.declarations {
@@ -91,7 +97,9 @@ impl Interpreter {
                 loop {
                     self.check_timeout()?;
                     let test_val = self.eval_expression(&while_stmt.test, Rc::clone(&env))?;
-                    if !test_val.is_truthy() { break; }
+                    if !test_val.is_truthy() {
+                        break;
+                    }
                     last_val = self.eval_statement(&while_stmt.body, Rc::clone(&env))?;
                 }
                 Ok(last_val)
@@ -106,7 +114,9 @@ impl Interpreter {
                     self.check_timeout()?;
                     if let Some(test) = &for_stmt.test {
                         let test_val = self.eval_expression(test, Rc::clone(&for_env))?;
-                        if !test_val.is_truthy() { break; }
+                        if !test_val.is_truthy() {
+                            break;
+                        }
                     }
                     last_val = self.eval_statement(&for_stmt.body, Rc::clone(&for_env))?;
                     if let Some(update) = &for_stmt.update {
@@ -116,14 +126,18 @@ impl Interpreter {
                 Ok(last_val)
             }
             Statement::TryStatement(try_stmt) => {
-                let res = self.eval_statement(&Statement::BlockStatement(try_stmt.block.clone()), Rc::clone(&env));
+                let res = self.eval_statement(
+                    &Statement::BlockStatement(try_stmt.block.clone()),
+                    Rc::clone(&env),
+                );
                 let mut final_val = match res {
                     Ok(val) => Ok(val),
                     Err(RuntimeError::Return(v)) => Err(RuntimeError::Return(v)),
                     Err(RuntimeError::Timeout) => Err(RuntimeError::Timeout),
                     Err(e) => {
                         if let Some(handler) = &try_stmt.handler {
-                            let catch_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
+                            let catch_env =
+                                Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
                             if let Some(param) = handler.param {
                                 let err_val = match e {
                                     RuntimeError::Throw(v) => v,
@@ -131,21 +145,27 @@ impl Interpreter {
                                 };
                                 catch_env.borrow_mut().define(param.to_string(), err_val);
                             }
-                            self.eval_statement(&Statement::BlockStatement(handler.body.clone()), catch_env)
+                            self.eval_statement(
+                                &Statement::BlockStatement(handler.body.clone()),
+                                catch_env,
+                            )
                         } else {
                             Err(e)
                         }
                     }
                 };
-                
+
                 if let Some(finalizer) = &try_stmt.finalizer {
                     // Execute finally block
-                    let finally_res = self.eval_statement(&Statement::BlockStatement(finalizer.clone()), Rc::clone(&env));
+                    let finally_res = self.eval_statement(
+                        &Statement::BlockStatement(finalizer.clone()),
+                        Rc::clone(&env),
+                    );
                     if finally_res.is_err() {
                         final_val = finally_res; // Finally error overwrites try/catch error
                     }
                 }
-                
+
                 final_val
             }
             Statement::FunctionDeclaration(_func) => {
@@ -169,7 +189,11 @@ impl Interpreter {
         }
     }
 
-    pub fn eval_expression(&mut self, expr: &Expression, env: Rc<RefCell<Environment>>) -> Result<JsValue, RuntimeError> {
+    pub fn eval_expression(
+        &mut self,
+        expr: &Expression,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<JsValue, RuntimeError> {
         match expr {
             Expression::Literal(lit) => match lit {
                 Literal::Number(n) => Ok(JsValue::Number(*n)),
@@ -197,16 +221,20 @@ impl Interpreter {
                 // Short-circuiting Logic Operators
                 match bin.operator {
                     BinaryOperator::LogicAnd => {
-                        if !left.is_truthy() { return Ok(left); }
+                        if !left.is_truthy() {
+                            return Ok(left);
+                        }
                         return self.eval_expression(&bin.right, env);
                     }
                     BinaryOperator::LogicOr => {
-                        if left.is_truthy() { return Ok(left); }
+                        if left.is_truthy() {
+                            return Ok(left);
+                        }
                         return self.eval_expression(&bin.right, env);
                     }
                     _ => {}
                 }
-                
+
                 let right = self.eval_expression(&bin.right, env)?;
                 match bin.operator {
                     BinaryOperator::Plus => left.add(&right),
@@ -228,11 +256,19 @@ impl Interpreter {
                 let arg = self.eval_expression(&unary.argument, env)?;
                 match unary.operator {
                     UnaryOperator::Minus => {
-                        if let JsValue::Number(n) = arg { Ok(JsValue::Number(-n)) } else { Ok(JsValue::Number(f64::NAN)) }
+                        if let JsValue::Number(n) = arg {
+                            Ok(JsValue::Number(-n))
+                        } else {
+                            Ok(JsValue::Number(f64::NAN))
+                        }
                     }
                     UnaryOperator::Plus => {
                         // Cast to number
-                        if let JsValue::Number(n) = arg { Ok(JsValue::Number(n)) } else { Ok(JsValue::Number(f64::NAN)) }
+                        if let JsValue::Number(n) = arg {
+                            Ok(JsValue::Number(n))
+                        } else {
+                            Ok(JsValue::Number(f64::NAN))
+                        }
                     }
                     UnaryOperator::LogicNot => Ok(JsValue::Boolean(!arg.is_truthy())),
                     UnaryOperator::Typeof => Ok(JsValue::String(arg.type_of())),
@@ -261,8 +297,16 @@ impl Interpreter {
                     Expression::Identifier(name) => name,
                     _ => return Ok(JsValue::Undefined),
                 };
-                let current_val = env.borrow().get(id).unwrap_or(JsValue::Undefined).as_number();
-                let new_val = if update.operator == crate::parser::ast::UpdateOperator::PlusPlus { current_val + 1.0 } else { current_val - 1.0 };
+                let current_val = env
+                    .borrow()
+                    .get(id)
+                    .unwrap_or(JsValue::Undefined)
+                    .as_number();
+                let new_val = if update.operator == crate::parser::ast::UpdateOperator::PlusPlus {
+                    current_val + 1.0
+                } else {
+                    current_val - 1.0
+                };
                 env.borrow_mut().set(id, JsValue::Number(new_val)).ok();
                 if update.prefix {
                     Ok(JsValue::Number(new_val))
@@ -270,14 +314,10 @@ impl Interpreter {
                     Ok(JsValue::Number(current_val))
                 }
             }
-            Expression::ArrowFunctionExpression(_) => { Ok(JsValue::Undefined) }
-            Expression::ClassExpression(_) => { Ok(JsValue::Undefined) }
-            Expression::FunctionExpression(_func) => {
-                Ok(JsValue::Undefined)
-            }
-            Expression::ThisExpression => {
-                Ok(JsValue::Undefined)
-            }
+            Expression::ArrowFunctionExpression(_) => Ok(JsValue::Undefined),
+            Expression::ClassExpression(_) => Ok(JsValue::Undefined),
+            Expression::FunctionExpression(_func) => Ok(JsValue::Undefined),
+            Expression::ThisExpression => Ok(JsValue::Undefined),
             Expression::SequenceExpression(seq) => {
                 let mut res = JsValue::Undefined;
                 for expr in seq {
@@ -285,7 +325,11 @@ impl Interpreter {
                 }
                 Ok(res)
             }
-            Expression::ConditionalExpression { test, consequent, alternate } => {
+            Expression::ConditionalExpression {
+                test,
+                consequent,
+                alternate,
+            } => {
                 let cond = self.eval_expression(test, env.clone())?;
                 if cond.is_truthy() {
                     self.eval_expression(consequent, env.clone())
@@ -293,9 +337,7 @@ impl Interpreter {
                     self.eval_expression(alternate, env.clone())
                 }
             }
-            Expression::NewExpression(_new_exp) => {
-                Ok(JsValue::Undefined)
-            }
+            Expression::NewExpression(_new_exp) => Ok(JsValue::Undefined),
         }
     }
 }

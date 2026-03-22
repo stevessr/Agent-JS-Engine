@@ -1,7 +1,7 @@
+use crate::engine::value::JsValue;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::cell::RefCell;
-use crate::engine::value::JsValue;
 
 #[derive(Debug, Clone)]
 pub struct Environment {
