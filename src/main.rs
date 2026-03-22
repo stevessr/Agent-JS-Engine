@@ -1,6 +1,7 @@
 use ai_agent::engine::{EvalOptions, JsEngine};
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -16,6 +17,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     let mut args = env::args().skip(1);
     let mut eval_options = EvalOptions::default();
+    let mut is_module = false;
     let mut inline_source = None;
     let mut file_path = None;
 
@@ -29,6 +31,9 @@ fn run() -> Result<(), String> {
             }
             "--strict" => {
                 eval_options.strict = true;
+            }
+            "--module" | "-m" => {
+                is_module = true;
             }
             "--test262" => {
                 eval_options.bootstrap_test262 = true;
@@ -46,10 +51,18 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let source = match (inline_source, file_path) {
-        (Some(source), None) => source,
-        (None, Some(path)) => fs::read_to_string(&path)
-            .map_err(|err| format!("failed to read {path}: {err}"))?,
+    let (source, source_path) = match (inline_source, file_path) {
+        (Some(source), None) => {
+            let inline_path = env::current_dir()
+                .map_err(|err| format!("failed to resolve current directory: {err}"))?
+                .join("__inline__.mjs");
+            (source, inline_path)
+        }
+        (None, Some(path)) => {
+            let source = fs::read_to_string(&path)
+                .map_err(|err| format!("failed to read {path}: {err}"))?;
+            (source, PathBuf::from(path))
+        }
         (Some(_), Some(_)) => {
             return Err("provide either a file path or --eval, not both".to_string());
         }
@@ -60,9 +73,16 @@ fn run() -> Result<(), String> {
     };
 
     let engine = JsEngine::new();
-    let output = engine
-        .eval_with_options(&source, &eval_options)
-        .map_err(|err| err.to_string())?;
+    let output = if is_module {
+        let module_root = source_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        engine
+            .eval_module_with_options(&source, &source_path, module_root, &eval_options)
+            .map_err(|err| err.to_string())?
+    } else {
+        engine
+            .eval_with_options(&source, &eval_options)
+            .map_err(|err| err.to_string())?
+    };
 
     for line in output.printed {
         println!("{line}");
@@ -76,6 +96,6 @@ fn run() -> Result<(), String> {
 }
 
 fn print_usage() {
-    println!("Usage: cargo run -- [--strict] [--test262] <file.js>");
-    println!("       cargo run -- [--strict] [--test262] --eval \"1 + 2\"");
+    println!("Usage: cargo run -- [--strict] [--test262] [--module] <file.js>");
+    println!("       cargo run -- [--strict] [--test262] [--module] --eval \"1 + 2\"");
 }

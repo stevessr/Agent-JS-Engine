@@ -17,12 +17,17 @@
    - per-case `catch_unwind`
    - loop iteration limit
    - 长跑进度输出
-4. 新增 `run_test262.sh`，自动 sparse clone `test262` 的 `test/` 和 `harness/`。
-5. 增加基础 smoke tests，确保运行时和 `print()` 管道正常工作。
+4. 补上基础 `module` 执行链路：
+   - 运行时 `eval_module_with_options`
+   - CLI `--module`
+   - runner 不再直接跳过普通 module tests
+   - `*_FIXTURE.js` 不再被误判为顶层测试
+5. 新增 `run_test262.sh`，自动 sparse clone `test262` 的 `test/` 和 `harness/`。
+6. 增加基础 smoke tests，确保运行时、`print()` 管道和简单模块导入正常工作。
 
 ## Next Steps
 
-- [ ] 补模块执行路径，减少 `module` 类用例跳过量。
+- [ ] 继续补高级模块特性，如 `import attributes` / `import defer` / `source phase imports`。
 - [ ] 扩充 `$262` 宿主对象，实现 `createRealm` / `detachArrayBuffer` 等高频测试钩子。
 - [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。

@@ -10,6 +10,14 @@ const DEFAULT_TEST262_DIR: &str = "test262";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
+const UNSUPPORTED_FEATURES: &[&str] = &[
+    "import-attributes",
+    "json-modules",
+    "source-phase-imports",
+    "import-text",
+    "import-bytes",
+    "import-defer",
+];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Test262Metadata {
@@ -17,6 +25,8 @@ struct Test262Metadata {
     includes: Vec<String>,
     #[serde(default)]
     flags: Vec<String>,
+    #[serde(default)]
+    features: Vec<String>,
     #[serde(default)]
     negative: Option<NegativeMetadata>,
 }
@@ -56,6 +66,10 @@ struct CaseResult {
 impl Test262Metadata {
     fn has_flag(&self, flag: &str) -> bool {
         self.flags.iter().any(|value| value == flag)
+    }
+
+    fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|value| value == feature)
     }
 }
 
@@ -101,11 +115,28 @@ fn extract_metadata(source: &str) -> Test262Metadata {
 }
 
 fn discover_cases(test_root: &Path) -> Vec<TestCase> {
+    let filter = std::env::var("TEST262_FILTER").ok();
+    let max_cases = std::env::var("TEST262_MAX_CASES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+
     let mut cases = WalkDir::new(test_root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
         .filter(|entry| entry.path().extension().and_then(|value| value.to_str()) == Some("js"))
+        .filter(|entry| {
+            entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_none_or(|name| !name.contains("_FIXTURE"))
+        })
+        .filter(|entry| {
+            filter.as_ref().is_none_or(|needle| {
+                entry.path().to_string_lossy().contains(needle)
+            })
+        })
         .filter_map(|entry| {
             let path = entry.into_path();
             let source = fs::read_to_string(&path).ok()?;
@@ -119,6 +150,9 @@ fn discover_cases(test_root: &Path) -> Vec<TestCase> {
         .collect::<Vec<_>>();
 
     cases.sort_by(|left, right| left.path.cmp(&right.path));
+    if let Some(max_cases) = max_cases {
+        cases.truncate(max_cases);
+    }
     cases
 }
 
@@ -137,8 +171,10 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
     if relative.starts_with("test/built-ins/Temporal") {
         return Some("temporal");
     }
-    if case.metadata.has_flag("module") {
-        return Some("module");
+    for feature in UNSUPPORTED_FEATURES {
+        if case.metadata.has_feature(feature) {
+            return Some(feature);
+        }
     }
     if case.source.contains("$262.createRealm")
         || case.source.contains("$262.detachArrayBuffer")
@@ -205,7 +241,13 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
         loop_iteration_limit: Some(LOOP_ITERATION_LIMIT),
     };
 
-    let result = catch_unwind(AssertUnwindSafe(|| engine.eval_with_options(&source, &options)));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        if case.metadata.has_flag("module") {
+            engine.eval_module_with_options(&source, &case.path, suite_root, &options)
+        } else {
+            engine.eval_with_options(&source, &options)
+        }
+    }));
     let result = match result {
         Ok(result) => result,
         Err(payload) => {
@@ -289,6 +331,8 @@ negative:
 #[test]
 #[ignore = "long-running test262 sweep"]
 fn test262_core_profile() {
+    let filter = std::env::var("TEST262_FILTER").ok();
+    let max_cases = std::env::var("TEST262_MAX_CASES").ok();
     let suite_root = PathBuf::from(
         std::env::var("TEST262_DIR").unwrap_or_else(|_| DEFAULT_TEST262_DIR.to_string()),
     );
@@ -378,8 +422,10 @@ fn test262_core_profile() {
         }
     }
 
-    assert!(
-        total_pass_rate >= 60.0,
-        "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
-    );
+    if filter.is_none() && max_cases.is_none() {
+        assert!(
+            total_pass_rate >= 60.0,
+            "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
+        );
+    }
 }

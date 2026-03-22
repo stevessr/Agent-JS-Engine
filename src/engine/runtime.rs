@@ -1,6 +1,12 @@
-use boa_engine::{Context, JsError, JsValue as BoaValue, NativeFunction, Source, js_string};
+use boa_engine::{
+    Context, JsError, JsValue as BoaValue, Module, NativeFunction, Source,
+    builtins::promise::PromiseState, js_string, module::SimpleModuleLoader,
+};
 use std::cell::RefCell;
 use std::fmt;
+use std::io::Cursor;
+use std::path::Path;
+use std::rc::Rc;
 
 thread_local! {
     static PRINT_BUFFER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -86,6 +92,64 @@ impl JsEngine {
             value: display_value(&result, &mut context),
             printed: take_print_buffer(),
         })
+    }
+
+    pub fn eval_module_with_options(
+        &self,
+        source: &str,
+        path: &Path,
+        module_root: &Path,
+        options: &EvalOptions,
+    ) -> Result<EvalOutput, EngineError> {
+        reset_print_buffer();
+
+        let loader = Rc::new(
+            SimpleModuleLoader::new(module_root)
+                .map_err(|err| convert_error(err, &mut Context::default()))?,
+        );
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .map_err(|err| convert_error(err, &mut Context::default()))?;
+
+        if let Some(limit) = options.loop_iteration_limit {
+            context
+                .runtime_limits_mut()
+                .set_loop_iteration_limit(limit);
+        }
+        install_host_globals(&mut context).map_err(|err| convert_error(err, &mut context))?;
+
+        if options.bootstrap_test262 {
+            install_test262_globals(&mut context)
+                .map_err(|err| convert_error(err, &mut context))?;
+        }
+
+        let canonical_path = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
+        let reader = Cursor::new(source.as_bytes());
+        let parsed_source = Source::from_reader(reader, Some(canonical_path.as_path()));
+        let module =
+            Module::parse(parsed_source, None, &mut context).map_err(|err| convert_error(err, &mut context))?;
+
+        loader.insert(canonical_path, module.clone());
+
+        let promise = module.load_link_evaluate(&mut context);
+        context
+            .run_jobs()
+            .map_err(|err| convert_error(err, &mut context))?;
+
+        match promise.state() {
+            PromiseState::Fulfilled(value) => Ok(EvalOutput {
+                value: display_value(&value, &mut context),
+                printed: take_print_buffer(),
+            }),
+            PromiseState::Rejected(reason) => Err(convert_error(JsError::from_opaque(reason.clone()), &mut context)),
+            PromiseState::Pending => Err(EngineError {
+                name: "ModuleError".to_string(),
+                message: "module promise remained pending after job queue drain".to_string(),
+            }),
+        }
     }
 }
 
