@@ -43,6 +43,63 @@ fn engine_executes_basic_module_imports() {
 }
 
 #[test]
+fn engine_supports_dynamic_import_attributes_in_scripts() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.js");
+    let json_path = temp_root.join("value.json");
+    fs::write(&json_path, "262").unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import('./value.json', { with: { type: 'json' } })
+          .then((module) => print(String(module.default)));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_script_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["262".to_string()]);
+}
+
+#[test]
+fn engine_supports_static_text_module_imports() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    let text_path = temp_root.join("note.txt");
+    fs::write(&text_path, "hello from text module").unwrap();
+    fs::write(
+        &entry_path,
+        "import value from './note.txt' with { type: 'text' };\nprint(value);",
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["hello from text module".to_string()]);
+}
+
+#[test]
 fn engine_bootstraps_create_realm_for_test262() {
     let engine = JsEngine::new();
     let output = engine

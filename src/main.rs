@@ -79,8 +79,9 @@ fn run() -> Result<(), String> {
             .eval_module_with_options(&source, &source_path, module_root, &eval_options)
             .map_err(|err| err.to_string())?
     } else {
+        let module_root = source_path.parent().unwrap_or_else(|| std::path::Path::new("."));
         engine
-            .eval_with_options(&source, &eval_options)
+            .eval_script_with_options(&source, &source_path, module_root, &eval_options)
             .map_err(|err| err.to_string())?
     };
 

@@ -3,22 +3,25 @@ use boa_engine::{
     builtins::promise::PromiseState,
     gc::Tracer,
     js_string,
-    module::SimpleModuleLoader,
+    module::{ModuleLoader, Referrer, resolve_module_specifier},
     object::{
         builtins::{JsArrayBuffer, JsSharedArrayBuffer},
         FunctionObjectBuilder, JsObject, ObjectInitializer,
     },
     property::{Attribute, PropertyDescriptor},
     realm::Realm,
-    Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsValue as BoaValue,
-    Module, NativeFunction, Source, Trace,
+    Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString,
+    JsValue as BoaValue, Module, NativeFunction, Source, Trace,
 };
+use boa_engine::module::SyntheticModuleInitializer;
+use regex::{Captures, Regex};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::Cursor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
@@ -26,6 +29,96 @@ use std::time::{Duration, Instant};
 
 thread_local! {
     static PRINT_BUFFER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+const IMPORT_RESOURCE_MARKER: &str = "?__agentjs_type=";
+
+static STATIC_IMPORT_FROM_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)(from\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*type\s*:\s*(['"])(json|text)(['"])\s*\}"#,
+    )
+    .expect("static import-with regex must compile")
+});
+static STATIC_IMPORT_BARE_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)(import\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*type\s*:\s*(['"])(json|text)(['"])\s*\}"#,
+    )
+    .expect("bare import-with regex must compile")
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModuleResourceKind {
+    JavaScript,
+    Json,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ModuleCacheKey {
+    path: PathBuf,
+    kind: ModuleResourceKind,
+}
+
+#[derive(Debug)]
+struct CompatModuleLoader {
+    root: PathBuf,
+    module_map: RefCell<HashMap<ModuleCacheKey, Module>>,
+}
+
+impl CompatModuleLoader {
+    fn new<P: AsRef<Path>>(root: P) -> JsResult<Self> {
+        let root = root.as_ref();
+        let absolute = root.canonicalize().map_err(|error| {
+            JsNativeError::typ()
+                .with_message(format!("could not set module root `{}`", root.display()))
+                .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+        })?;
+        Ok(Self {
+            root: absolute,
+            module_map: RefCell::default(),
+        })
+    }
+
+    fn insert(&self, path: PathBuf, kind: ModuleResourceKind, module: Module) {
+        self.module_map
+            .borrow_mut()
+            .insert(ModuleCacheKey { path, kind }, module);
+    }
+
+    fn get(&self, path: &Path, kind: ModuleResourceKind) -> Option<Module> {
+        self.module_map
+            .borrow()
+            .get(&ModuleCacheKey {
+                path: path.to_path_buf(),
+                kind,
+            })
+            .cloned()
+    }
+}
+
+impl ModuleLoader for CompatModuleLoader {
+    async fn load_imported_module(
+        self: Rc<Self>,
+        referrer: Referrer,
+        specifier: JsString,
+        context: &RefCell<&mut Context>,
+    ) -> JsResult<Module> {
+        let (specifier, kind) = decode_import_resource_kind(&specifier);
+        let path = resolve_module_specifier(
+            Some(&self.root),
+            &specifier,
+            referrer.path(),
+            &mut context.borrow_mut(),
+        )?;
+
+        if let Some(module) = self.get(&path, kind) {
+            return Ok(module);
+        }
+
+        let module = load_module_from_path(&path, kind, &mut context.borrow_mut())?;
+        self.insert(path, kind, module.clone());
+        Ok(module)
+    }
 }
 
 #[derive(Debug)]
@@ -169,16 +262,59 @@ impl JsEngine {
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
-        let wrapped_source;
-        let source = if options.strict {
-            wrapped_source = format!("\"use strict\";\n{source}");
-            wrapped_source.as_str()
-        } else {
-            source
-        };
-
         let result = context
-            .eval(Source::from_bytes(source))
+            .eval(Source::from_bytes(
+                finalize_script_source(source, options.strict, None).as_str(),
+            ))
+            .map_err(|err| convert_error(err, &mut context))?;
+
+        context
+            .run_jobs()
+            .map_err(|err| convert_error(err, &mut context))?;
+
+        Ok(EvalOutput {
+            value: display_value(&result, &mut context),
+            printed: take_print_buffer(),
+        })
+    }
+
+    pub fn eval_script_with_options(
+        &self,
+        source: &str,
+        path: &Path,
+        module_root: &Path,
+        options: &EvalOptions,
+    ) -> Result<EvalOutput, EngineError> {
+        reset_print_buffer();
+
+        let loader = Rc::new(
+            CompatModuleLoader::new(module_root)
+                .map_err(|err| convert_error(err, &mut Context::default()))?,
+        );
+        let mut context = Context::builder()
+            .can_block(true)
+            .module_loader(loader)
+            .build()
+            .map_err(|err| convert_error(err, &mut Context::default()))?;
+
+        if let Some(limit) = options.loop_iteration_limit {
+            context.runtime_limits_mut().set_loop_iteration_limit(limit);
+        }
+        install_host_globals(&mut context).map_err(|err| convert_error(err, &mut context))?;
+
+        if options.bootstrap_test262 {
+            ensure_agent_runtime(&mut context);
+            install_test262_globals(&mut context)
+                .map_err(|err| convert_error(err, &mut context))?;
+        }
+
+        let canonical_path = normalize_source_path(path);
+        let source = finalize_script_source(source, options.strict, Some(canonical_path.as_path()));
+        let result = context
+            .eval(Source::from_reader(
+                Cursor::new(source.as_bytes()),
+                Some(canonical_path.as_path()),
+            ))
             .map_err(|err| convert_error(err, &mut context))?;
 
         context
@@ -201,7 +337,7 @@ impl JsEngine {
         reset_print_buffer();
 
         let loader = Rc::new(
-            SimpleModuleLoader::new(module_root)
+            CompatModuleLoader::new(module_root)
                 .map_err(|err| convert_error(err, &mut Context::default()))?,
         );
         let mut context = Context::builder()
@@ -221,13 +357,14 @@ impl JsEngine {
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
-        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let reader = Cursor::new(source.as_bytes());
+        let canonical_path = normalize_source_path(path);
+        let prepared_source = preprocess_compat_source(source, Some(canonical_path.as_path()));
+        let reader = Cursor::new(prepared_source.as_bytes());
         let parsed_source = Source::from_reader(reader, Some(canonical_path.as_path()));
         let module = Module::parse(parsed_source, None, &mut context)
             .map_err(|err| convert_error(err, &mut context))?;
 
-        loader.insert(canonical_path, module.clone());
+        loader.insert(canonical_path, ModuleResourceKind::JavaScript, module.clone());
 
         let promise = module.load_link_evaluate(&mut context);
         context
@@ -247,6 +384,285 @@ impl JsEngine {
                 name: "ModuleError".to_string(),
                 message: "module promise remained pending after job queue drain".to_string(),
             }),
+        }
+    }
+}
+
+fn normalize_source_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn finalize_script_source(source: &str, strict: bool, source_path: Option<&Path>) -> String {
+    let prepared = preprocess_compat_source(source, source_path);
+    if strict {
+        format!("\"use strict\";\n{prepared}")
+    } else {
+        prepared
+    }
+}
+
+fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> String {
+    let source = rewrite_static_import_attributes(source);
+    let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
+    if rewrote_dynamic_imports {
+        format!("{}\n{source}", build_import_compat_helper(source_path))
+    } else {
+        source
+    }
+}
+
+fn build_import_compat_helper(source_path: Option<&Path>) -> String {
+    let referrer_literal = source_path
+        .map(|path| format!("{:?}", path.to_string_lossy()))
+        .unwrap_or_else(|| "\"\"".to_string());
+    format!(
+        r#"
+const __agentjs_referrer__ = {referrer_literal};
+const __agentjs_import__ = function(specifier, options) {{
+  try {{
+    let resourceType = "";
+    if (arguments.length > 1 && options !== undefined) {{
+      if ((typeof options !== "object" && typeof options !== "function") || options === null) {{
+        return Promise.reject(new TypeError("The second argument to import() must be an object"));
+      }}
+
+      const attributes = options.with;
+      if (attributes !== undefined) {{
+        if ((typeof attributes !== "object" && typeof attributes !== "function") || attributes === null) {{
+          return Promise.reject(new TypeError("The `with` import option must be an object"));
+        }}
+
+        for (const key of Object.keys(attributes)) {{
+          const value = attributes[key];
+          if (typeof value !== "string") {{
+            return Promise.reject(new TypeError("Import attribute values must be strings"));
+          }}
+          if (key === "type" && (value === "json" || value === "text")) {{
+            resourceType = value;
+          }}
+        }}
+      }}
+    }}
+
+    if (resourceType) {{
+      const cachedNamespace = globalThis.__agentjs_get_cached_import__(
+        specifier,
+        resourceType,
+        __agentjs_referrer__
+      );
+      if (cachedNamespace !== undefined) {{
+        return Promise.resolve(cachedNamespace);
+      }}
+      specifier = String(specifier) + "{IMPORT_RESOURCE_MARKER}" + resourceType;
+    }}
+
+    return import(specifier);
+  }} catch (error) {{
+    return Promise.reject(error);
+  }}
+}};
+"#
+    )
+}
+
+fn rewrite_static_import_attributes(source: &str) -> String {
+    let source = STATIC_IMPORT_FROM_WITH_RE.replace_all(source, rewrite_import_attribute_match);
+    STATIC_IMPORT_BARE_WITH_RE
+        .replace_all(source.as_ref(), rewrite_import_attribute_match)
+        .into_owned()
+}
+
+fn rewrite_import_attribute_match(captures: &Captures<'_>) -> String {
+    let prefix = captures.get(1).expect("prefix capture is required").as_str();
+    let quote = captures.get(2).expect("quote capture is required").as_str();
+    let specifier = captures
+        .get(3)
+        .expect("specifier capture is required")
+        .as_str();
+    let resource_type = captures
+        .get(6)
+        .expect("resource type capture is required")
+        .as_str();
+    let rewritten = encode_import_resource_kind(specifier, resource_type);
+    format!("{prefix}{quote}{rewritten}{quote}")
+}
+
+fn rewrite_dynamic_import_calls(source: &str) -> (String, bool) {
+    let bytes = source.as_bytes();
+    let mut rewritten = String::with_capacity(source.len());
+    let mut changed = false;
+    let mut i = 0;
+    let mut last = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_js_string(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i = skip_line_comment(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i = skip_block_comment(bytes, i);
+            }
+            b'i' if matches_dynamic_import(bytes, i) => {
+                rewritten.push_str(&source[last..i]);
+                rewritten.push_str("__agentjs_import__");
+                i += "import".len();
+                last = i;
+                changed = true;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    if !changed {
+        return (source.to_string(), false);
+    }
+
+    rewritten.push_str(&source[last..]);
+    (rewritten, true)
+}
+
+fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
+    const IMPORT: &[u8] = b"import";
+    if bytes.len() < start + IMPORT.len() || &bytes[start..start + IMPORT.len()] != IMPORT {
+        return false;
+    }
+    if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+    if start + IMPORT.len() < bytes.len() && is_identifier_byte(bytes[start + IMPORT.len()]) {
+        return false;
+    }
+
+    let mut cursor = start + IMPORT.len();
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    bytes.get(cursor) == Some(&b'(')
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
+}
+
+fn skip_js_string(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i = (i + 2).min(bytes.len());
+            }
+            current if current == quote => {
+                return i + 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    bytes.len()
+}
+
+fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    while i < bytes.len() && bytes[i] != b'\n' {
+        i += 1;
+    }
+    i
+}
+
+fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start + 2;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            return i + 2;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+fn encode_import_resource_kind(specifier: &str, resource_type: &str) -> String {
+    format!("{specifier}{IMPORT_RESOURCE_MARKER}{resource_type}")
+}
+
+fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourceKind) {
+    let raw = specifier.to_std_string_escaped();
+    let Some((path, resource_type)) = raw.rsplit_once(IMPORT_RESOURCE_MARKER) else {
+        return (specifier.clone(), ModuleResourceKind::JavaScript);
+    };
+
+    let kind = match resource_type {
+        "json" => ModuleResourceKind::Json,
+        "text" => ModuleResourceKind::Text,
+        _ => ModuleResourceKind::JavaScript,
+    };
+    (JsString::from(path), kind)
+}
+
+fn load_module_from_path(
+    path: &Path,
+    kind: ModuleResourceKind,
+    context: &mut Context,
+) -> JsResult<Module> {
+    match kind {
+        ModuleResourceKind::JavaScript => {
+            let source = std::fs::read_to_string(path).map_err(|error| {
+                JsNativeError::typ()
+                    .with_message(format!("could not open file `{}`", path.display()))
+                    .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+            })?;
+            let source = preprocess_compat_source(&source, Some(path));
+            Module::parse(
+                Source::from_reader(Cursor::new(source.as_bytes()), Some(path)),
+                None,
+                context,
+            )
+            .map_err(|error| {
+                JsNativeError::syntax()
+                    .with_message(format!("could not parse module `{}`", path.display()))
+                    .with_cause(error)
+                    .into()
+            })
+        }
+        ModuleResourceKind::Json => {
+            let source = std::fs::read_to_string(path).map_err(|error| {
+                JsNativeError::typ()
+                    .with_message(format!("could not open file `{}`", path.display()))
+                    .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+            })?;
+            Module::parse_json(JsString::from(source.as_str()), context).map_err(|error| {
+                JsNativeError::syntax()
+                    .with_message(format!("could not parse JSON module `{}`", path.display()))
+                    .with_cause(error)
+                    .into()
+            })
+        }
+        ModuleResourceKind::Text => {
+            let source = std::fs::read_to_string(path).map_err(|error| {
+                JsNativeError::typ()
+                    .with_message(format!("could not open file `{}`", path.display()))
+                    .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+            })?;
+            Ok(Module::synthetic(
+                &[js_string!("default")],
+                SyntheticModuleInitializer::from_copy_closure_with_captures(
+                    |module, value, _context| {
+                        module.set_export(&js_string!("default"), value.clone())?;
+                        Ok(())
+                    },
+                    BoaValue::from(JsString::from(source.as_str())),
+                ),
+                None,
+                None,
+                context,
+            ))
         }
     }
 }
@@ -423,6 +839,11 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         js_string!("print"),
         1,
         NativeFunction::from_fn_ptr(host_print),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_get_cached_import__"),
+        3,
+        NativeFunction::from_fn_ptr(host_get_cached_import),
     )?;
     install_array_buffer_detached_getter(context)?;
     Ok(())
@@ -852,6 +1273,47 @@ fn host_worker_report(
         .to_std_string_lossy();
     agent_runtime(context)?.push_report(report);
     Ok(BoaValue::undefined())
+}
+
+fn host_get_cached_import(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let specifier = args.get_or_undefined(0).to_string(context)?;
+    let resource_type = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_lossy();
+    let referrer_path = args
+        .get_or_undefined(2)
+        .to_string(context)?
+        .to_std_string_lossy();
+
+    let kind = match resource_type.as_str() {
+        "json" => ModuleResourceKind::Json,
+        "text" => ModuleResourceKind::Text,
+        _ => return Ok(BoaValue::undefined()),
+    };
+
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(BoaValue::undefined());
+    };
+    if referrer_path.is_empty() {
+        return Ok(BoaValue::undefined());
+    }
+
+    let path = resolve_module_specifier(
+        Some(&loader.root),
+        &specifier,
+        Some(Path::new(&referrer_path)),
+        context,
+    )?;
+
+    Ok(loader
+        .get(&path, kind)
+        .map(|module| module.namespace(context).into())
+        .unwrap_or_default())
 }
 
 fn host_worker_leaving(_: &BoaValue, _: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {

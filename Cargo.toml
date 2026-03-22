@@ -6,6 +6,7 @@ default-run = "ai-agent"
 
 [dependencies]
 boa_engine = "0.21.0"
+regex = "1.12.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"

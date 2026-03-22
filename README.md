@@ -5,7 +5,7 @@
 ## 当前架构
 
 - `src/engine/runtime.rs`
-  轻量运行时封装。负责创建 Boa `Context`、注册宿主函数、执行脚本、收集 `print()` 输出，并为 `test262` 注入最小宿主对象。
+  轻量运行时封装。负责创建 Boa `Context`、注册宿主函数、执行脚本、收集 `print()` 输出、处理 `import()` / 资源模块兼容层，并为 `test262` 注入最小宿主对象。
 - `src/main.rs`
   CLI 入口。支持 `--eval`、直接执行 JS 文件，以及 `--module`。
 - `tests/test262_runner.rs`
@@ -46,8 +46,14 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 
 - 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
 - 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()` 和 `$262.agent`
+- 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
-- 跳过 `staging`、`intl402`、`built-ins/Temporal` 和部分高级模块扩展特性
+- 跳过 `staging`、`intl402`、`built-ins/Temporal` 以及暂未落地的 `import-defer` / `source-phase-imports` / `import-bytes`
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测
 
-这套策略的目标是先把“真实可执行的 ES 核心能力”稳定拉到 60% 以上，再逐步补齐高级模块语义和剩余宿主能力。
+已验证样本：
+
+- `test/language/import/import-attributes/`: `17 / 17` 通过
+- `test/language/expressions/dynamic-import/import-attributes/`: `23 / 23` 通过
+
+这套策略的目标是先把“真实可执行的 ES 核心能力”稳定拉到 60% 以上，再逐步补齐剩余高级模块语义和宿主能力。
