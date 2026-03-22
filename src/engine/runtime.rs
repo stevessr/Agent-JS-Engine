@@ -1509,18 +1509,20 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
 }
 
 fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
-    let regexp_ctor = context.intrinsics().constructors().reg_exp().constructor();
+    let regexp_ctor = context.intrinsics().constructors().regexp().constructor();
+    let receiver_check =
+        "if (this !== RegExp) { throw new TypeError('RegExp legacy static accessor called on incompatible receiver'); }";
 
     for i in 1..=9 {
-        let name = format!("${}", i);
-        let getter = build_builtin_function(
-            context,
-            js_string!(format!("get {}", name)),
-            0,
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(BoaValue::from(js_string!("")))),
-        );
+        let name = format!("${i}");
+        let getter = context.eval(Source::from_bytes(&format!(
+            "(function() {{ {receiver_check} return ''; }})"
+        )))?;
+        let getter = getter
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp legacy getter"))?;
         regexp_ctor.define_property_or_throw(
-            js_string!(name),
+            JsString::from(name.as_str()),
             PropertyDescriptor::builder()
                 .get(getter)
                 .enumerable(false)
@@ -1529,21 +1531,18 @@ fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
         )?;
     }
 
-    let static_props = [
-        ("input", "$_"),
+    for (full, short) in [
         ("lastMatch", "$&"),
         ("lastParen", "$+"),
         ("leftContext", "$`"),
         ("rightContext", "$'"),
-    ];
-
-    for (full, short) in static_props {
-        let getter = build_builtin_function(
-            context,
-            js_string!(format!("get {}", full)),
-            0,
-            NativeFunction::from_fn_ptr(|_, _, _| Ok(BoaValue::from(js_string!("")))),
-        );
+    ] {
+        let getter = context.eval(Source::from_bytes(&format!(
+            "(function() {{ {receiver_check} return ''; }})"
+        )))?;
+        let getter = getter
+            .as_object()
+            .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp legacy getter"))?;
         for name in [full, short] {
             regexp_ctor.define_property_or_throw(
                 js_string!(name),
@@ -1556,9 +1555,32 @@ fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
         }
     }
 
+    let input_getter = context.eval(Source::from_bytes(&format!(
+        "(function() {{ {receiver_check} return ''; }})"
+    )))?;
+    let input_getter = input_getter
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp input getter"))?;
+    let input_setter = context.eval(Source::from_bytes(&format!(
+        "(function(_value) {{ {receiver_check} return undefined; }})"
+    )))?;
+    let input_setter = input_setter
+        .as_object()
+        .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp input setter"))?;
+    for name in ["input", "$_"] {
+        regexp_ctor.define_property_or_throw(
+            js_string!(name),
+            PropertyDescriptor::builder()
+                .get(input_getter.clone())
+                .set(input_setter.clone())
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
+
     Ok(())
 }
-
 
 fn install_array_buffer_detached_getter(context: &mut Context) -> boa_engine::JsResult<()> {
     let prototype = context

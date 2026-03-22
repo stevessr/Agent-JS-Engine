@@ -536,6 +536,62 @@ fn engine_bootstraps_test262_agent_broadcasts() {
     assert_eq!(output.value.as_deref(), Some("1"));
 }
 
+#[test]
+fn engine_rejects_new_import_defer_and_source_syntax() {
+    let engine = JsEngine::new();
+
+    for source in [
+        "new import.defer('./dep.mjs');",
+        "new import.source('./dep.mjs');",
+    ] {
+        let error = engine.eval(source).unwrap_err();
+        assert_eq!(error.name, "SyntaxError");
+    }
+}
+
+#[test]
+fn engine_bootstraps_legacy_regexp_static_accessors() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            const inputDesc = Object.getOwnPropertyDescriptor(RegExp, 'input');
+            const aliasInputDesc = Object.getOwnPropertyDescriptor(RegExp, '$_');
+            const lastMatchDesc = Object.getOwnPropertyDescriptor(RegExp, 'lastMatch');
+            const aliasLastMatchDesc = Object.getOwnPropertyDescriptor(RegExp, '$&');
+            const indexDesc = Object.getOwnPropertyDescriptor(RegExp, '$1');
+
+            let getterThrows = false;
+            let setterThrows = false;
+            class MyRegExp extends RegExp {}
+            try { Reflect.get(RegExp, 'input', MyRegExp); } catch (error) { getterThrows = error instanceof TypeError; }
+            try { Reflect.set(RegExp, 'input', '', MyRegExp); } catch (error) { setterThrows = error instanceof TypeError; }
+
+            typeof inputDesc.get === 'function' &&
+              typeof inputDesc.set === 'function' &&
+              typeof aliasInputDesc.get === 'function' &&
+              typeof aliasInputDesc.set === 'function' &&
+              inputDesc.enumerable === false &&
+              inputDesc.configurable === true &&
+              lastMatchDesc.set === undefined &&
+              aliasLastMatchDesc.set === undefined &&
+              typeof lastMatchDesc.get === 'function' &&
+              typeof aliasLastMatchDesc.get === 'function' &&
+              typeof indexDesc.get === 'function' &&
+              indexDesc.set === undefined &&
+              getterThrows &&
+              setterThrows;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
