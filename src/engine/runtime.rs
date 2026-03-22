@@ -8,7 +8,7 @@ use boa_engine::{
         builtins::{JsArrayBuffer, JsSharedArrayBuffer},
         FunctionObjectBuilder, JsObject, ObjectInitializer,
     },
-    property::Attribute,
+    property::{Attribute, PropertyDescriptor},
     realm::Realm,
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsValue as BoaValue,
     Module, NativeFunction, Source, Trace,
@@ -424,6 +424,34 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         1,
         NativeFunction::from_fn_ptr(host_print),
     )?;
+    install_array_buffer_detached_getter(context)?;
+    Ok(())
+}
+
+fn install_array_buffer_detached_getter(context: &mut Context) -> boa_engine::JsResult<()> {
+    let prototype = context
+        .intrinsics()
+        .constructors()
+        .array_buffer()
+        .prototype();
+    if prototype.has_own_property(js_string!("detached"), context)? {
+        return Ok(());
+    }
+
+    let getter = build_builtin_function(
+        context,
+        js_string!("get detached"),
+        0,
+        NativeFunction::from_fn_ptr(host_array_buffer_detached_getter),
+    );
+    prototype.define_property_or_throw(
+        js_string!("detached"),
+        PropertyDescriptor::builder()
+            .get(getter)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
     Ok(())
 }
 
@@ -731,6 +759,22 @@ fn host_detach_array_buffer(
     let buffer = JsArrayBuffer::from_object(buffer)?;
     buffer.detach(&BoaValue::undefined())?;
     Ok(BoaValue::undefined())
+}
+
+fn host_array_buffer_detached_getter(
+    this: &BoaValue,
+    _: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    let object = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("get ArrayBuffer.prototype.detached called with invalid `this`")
+    })?;
+    let buffer = JsArrayBuffer::from_object(object).map_err(|_| {
+        JsNativeError::typ()
+            .with_message("get ArrayBuffer.prototype.detached called with invalid `this`")
+    })?;
+    Ok(buffer.data().is_none().into())
 }
 
 fn host_agent_start(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
