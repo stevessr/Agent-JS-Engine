@@ -139,6 +139,58 @@ fn engine_supports_static_bytes_module_imports() {
 }
 
 #[test]
+fn engine_rejects_import_source_for_source_text_modules() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.js");
+    let module_path = temp_root.join("dep.mjs");
+    fs::write(&module_path, "export const value = 1;").unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import.source('./dep.mjs').catch((error) => print(error.name));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_script_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["SyntaxError".to_string()]);
+}
+
+#[test]
+fn engine_accepts_static_source_phase_import_syntax() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    let module_path = temp_root.join("dep.mjs");
+    fs::write(&module_path, "export const value = 1;").unwrap();
+    fs::write(&entry_path, "import source source from './dep.mjs';").unwrap();
+
+    let error = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.name, "SyntaxError");
+}
+
+#[test]
 fn engine_enforces_immutable_array_buffer_wrappers() {
     let engine = JsEngine::new();
     let output = engine

@@ -32,6 +32,8 @@ thread_local! {
 }
 
 const IMPORT_RESOURCE_MARKER: &str = "?__agentjs_type=";
+const SOURCE_PHASE_UNAVAILABLE_MESSAGE: &str =
+    "source phase imports are not supported for source text modules";
 
 static STATIC_IMPORT_FROM_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -44,6 +46,12 @@ static STATIC_IMPORT_BARE_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
         r#"(?s)(import\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*type\s*:\s*(['"])(json|text|bytes)(['"])\s*\}"#,
     )
     .expect("bare import-with regex must compile")
+});
+static STATIC_SOURCE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)import\s+source\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+(['"])([^'"]+)(['"])\s*;?"#,
+    )
+    .expect("static source-phase import regex must compile")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -504,7 +512,9 @@ fn finalize_script_source(source: &str, strict: bool, source_path: Option<&Path>
 fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> String {
     let source = rewrite_static_import_attributes(source);
     let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
-    if rewrote_dynamic_imports {
+    let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
+    let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
+    if rewrote_dynamic_imports || rewrote_import_source_calls || rewrote_static_source_imports {
         format!("{}\n{source}", build_import_compat_helper(source_path))
     } else {
         source
@@ -560,6 +570,20 @@ const __agentjs_import__ = function(specifier, options) {{
   }} catch (error) {{
     return Promise.reject(error);
   }}
+}};
+const __agentjs_import_source__ = function(specifier) {{
+  try {{
+    specifier = String(specifier);
+    globalThis.__agentjs_assert_import_source__(specifier, __agentjs_referrer__);
+    return Promise.reject(new SyntaxError("{SOURCE_PHASE_UNAVAILABLE_MESSAGE}"));
+  }} catch (error) {{
+    return Promise.reject(error);
+  }}
+}};
+const __agentjs_import_source_static__ = function(specifier) {{
+  specifier = String(specifier);
+  globalThis.__agentjs_assert_import_source__(specifier, __agentjs_referrer__);
+  throw new SyntaxError("{SOURCE_PHASE_UNAVAILABLE_MESSAGE}");
 }};
 "#
     )
@@ -629,6 +653,64 @@ fn rewrite_dynamic_import_calls(source: &str) -> (String, bool) {
     (rewritten, true)
 }
 
+fn rewrite_dynamic_import_source_calls(source: &str) -> (String, bool) {
+    let bytes = source.as_bytes();
+    let mut rewritten = String::with_capacity(source.len());
+    let mut changed = false;
+    let mut i = 0;
+    let mut last = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => {
+                i = skip_js_string(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i = skip_line_comment(bytes, i);
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i = skip_block_comment(bytes, i);
+            }
+            b'i' if matches_dynamic_import_source(bytes, i) => {
+                rewritten.push_str(&source[last..i]);
+                rewritten.push_str("__agentjs_import_source__");
+                i += "import.source".len();
+                last = i;
+                changed = true;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    if !changed {
+        return (source.to_string(), false);
+    }
+
+    rewritten.push_str(&source[last..]);
+    (rewritten, true)
+}
+
+fn rewrite_static_source_phase_imports(source: &str) -> (String, bool) {
+    let mut changed = false;
+    let rewritten = STATIC_SOURCE_IMPORT_RE.replace_all(source, |captures: &Captures<'_>| {
+        changed = true;
+        let binding = captures
+            .get(1)
+            .expect("binding capture is required")
+            .as_str();
+        let quote = captures.get(2).expect("quote capture is required").as_str();
+        let specifier = captures
+            .get(3)
+            .expect("specifier capture is required")
+            .as_str();
+        format!("const {binding} = __agentjs_import_source_static__({quote}{specifier}{quote});")
+    });
+
+    (rewritten.into_owned(), changed)
+}
+
 fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
     const IMPORT: &[u8] = b"import";
     if bytes.len() < start + IMPORT.len() || &bytes[start..start + IMPORT.len()] != IMPORT {
@@ -642,6 +724,25 @@ fn matches_dynamic_import(bytes: &[u8], start: usize) -> bool {
     }
 
     let mut cursor = start + IMPORT.len();
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    bytes.get(cursor) == Some(&b'(')
+}
+
+fn matches_dynamic_import_source(bytes: &[u8], start: usize) -> bool {
+    const IMPORT_SOURCE: &[u8] = b"import.source";
+    if bytes.len() < start + IMPORT_SOURCE.len()
+        || &bytes[start..start + IMPORT_SOURCE.len()] != IMPORT_SOURCE
+    {
+        return false;
+    }
+    if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+
+    let mut cursor = start + IMPORT_SOURCE.len();
     while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
         cursor += 1;
     }
@@ -722,6 +823,9 @@ fn load_module_from_path(
                     .with_message(format!("could not open file `{}`", path.display()))
                     .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
             })?;
+            if let Some(module) = maybe_build_source_phase_module(path, &source, context)? {
+                return Ok(module);
+            }
             let source = preprocess_compat_source(&source, Some(path));
             Module::parse(
                 Source::from_reader(Cursor::new(source.as_bytes()), Some(path)),
@@ -799,6 +903,60 @@ fn load_module_from_path(
             ))
         }
     }
+}
+
+fn maybe_build_source_phase_module(
+    path: &Path,
+    source: &str,
+    context: &mut Context,
+) -> JsResult<Option<Module>> {
+    let specifiers = STATIC_SOURCE_IMPORT_RE
+        .captures_iter(source)
+        .map(|captures| {
+            captures
+                .get(3)
+                .expect("specifier capture is required")
+                .as_str()
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+
+    if specifiers.is_empty() {
+        return Ok(None);
+    }
+
+    let root = context
+        .downcast_module_loader::<CompatModuleLoader>()
+        .map(|loader| loader.root.clone());
+
+    for specifier in specifiers {
+        let resolved = resolve_module_specifier(
+            root.as_deref(),
+            &JsString::from(specifier.as_str()),
+            Some(path),
+            context,
+        )?;
+        std::fs::metadata(&resolved).map_err(|error| {
+            JsNativeError::typ()
+                .with_message(format!("could not open file `{}`", resolved.display()))
+                .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
+        })?;
+    }
+
+    Ok(Some(Module::synthetic(
+        &[],
+        SyntheticModuleInitializer::from_copy_closure_with_captures(
+            |_, _, _| {
+                Err(JsNativeError::syntax()
+                    .with_message(SOURCE_PHASE_UNAVAILABLE_MESSAGE)
+                    .into())
+            },
+            (),
+        ),
+        None,
+        None,
+        context,
+    )))
 }
 
 impl AgentRuntime {
@@ -979,6 +1137,11 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         js_string!("__agentjs_get_cached_import__"),
         3,
         NativeFunction::from_fn_ptr(host_get_cached_import),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_assert_import_source__"),
+        2,
+        NativeFunction::from_fn_ptr(host_assert_import_source),
     )?;
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
@@ -2173,6 +2336,30 @@ fn host_get_cached_import(
         .get(&path, kind)
         .map(|module| module.namespace(context).into())
         .unwrap_or_default())
+}
+
+fn host_assert_import_source(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let specifier = args.get_or_undefined(0).to_string(context)?;
+    let referrer_path = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_lossy();
+
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(BoaValue::undefined());
+    };
+
+    let referrer = if referrer_path.is_empty() {
+        None
+    } else {
+        Some(Path::new(&referrer_path))
+    };
+    let _ = resolve_module_specifier(Some(&loader.root), &specifier, referrer, context)?;
+    Ok(BoaValue::undefined())
 }
 
 fn host_worker_leaving(_: &BoaValue, _: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {

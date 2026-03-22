@@ -178,8 +178,25 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
 }
 
 fn supports_feature_case(relative: &Path, feature: &str) -> bool {
-    matches!(feature, "source-phase-imports")
-        && relative.starts_with("test/built-ins/AbstractModuleSource")
+    match feature {
+        "source-phase-imports" => supports_source_phase_import_case(relative),
+        _ => false,
+    }
+}
+
+fn supports_source_phase_import_case(relative: &Path) -> bool {
+    relative.starts_with("test/built-ins/AbstractModuleSource")
+        || relative == Path::new("test/language/module-code/source-phase-import/import-source.js")
+        || relative.starts_with("test/language/expressions/dynamic-import/catch")
+        || is_valid_dynamic_import_source_syntax_case(relative)
+}
+
+fn is_valid_dynamic_import_source_syntax_case(relative: &Path) -> bool {
+    relative.starts_with("test/language/expressions/dynamic-import/syntax/valid")
+        && relative
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.contains("import-source"))
 }
 
 fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) -> bool {

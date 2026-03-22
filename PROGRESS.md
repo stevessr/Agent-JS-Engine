@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`；仍会跳过 `intl402`、`Temporal`、`staging` 和少数更重的高级模块扩展。
+- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes` 和一部分 `source-phase-imports`；仍会跳过 `intl402`、`Temporal`、`staging` 和少数更重的高级模块扩展。
 
 ## Completed Work
 
@@ -46,10 +46,18 @@
      - immutable `ArrayBuffer` 相关 20 个样本：`20 / 20` 通过
      - `test/built-ins/ArrayBuffer/prototype/transfer/`：`24 / 24` 通过
      - `test/built-ins/ArrayBuffer/prototype/transferToFixedLength/`：`24 / 24` 通过
+12. 扩充 `source-phase-imports` 兼容子集：
+   - 支持 `import.source(...)` 的兼容 helper，保留 `ToString` / abrupt reject 行为，并对 SourceTextModule 返回 `SyntaxError`
+   - 支持最小静态 `import source x from ...` 语法兼容
+   - loader 会在静态 source-phase import 上优先做宿主级路径检查，不让普通 linking error 抢先覆盖 `<do not resolve>` 这类 case
+   - runner 现在会放行 `import-source` 动态 catch、valid syntax 和 `module-code/source-phase-import/import-source.js`
+   - 验证：
+     - `TEST262_FILTER='import-source'`：`91 / 91` 执行通过，`85` 个更重 case 继续跳过
+     - `test/language/module-code/source-phase-import/import-source.js`：`1 / 1` 通过
 
 ## Next Steps
 
-- [ ] 继续补剩余高级模块特性，如 `import-defer` / `source-phase-imports`。
+- [ ] 继续补剩余高级模块特性，如 `import-defer` / 更完整的 `source-phase-imports`。
 - [ ] 继续扩充其余 host hooks，例如 `gc` 等较少见的测试接口。
 - [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。
