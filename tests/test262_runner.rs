@@ -133,9 +133,9 @@ fn discover_cases(test_root: &Path) -> Vec<TestCase> {
                 .is_none_or(|name| !name.contains("_FIXTURE"))
         })
         .filter(|entry| {
-            filter.as_ref().is_none_or(|needle| {
-                entry.path().to_string_lossy().contains(needle)
-            })
+            filter
+                .as_ref()
+                .is_none_or(|needle| entry.path().to_string_lossy().contains(needle))
         })
         .filter_map(|entry| {
             let path = entry.into_path();
@@ -176,11 +176,11 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
             return Some(feature);
         }
     }
-    if case.source.contains("$262.createRealm")
-        || case.source.contains("$262.detachArrayBuffer")
-        || case.source.contains("$262.agent")
-    {
-        return Some("$262-host-hooks");
+    if case.source.contains("$262.detachArrayBuffer") {
+        return Some("$262.detachArrayBuffer");
+    }
+    if case.source.contains("$262.agent") {
+        return Some("$262.agent");
     }
 
     None
@@ -192,7 +192,10 @@ fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
     }
 
     if matches!(
-        case.metadata.negative.as_ref().and_then(|negative| negative.phase.as_deref()),
+        case.metadata
+            .negative
+            .as_ref()
+            .and_then(|negative| negative.phase.as_deref()),
         Some("parse")
     ) {
         return case.source.clone();

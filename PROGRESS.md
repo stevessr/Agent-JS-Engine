@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，会跳过 `intl402`、`Temporal`、`staging`、`module` 和部分强依赖宿主钩子的 `$262.*` 用例。
+- 当前跑测 profile 为 `core profile`，支持基础 `module` 和 `$262.createRealm()`，仍会跳过 `intl402`、`Temporal`、`staging`、部分高级模块扩展，以及 `$262.detachArrayBuffer` / `$262.agent`。
 
 ## Completed Work
 
@@ -22,12 +22,13 @@
    - CLI `--module`
    - runner 不再直接跳过普通 module tests
    - `*_FIXTURE.js` 不再被误判为顶层测试
-5. 新增 `run_test262.sh`，自动 sparse clone `test262` 的 `test/` 和 `harness/`。
-6. 增加基础 smoke tests，确保运行时、`print()` 管道和简单模块导入正常工作。
+5. 扩充 `$262` 宿主对象，补上 `createRealm()` 和跨 realm `evalScript()`，并解除对应测试跳过。
+6. 新增 `run_test262.sh`，自动 sparse clone `test262` 的 `test/` 和 `harness/`。
+7. 增加基础 smoke tests，确保运行时、`print()` 管道、简单模块导入和 `createRealm()` 正常工作。
 
 ## Next Steps
 
 - [ ] 继续补高级模块特性，如 `import attributes` / `import defer` / `source phase imports`。
-- [ ] 扩充 `$262` 宿主对象，实现 `createRealm` / `detachArrayBuffer` 等高频测试钩子。
+- [ ] 继续扩充 `$262` 宿主对象，优先实现 `detachArrayBuffer` / `agent` 等剩余高频测试钩子。
 - [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。

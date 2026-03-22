@@ -1,4 +1,4 @@
-use ai_agent::engine::JsEngine;
+use ai_agent::engine::{EvalOptions, JsEngine};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -40,6 +40,26 @@ fn engine_executes_basic_module_imports() {
         .unwrap();
 
     assert_eq!(output.value, None);
+}
+
+#[test]
+fn engine_bootstraps_create_realm_for_test262() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            const other = $262.createRealm();
+            other.evalScript("globalThis.marker = 41;");
+            other.global.marker === 41 && other.global.Array !== Array;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
 }
 
 fn unique_temp_dir() -> PathBuf {
