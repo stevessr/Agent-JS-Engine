@@ -176,10 +176,6 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
             return Some(feature);
         }
     }
-    if case.source.contains("$262.agent") {
-        return Some("$262.agent");
-    }
-
     None
 }
 

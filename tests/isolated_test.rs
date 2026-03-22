@@ -82,6 +82,38 @@ fn engine_bootstraps_detach_array_buffer_for_test262() {
     assert_eq!(output.value.as_deref(), Some("0"));
 }
 
+#[test]
+fn engine_bootstraps_test262_agent_broadcasts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            const sab = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+            $262.agent.start(`
+              $262.agent.receiveBroadcast(function(sab) {
+                const view = new Int32Array(sab);
+                Atomics.add(view, 0, 1);
+                $262.agent.report(String(Atomics.load(view, 0)));
+                $262.agent.leaving();
+              });
+            `);
+            $262.agent.broadcast(sab);
+            let report = null;
+            while ((report = $262.agent.getReport()) === null) {
+              $262.agent.sleep(1);
+            }
+            report;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("1"));
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
