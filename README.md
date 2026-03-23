@@ -45,13 +45,13 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 当前 runner 关注可稳定验证的 core profile：
 
 - 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
-- 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()`、`$262.agent` 和 `$262.AbstractModuleSource`
+- 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource` 和最小 `Intl`
 - 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`，并在已缓存模块上复用 dynamic import namespace object
 - 支持 `import-defer` 的兼容子集：`import.defer(...)` 动态调用，以及基于 deferred wrapper module 的最小 `import defer * as ns from ...` 语义；当前可覆盖 dynamic syntax / abrupt-reject / dynamic sync module graph / static syntax / deferred namespace exotic object / evaluation-triggers 大部分子组 / resolution-error / evaluation-sync / module-throws / 同步 re-entrancy 错误组
 - 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`、以及对应的 test262 `import-source` 动态 catch / valid syntax / module-code parse 组
 - 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
-- 跳过 `staging`、`intl402` 以及暂未落地的 `import-defer` 延迟求值语义和更完整的 `source-phase-imports`
+- 跳过 `staging` 以及暂未落地的更重 `intl402` 子目录、`import-defer` 延迟求值语义和更完整的 `source-phase-imports`
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测；test runner 本身会在更大的线程栈上执行，减少深递归/深嵌套样本导致的测试线程炸栈
 
 已验证样本：

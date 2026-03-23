@@ -805,6 +805,95 @@ fn engine_exposes_temporal_in_modules() {
 }
 
 #[test]
+fn engine_exposes_intl_in_eval_scripts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            typeof Intl === 'object' &&
+              typeof Intl.NumberFormat === 'function' &&
+              new Intl.NumberFormat('en-US').format(1234.5) === '1,234.5' &&
+              new Intl.Collator('en').compare('a', 'b') < 0;
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
+}
+
+#[test]
+fn engine_exposes_intl_in_file_scripts() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.js");
+    fs::write(
+        &entry_path,
+        r#"
+        print(typeof Intl);
+        print(typeof Intl.NumberFormat);
+        print(new Intl.NumberFormat('en-US').format(1234.5));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_script_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "object".to_string(),
+            "function".to_string(),
+            "1,234.5".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn engine_exposes_intl_in_modules() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        print(typeof Intl);
+        print(typeof Intl.NumberFormat);
+        print(new Intl.NumberFormat('en-US').format(1234.5));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "object".to_string(),
+            "function".to_string(),
+            "1,234.5".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn engine_bootstraps_temporal_in_test262_agents() {
     let engine = JsEngine::new();
     let output = engine

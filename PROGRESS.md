@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、一部分 `import-defer` 和一部分 `source-phase-imports`；仍会跳过 `intl402`、`staging` 和少数更重的高级模块扩展。
+- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`、基础 `Intl`/`intl402` 顶层样本，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、一部分 `import-defer` 和一部分 `source-phase-imports`；仍会跳过 `staging` 和更重的 `intl402` / 高级模块扩展。
 
 ## Completed Work
 
@@ -89,6 +89,15 @@
      - `TEST262_FILTER='test/language/expressions/dynamic-import/' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
      - `TEST262_FILTER='test/language/statements/function/S13.2.1_A1_T1.js' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
      - `cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
+16. 启用最小 `Intl` / `intl402` 子集：
+   - 在 `Cargo.toml` 为 `boa_engine` 打开 `intl_bundled` feature，使用 Boa 自带 ICU/provider 数据，避免额外 provider wiring
+   - 增加 `Intl` smoke tests，验证脚本和 module 入口都能构造 `Intl.NumberFormat` / `Intl.Collator`
+   - runner 当前先放行 `test/intl402/*.js` 顶层基础样本，保守跳过更重的分目录 case
+   - 验证：
+     - `cargo test --test isolated_test engine_exposes_intl_in_eval_scripts -- --exact`：通过
+     - `cargo test --test isolated_test engine_exposes_intl_in_file_scripts -- --exact`：通过
+     - `cargo test --test isolated_test engine_exposes_intl_in_modules -- --exact`：通过
+     - `test/intl402/*.js` 顶层 22 个样本逐个运行：全部通过
 
 ## Next Steps
 
