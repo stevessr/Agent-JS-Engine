@@ -215,24 +215,7 @@ fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) 
 }
 
 fn supports_intl402_case(relative: &Path) -> bool {
-    relative.parent() == Some(Path::new("test/intl402"))
-        || relative.starts_with("test/intl402/Array")
-        || relative.starts_with("test/intl402/BigInt")
-        || relative.starts_with("test/intl402/Collator")
-        || relative.starts_with("test/intl402/Date")
-        || relative.starts_with("test/intl402/DateTimeFormat")
-        || relative.starts_with("test/intl402/DisplayNames")
-        || relative.starts_with("test/intl402/DurationFormat")
-        || relative.starts_with("test/intl402/Intl")
-        || relative.starts_with("test/intl402/ListFormat")
-        || relative.starts_with("test/intl402/Locale")
-        || relative.starts_with("test/intl402/Number")
-        || relative.starts_with("test/intl402/NumberFormat")
-        || relative.starts_with("test/intl402/PluralRules")
-        || relative.starts_with("test/intl402/RelativeTimeFormat")
-        || relative.starts_with("test/intl402/Segmenter")
-        || relative.starts_with("test/intl402/String")
-        || relative.starts_with("test/intl402/TypedArray")
+    relative.starts_with("test/intl402")
 }
 
 fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
