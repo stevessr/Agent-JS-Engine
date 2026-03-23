@@ -212,6 +212,7 @@ fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) 
     relative.starts_with("test/language/expressions/dynamic-import")
         || relative.starts_with("test/language/import/import-attributes")
         || relative.starts_with("test/language/import/import-bytes")
+        || relative.starts_with("test/language/module-code/import-attributes")
 }
 
 fn supports_intl402_case(relative: &Path) -> bool {
