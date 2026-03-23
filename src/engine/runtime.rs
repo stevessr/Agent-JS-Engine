@@ -9,7 +9,7 @@ use boa_engine::{
     module::{ModuleLoader, Referrer, resolve_module_specifier},
     object::{
         FunctionObjectBuilder, IntegrityLevel, JsObject, ObjectInitializer,
-        builtins::{JsArray, JsArrayBuffer, JsProxy, JsSharedArrayBuffer, JsUint8Array},
+        builtins::{JsArray, JsArrayBuffer, JsPromise, JsProxy, JsSharedArrayBuffer, JsUint8Array},
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     realm::Realm,
@@ -925,16 +925,7 @@ const __agentjs_import__ = function(specifier, options) {{
 const __agentjs_import_defer__ = function(specifier) {{
   try {{
     specifier = String(specifier);
-    const cachedNamespace = globalThis.__agentjs_get_cached_import__(
-      specifier,
-      "defer",
-      __agentjs_referrer__
-    );
-    if (cachedNamespace !== undefined) {{
-      return Promise.resolve(cachedNamespace);
-    }}
-    specifier = specifier + "{IMPORT_RESOURCE_MARKER}" + "defer";
-    return import(specifier).then((module) => module.default);
+    return globalThis.__agentjs_dynamic_import_defer__(specifier, __agentjs_referrer__);
   }} catch (error) {{
     return Promise.reject(error);
   }}
@@ -1763,6 +1754,11 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         js_string!("__agentjs_assert_import_source__"),
         2,
         NativeFunction::from_fn_ptr(host_assert_import_source),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_dynamic_import_defer__"),
+        2,
+        NativeFunction::from_fn_ptr(host_dynamic_import_defer),
     )?;
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
@@ -3070,6 +3066,53 @@ fn host_assert_import_source(
     };
     let _ = resolve_module_specifier(Some(&loader.root), &specifier, referrer, context)?;
     Ok(BoaValue::undefined())
+}
+
+fn host_dynamic_import_defer(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let specifier = args.get_or_undefined(0).to_string(context)?;
+    let referrer_path = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_lossy();
+
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(JsPromise::resolve(BoaValue::undefined(), context).into());
+    };
+    if referrer_path.is_empty() {
+        return Ok(JsPromise::resolve(BoaValue::undefined(), context).into());
+    }
+
+    let path = resolve_module_specifier(
+        Some(&loader.root),
+        &specifier,
+        Some(Path::new(&referrer_path)),
+        context,
+    )?;
+
+    if let Some(module) = loader.get(&path, ModuleResourceKind::Deferred) {
+        let namespace = module.namespace(context).get(js_string!("default"), context)?;
+        return Ok(JsPromise::resolve(namespace, context).into());
+    }
+
+    let deferred_module = load_deferred_namespace_module(&path, context)?;
+    loader.insert(
+        path.clone(),
+        ModuleResourceKind::Deferred,
+        deferred_module.clone(),
+    );
+    let namespace = deferred_module
+        .namespace(context)
+        .get(js_string!("default"), context)?;
+
+    if let Err(error) = ensure_deferred_module_loaded_and_linked(&path, context) {
+        return Ok(JsPromise::reject(error, context).into());
+    }
+
+    Ok(JsPromise::resolve(namespace, context).into())
 }
 
 fn host_deferred_namespace_get(
