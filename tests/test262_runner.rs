@@ -169,7 +169,7 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         .strip_prefix(suite_root)
         .unwrap_or(case.path.as_path());
 
-    if relative.starts_with("test/staging") {
+    if relative.starts_with("test/staging") && !supports_staging_case(relative) {
         return Some("staging");
     }
     if relative.starts_with("test/intl402") && !supports_intl402_case(relative) {
@@ -216,6 +216,10 @@ fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) 
 
 fn supports_intl402_case(relative: &Path) -> bool {
     relative.starts_with("test/intl402")
+}
+
+fn supports_staging_case(relative: &Path) -> bool {
+    relative.starts_with("test/staging")
 }
 
 fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
