@@ -161,9 +161,6 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
     if relative.starts_with("test/intl402") {
         return Some("intl402");
     }
-    if relative.starts_with("test/built-ins/Temporal") {
-        return Some("temporal");
-    }
     for feature in UNSUPPORTED_FEATURES {
         if case.metadata.has_feature(feature) && !supports_feature_case(relative, feature) {
             return Some(feature);

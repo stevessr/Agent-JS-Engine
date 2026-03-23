@@ -905,15 +905,16 @@ const __agentjs_import__ = function(specifier, options) {{
       }}
     }}
 
+    const cachedNamespace = globalThis.__agentjs_get_cached_import__(
+      specifier,
+      resourceType,
+      __agentjs_referrer__
+    );
+    if (cachedNamespace !== undefined) {{
+      return Promise.resolve(cachedNamespace);
+    }}
+
     if (resourceType) {{
-      const cachedNamespace = globalThis.__agentjs_get_cached_import__(
-        specifier,
-        resourceType,
-        __agentjs_referrer__
-      );
-      if (cachedNamespace !== undefined) {{
-        return Promise.resolve(cachedNamespace);
-      }}
       specifier = String(specifier) + "{IMPORT_RESOURCE_MARKER}" + resourceType;
     }}
 
@@ -3012,6 +3013,7 @@ fn host_get_cached_import(
         .to_std_string_lossy();
 
     let kind = match resource_type.as_str() {
+        "" => ModuleResourceKind::JavaScript,
         "defer" => ModuleResourceKind::Deferred,
         "json" => ModuleResourceKind::Json,
         "text" => ModuleResourceKind::Text,

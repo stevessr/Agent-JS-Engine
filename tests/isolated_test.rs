@@ -626,6 +626,127 @@ fn engine_allows_valid_import_call_trailing_commas() {
     }
 }
 
+#[test]
+fn engine_exposes_temporal_in_eval_scripts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            typeof Temporal === 'object' &&
+              typeof Temporal.Instant.from === 'function' &&
+              Temporal.Instant.from('1970-01-01T00:00:00Z').epochNanoseconds === 0n &&
+              Temporal.PlainDate.from('2020-01-02').toString() === '2020-01-02';
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("true"));
+}
+
+#[test]
+fn engine_exposes_temporal_in_file_scripts() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.js");
+    fs::write(
+        &entry_path,
+        r#"
+        print(typeof Temporal);
+        print(typeof Temporal.Instant.from);
+        print(String(Temporal.PlainDate.from('2020-01-02')));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_script_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "object".to_string(),
+            "function".to_string(),
+            "2020-01-02".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn engine_exposes_temporal_in_modules() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        print(typeof Temporal);
+        print(typeof Temporal.Instant.from);
+        print(String(Temporal.PlainDate.from('2020-01-02')));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "object".to_string(),
+            "function".to_string(),
+            "2020-01-02".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn engine_bootstraps_temporal_in_test262_agents() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval_with_options(
+            r#"
+            $262.agent.start(`
+              $262.agent.report(
+                typeof Temporal === 'object' &&
+                typeof Temporal.Instant.from === 'function' &&
+                String(Temporal.PlainDate.from('2020-01-02')) === '2020-01-02'
+                  ? 'ok'
+                  : 'bad'
+              );
+              $262.agent.leaving();
+            `);
+            let report = null;
+            while ((report = $262.agent.getReport()) === null) {
+              $262.agent.sleep(1);
+            }
+            report;
+            "#,
+            &EvalOptions {
+                bootstrap_test262: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.value.as_deref(), Some("ok"));
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

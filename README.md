@@ -51,7 +51,7 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`、以及对应的 test262 `import-source` 动态 catch / valid syntax / module-code parse 组
 - 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
-- 跳过 `staging`、`intl402`、`built-ins/Temporal` 以及暂未落地的 `import-defer` 延迟求值语义和更完整的 `source-phase-imports`
+- 跳过 `staging`、`intl402` 以及暂未落地的 `import-defer` 延迟求值语义和更完整的 `source-phase-imports`
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测
 
 已验证样本：

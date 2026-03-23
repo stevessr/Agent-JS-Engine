@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、一部分 `import-defer` 和一部分 `source-phase-imports`；仍会跳过 `intl402`、`Temporal`、`staging` 和少数更重的高级模块扩展。
+- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、一部分 `import-defer` 和一部分 `source-phase-imports`；仍会跳过 `intl402`、`staging` 和少数更重的高级模块扩展。
 
 ## Completed Work
 
@@ -73,10 +73,18 @@
      - `test/language/import/import-defer/evaluation-sync/`：`2 / 2` 通过
      - `test/language/import/import-defer/errors/module-throws/`：`3 / 3` 通过
      - `test/language/import/import-defer/errors/get-*.js` 同步子组：`4 / 4` 通过
+14. 启用 Boa 原生 `Temporal`：
+   - 在 `Cargo.toml` 为 `boa_engine` 打开 `temporal` feature
+   - 确认现有 `Context::builder().build()` / `create_realm()` 路径会自动初始化 Temporal builtins，无需额外 provider wiring
+   - runner 不再对 `test/built-ins/Temporal` 做整目录硬编码跳过
+   - 增加 runtime smoke tests，覆盖普通脚本、路径脚本、module 和 `$262.agent` worker 中的 `Temporal` 可见性
+   - 验证：
+     - `cargo test --test isolated_test`：`25 passed, 1 ignored`
+     - `TEST262_FILTER='Temporal' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
 
 ## Next Steps
 
 - [ ] 继续补 `import-defer` 的 deferred namespace / evaluation 语义，以及更完整的 `source-phase-imports`。
 - [ ] 继续扩充其余 host hooks，例如 `gc` 等较少见的测试接口。
-- [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖。
+- [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖；当前已优先启用 `Temporal`，可沿同样流程逐步验证更重特性。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。
