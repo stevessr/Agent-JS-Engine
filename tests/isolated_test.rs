@@ -592,6 +592,40 @@ fn engine_bootstraps_legacy_regexp_static_accessors() {
     assert_eq!(output.value.as_deref(), Some("true"));
 }
 
+#[test]
+fn engine_rejects_invalid_import_call_syntax_variants() {
+    let engine = JsEngine::new();
+
+    for source in [
+        "let f = () => import();",
+        "let f = () => import('./dep.mjs', {}, '');",
+        "let f = () => import(...['./dep.mjs']);",
+        "let f = () => import.UNKNOWN('./dep.mjs');",
+        "let f = () => typeof import;",
+        "let f = () => import.source(...['./dep.mjs']);",
+        "let f = () => import.source.UNKNOWN('./dep.mjs');",
+        "let f = () => typeof import.source;",
+        "let f = () => typeof import.source.UNKNOWN;",
+        "let f = () => import.defer('./dep.mjs', {});",
+    ] {
+        let error = engine.eval(source).unwrap_err();
+        assert_eq!(error.name, "SyntaxError", "source: {source}");
+    }
+}
+
+#[test]
+fn engine_allows_valid_import_call_trailing_commas() {
+    let engine = JsEngine::new();
+
+    for source in [
+        "typeof import('./dep.mjs',);",
+        "typeof import('./dep.mjs', {},);",
+    ] {
+        let output = engine.eval(source).unwrap();
+        assert_eq!(output.value.as_deref(), Some("object"), "source: {source}");
+    }
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

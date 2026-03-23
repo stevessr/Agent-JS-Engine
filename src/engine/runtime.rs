@@ -416,6 +416,12 @@ impl std::error::Error for EngineError {}
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsEngine;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportCallSyntaxKind {
+    Dynamic,
+    SingleArgument,
+}
+
 impl JsEngine {
     #[must_use]
     pub fn new() -> Self {
@@ -448,10 +454,9 @@ impl JsEngine {
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
+        let source = finalize_script_source(source, options.strict, None)?;
         let result = context
-            .eval(Source::from_bytes(
-                finalize_script_source(source, options.strict, None).as_str(),
-            ))
+            .eval(Source::from_bytes(source.as_str()))
             .map_err(|err| convert_error(err, &mut context))?;
 
         context
@@ -495,7 +500,7 @@ impl JsEngine {
         }
 
         let canonical_path = normalize_source_path(path);
-        let source = finalize_script_source(source, options.strict, Some(canonical_path.as_path()));
+        let source = finalize_script_source(source, options.strict, Some(canonical_path.as_path()))?;
         let result = context
             .eval(Source::from_reader(
                 Cursor::new(source.as_bytes()),
@@ -544,7 +549,7 @@ impl JsEngine {
         }
 
         let canonical_path = normalize_source_path(path);
-        let prepared_source = preprocess_compat_source(source, Some(canonical_path.as_path()));
+        let prepared_source = preprocess_compat_source(source, Some(canonical_path.as_path()))?;
         let reader = Cursor::new(prepared_source.as_bytes());
         let parsed_source = Source::from_reader(reader, Some(canonical_path.as_path()));
         let module = Module::parse(parsed_source, None, &mut context)
@@ -582,23 +587,29 @@ fn normalize_source_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn finalize_script_source(source: &str, strict: bool, source_path: Option<&Path>) -> String {
-    let prepared = preprocess_compat_source(source, source_path);
-    if strict {
+fn finalize_script_source(
+    source: &str,
+    strict: bool,
+    source_path: Option<&Path>,
+) -> Result<String, EngineError> {
+    let prepared = preprocess_compat_source(source, source_path)?;
+    Ok(if strict {
         format!("\"use strict\";\n{prepared}")
     } else {
         prepared
-    }
+    })
 }
 
-fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> String {
+fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> Result<String, EngineError> {
+    validate_import_call_syntax(source)?;
+
     let source = rewrite_static_import_attributes(source);
     let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
     let (source, rewrote_import_defer_calls) = rewrite_dynamic_import_defer_calls(&source);
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
     let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
-    if rewrote_dynamic_imports
+    Ok(if rewrote_dynamic_imports
         || rewrote_import_defer_calls
         || rewrote_import_source_calls
         || rewrote_static_source_imports
@@ -607,7 +618,258 @@ fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> String 
         format!("{}\n{source}", build_import_compat_helper(source_path))
     } else {
         source
+    })
+}
+
+fn validate_import_call_syntax(source: &str) -> Result<(), EngineError> {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' | b'`' => i = skip_js_string(bytes, i),
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                i = skip_line_comment(bytes, i)
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                i = skip_block_comment(bytes, i)
+            }
+            b'i' => {
+                validate_import_keyword_usage(bytes, i)?;
+                i += 1;
+            }
+            _ => i += 1,
+        }
     }
+
+    Ok(())
+}
+
+fn validate_import_keyword_usage(bytes: &[u8], start: usize) -> Result<(), EngineError> {
+    if !matches_import_keyword(bytes, start) {
+        return Ok(());
+    }
+
+    let Some(cursor) = skip_whitespace_and_comments(bytes, start + "import".len()) else {
+        return Err(invalid_import_call_syntax_error());
+    };
+
+    match bytes[cursor] {
+        b'(' => {
+            if is_preceded_by_new(bytes, start) {
+                return Err(invalid_import_call_syntax_error());
+            }
+            validate_single_import_call(bytes, cursor, ImportCallSyntaxKind::Dynamic)
+        }
+        b'.' => validate_import_dot_usage(bytes, start, cursor + 1),
+        byte if is_identifier_byte(byte) || matches!(byte, b'\'' | b'"' | b'{' | b'*') => Ok(()),
+        _ => Err(invalid_import_call_syntax_error()),
+    }
+}
+
+fn validate_import_dot_usage(
+    bytes: &[u8],
+    import_start: usize,
+    property_start: usize,
+) -> Result<(), EngineError> {
+    let Some(property_start) = skip_whitespace_and_comments(bytes, property_start) else {
+        return Err(invalid_import_call_syntax_error());
+    };
+    let Some(property_end) = skip_identifier(bytes, property_start) else {
+        return Err(invalid_import_call_syntax_error());
+    };
+    let property = &bytes[property_start..property_end];
+    let Some(cursor) = skip_whitespace_and_comments(bytes, property_end) else {
+        return if property == b"meta" {
+            Ok(())
+        } else {
+            Err(invalid_import_call_syntax_error())
+        };
+    };
+
+    match property {
+        b"source" | b"defer" => {
+            if is_preceded_by_new(bytes, import_start) || bytes[cursor] != b'(' {
+                return Err(invalid_import_call_syntax_error());
+            }
+            validate_single_import_call(bytes, cursor, ImportCallSyntaxKind::SingleArgument)
+        }
+        b"meta" => Ok(()),
+        _ => Err(invalid_import_call_syntax_error()),
+    }
+}
+
+fn validate_single_import_call(
+    bytes: &[u8],
+    open_paren: usize,
+    kind: ImportCallSyntaxKind,
+) -> Result<(), EngineError> {
+    let Some(close_paren) = find_matching_paren(bytes, open_paren) else {
+        return Err(invalid_import_call_syntax_error());
+    };
+
+    let mut comma_positions = Vec::new();
+    let mut depth = 0usize;
+    let mut cursor = open_paren + 1;
+    while cursor < close_paren {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < close_paren && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < close_paren && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => comma_positions.push(cursor),
+            b'.' if depth == 0 && cursor + 2 < close_paren && &bytes[cursor..cursor + 3] == b"..." => {
+                return Err(invalid_import_call_syntax_error());
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    if !has_non_whitespace_between(bytes, open_paren + 1, close_paren) {
+        return Err(invalid_import_call_syntax_error());
+    }
+
+    let mut segment_start = open_paren + 1;
+    for comma in &comma_positions {
+        if !has_non_whitespace_between(bytes, segment_start, *comma) {
+            return Err(invalid_import_call_syntax_error());
+        }
+        segment_start = *comma + 1;
+    }
+
+    match kind {
+        ImportCallSyntaxKind::SingleArgument => {
+            if !comma_positions.is_empty() {
+                return Err(invalid_import_call_syntax_error());
+            }
+        }
+        ImportCallSyntaxKind::Dynamic => match comma_positions.len() {
+            0 => {}
+            1 => {}
+            2 => {
+                if has_non_whitespace_between(bytes, comma_positions[1] + 1, close_paren) {
+                    return Err(invalid_import_call_syntax_error());
+                }
+            }
+            _ => return Err(invalid_import_call_syntax_error()),
+        },
+    }
+
+    Ok(())
+}
+
+fn invalid_import_call_syntax_error() -> EngineError {
+    EngineError {
+        name: "SyntaxError".to_string(),
+        message: "invalid import call syntax".to_string(),
+    }
+}
+
+fn matches_import_keyword(bytes: &[u8], start: usize) -> bool {
+    const IMPORT: &[u8] = b"import";
+    if bytes.len() < start + IMPORT.len() || &bytes[start..start + IMPORT.len()] != IMPORT {
+        return false;
+    }
+    if start > 0 && is_identifier_byte(bytes[start - 1]) {
+        return false;
+    }
+    if start + IMPORT.len() < bytes.len() && is_identifier_byte(bytes[start + IMPORT.len()]) {
+        return false;
+    }
+    true
+}
+
+fn skip_whitespace_and_comments(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        if bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
+            cursor = skip_line_comment(bytes, cursor);
+            continue;
+        }
+        if cursor + 1 < bytes.len() && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            cursor = skip_block_comment(bytes, cursor);
+            continue;
+        }
+        return Some(cursor);
+    }
+    None
+}
+
+fn skip_identifier(bytes: &[u8], start: usize) -> Option<usize> {
+    if start >= bytes.len() || !is_identifier_byte(bytes[start]) {
+        return None;
+    }
+    let mut cursor = start + 1;
+    while cursor < bytes.len() && is_identifier_byte(bytes[cursor]) {
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn has_non_whitespace_between(bytes: &[u8], start: usize, end: usize) -> bool {
+    let mut cursor = start;
+    while cursor < end {
+        if bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        if cursor + 1 < end && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
+            cursor = skip_line_comment(bytes, cursor).min(end);
+            continue;
+        }
+        if cursor + 1 < end && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            cursor = skip_block_comment(bytes, cursor).min(end);
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn find_matching_paren(bytes: &[u8], open_paren: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = open_paren;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn build_import_compat_helper(source_path: Option<&Path>) -> String {
@@ -1072,7 +1334,8 @@ fn load_module_from_path(
             if let Some(module) = maybe_build_source_phase_module(path, &source, context)? {
                 return Ok(module);
             }
-            let source = preprocess_compat_source(&source, Some(path));
+            let source = preprocess_compat_source(&source, Some(path))
+                .map_err(|error| JsNativeError::syntax().with_message(error.message))?;
             Module::parse(
                 Source::from_reader(Cursor::new(source.as_bytes()), Some(path)),
                 None,

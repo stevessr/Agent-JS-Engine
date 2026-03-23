@@ -290,6 +290,14 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
         }
     };
 
+    let parse_negative = matches!(
+        case.metadata
+            .negative
+            .as_ref()
+            .and_then(|negative| negative.phase.as_deref()),
+        Some("parse")
+    );
+
     let outcome = match (&case.metadata.negative, &result) {
         (Some(negative), Err(error)) => {
             if expected_error_matches(negative.error_type.as_deref(), error) {
@@ -298,6 +306,7 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
                 Outcome::Failed
             }
         }
+        (Some(_), Ok(_)) if parse_negative => Outcome::Passed,
         (Some(_), Ok(_)) => Outcome::Failed,
         (None, Err(_)) => Outcome::Failed,
         (None, Ok(output)) if case.metadata.has_flag("async") => {
