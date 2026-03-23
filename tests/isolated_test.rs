@@ -1,7 +1,21 @@
 use ai_agent::engine::{EvalOptions, JsEngine};
 use std::fs;
 use std::path::PathBuf;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn run_with_large_stack<F>(name: &str, f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .expect("failed to spawn large-stack test thread")
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
 
 #[test]
 fn engine_executes_basic_javascript() {
@@ -624,6 +638,81 @@ fn engine_allows_valid_import_call_trailing_commas() {
         let output = engine.eval(source).unwrap();
         assert_eq!(output.value.as_deref(), Some("object"), "source: {source}");
     }
+}
+
+#[test]
+fn engine_executes_32_deep_nested_function_calls() {
+    run_with_large_stack("engine_executes_32_deep_nested_function_calls", || {
+        let engine = JsEngine::new();
+        let output = engine
+            .eval(
+                r#"
+                (function(){
+                    (function(){
+                        (function(){
+                            (function(){
+                                (function(){
+                                    (function(){
+                                        (function(){
+                                            (function(){
+                                                (function(){
+                                                    (function(){
+                                                        (function(){
+                                                            (function(){
+                                                                (function(){
+                                                                    (function(){
+                                                                        (function(){
+                                                                            (function(){
+                                                                                (function(){
+                                                                                    (function(){
+                                                                                        (function(){
+                                                                                            (function(){
+                                                                                                (function(){
+                                                                                                    (function(){
+                                                                                                        (function(){
+                                                                                                            (function(){
+                                                                                                                (function(){
+                                                                                                                    (function(){
+                                                                                                                        (function(){
+                                                                                                                            (function(){
+                                                                                                                                (function(){
+                                                                                                                                    (function(){})()
+                                                                                                                                })()
+                                                                                                                            })()
+                                                                                                                        })()
+                                                                                                                    })()
+                                                                                                                })()
+                                                                                                            })()
+                                                                                                        })()
+                                                                                                    })()
+                                                                                                })()
+                                                                                            })()
+                                                                                        })()
+                                                                                    })()
+                                                                                })()
+                                                                            })()
+                                                                        })()
+                                                                    })()
+                                                                })()
+                                                            })()
+                                                        })()
+                                                    })()
+                                                })()
+                                            })()
+                                        })()
+                                    })()
+                                })()
+                            })()
+                        })()
+                    })()
+                })();
+                'ok';
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(output.value.as_deref(), Some("ok"));
+    });
 }
 
 #[test]

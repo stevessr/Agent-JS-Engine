@@ -4,7 +4,21 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::thread;
 use walkdir::WalkDir;
+
+fn run_with_large_stack<F>(name: &str, f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(f)
+        .expect("failed to spawn large-stack test thread")
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
 
 const DEFAULT_TEST262_DIR: &str = "test262";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
@@ -393,101 +407,103 @@ fn async_module_source_exports_done_to_global() {
 #[test]
 #[ignore = "long-running test262 sweep"]
 fn test262_core_profile() {
-    let filter = std::env::var("TEST262_FILTER").ok();
-    let max_cases = std::env::var("TEST262_MAX_CASES").ok();
-    let suite_root = PathBuf::from(
-        std::env::var("TEST262_DIR").unwrap_or_else(|_| DEFAULT_TEST262_DIR.to_string()),
-    );
-    let test_root = suite_root.join("test");
-    let harness_root = suite_root.join("harness");
-
-    if !test_root.exists() || !harness_root.exists() {
-        eprintln!(
-            "test262 suite not found. Set TEST262_DIR or run ./run_test262.sh to fetch it first."
+    run_with_large_stack("test262_core_profile", || {
+        let filter = std::env::var("TEST262_FILTER").ok();
+        let max_cases = std::env::var("TEST262_MAX_CASES").ok();
+        let suite_root = PathBuf::from(
+            std::env::var("TEST262_DIR").unwrap_or_else(|_| DEFAULT_TEST262_DIR.to_string()),
         );
-        return;
-    }
+        let test_root = suite_root.join("test");
+        let harness_root = suite_root.join("harness");
 
-    let harness = HarnessCache::load(&harness_root);
-    let cases = discover_cases(&test_root);
+        if !test_root.exists() || !harness_root.exists() {
+            eprintln!(
+                "test262 suite not found. Set TEST262_DIR or run ./run_test262.sh to fetch it first."
+            );
+            return;
+        }
 
-    let mut total = 0usize;
-    let mut executed = 0usize;
-    let mut passed = 0usize;
-    let mut skipped = 0usize;
-    let mut skip_reasons = BTreeMap::<String, usize>::new();
-    let mut samples = Vec::new();
+        let harness = HarnessCache::load(&harness_root);
+        let cases = discover_cases(&test_root);
 
-    for (index, case) in cases.iter().enumerate() {
-        total += 1;
-        let result = run_case(case, &harness, &suite_root);
-        match result.outcome {
-            Outcome::Passed => {
-                executed += 1;
-                passed += 1;
-            }
-            Outcome::Failed => {
-                executed += 1;
-                if samples.len() < SAMPLE_LIMIT {
-                    let detail = result.reason.unwrap_or_else(|| "failed".to_string());
-                    samples.push(format!("{} ({detail})", case.path.display()));
+        let mut total = 0usize;
+        let mut executed = 0usize;
+        let mut passed = 0usize;
+        let mut skipped = 0usize;
+        let mut skip_reasons = BTreeMap::<String, usize>::new();
+        let mut samples = Vec::new();
+
+        for (index, case) in cases.iter().enumerate() {
+            total += 1;
+            let result = run_case(case, &harness, &suite_root);
+            match result.outcome {
+                Outcome::Passed => {
+                    executed += 1;
+                    passed += 1;
+                }
+                Outcome::Failed => {
+                    executed += 1;
+                    if samples.len() < SAMPLE_LIMIT {
+                        let detail = result.reason.unwrap_or_else(|| "failed".to_string());
+                        samples.push(format!("{} ({detail})", case.path.display()));
+                    }
+                }
+                Outcome::Skipped => {
+                    skipped += 1;
+                    if let Some(reason) = result.reason {
+                        *skip_reasons.entry(reason).or_default() += 1;
+                    }
                 }
             }
-            Outcome::Skipped => {
-                skipped += 1;
-                if let Some(reason) = result.reason {
-                    *skip_reasons.entry(reason).or_default() += 1;
-                }
+
+            if (index + 1) % PROGRESS_INTERVAL == 0 {
+                let current_pass_rate = passed as f64 / total as f64 * 100.0;
+                eprintln!(
+                    "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
+                    index + 1,
+                    cases.len(),
+                    passed,
+                    skipped,
+                    current_pass_rate
+                );
             }
         }
 
-        if (index + 1) % PROGRESS_INTERVAL == 0 {
-            let current_pass_rate = passed as f64 / total as f64 * 100.0;
-            eprintln!(
-                "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
-                index + 1,
-                cases.len(),
-                passed,
-                skipped,
-                current_pass_rate
+        let total_pass_rate = if total == 0 {
+            0.0
+        } else {
+            passed as f64 / total as f64 * 100.0
+        };
+        let executed_pass_rate = if executed == 0 {
+            0.0
+        } else {
+            passed as f64 / executed as f64 * 100.0
+        };
+
+        println!("Total cases: {total}");
+        println!("Executed: {executed}");
+        println!("Passed: {passed}");
+        println!("Skipped: {skipped}");
+        println!("Total pass rate: {total_pass_rate:.2}%");
+        println!("Executed pass rate: {executed_pass_rate:.2}%");
+        if !skip_reasons.is_empty() {
+            println!("Skip reasons:");
+            for (reason, count) in skip_reasons {
+                println!("  {reason}: {count}");
+            }
+        }
+        if !samples.is_empty() {
+            println!("Sample failures:");
+            for sample in samples {
+                println!("  {sample}");
+            }
+        }
+
+        if filter.is_none() && max_cases.is_none() {
+            assert!(
+                total_pass_rate >= 60.0,
+                "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
             );
         }
-    }
-
-    let total_pass_rate = if total == 0 {
-        0.0
-    } else {
-        passed as f64 / total as f64 * 100.0
-    };
-    let executed_pass_rate = if executed == 0 {
-        0.0
-    } else {
-        passed as f64 / executed as f64 * 100.0
-    };
-
-    println!("Total cases: {total}");
-    println!("Executed: {executed}");
-    println!("Passed: {passed}");
-    println!("Skipped: {skipped}");
-    println!("Total pass rate: {total_pass_rate:.2}%");
-    println!("Executed pass rate: {executed_pass_rate:.2}%");
-    if !skip_reasons.is_empty() {
-        println!("Skip reasons:");
-        for (reason, count) in skip_reasons {
-            println!("  {reason}: {count}");
-        }
-    }
-    if !samples.is_empty() {
-        println!("Sample failures:");
-        for sample in samples {
-            println!("  {sample}");
-        }
-    }
-
-    if filter.is_none() && max_cases.is_none() {
-        assert!(
-            total_pass_rate >= 60.0,
-            "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
-        );
-    }
+    });
 }
