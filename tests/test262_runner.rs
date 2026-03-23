@@ -169,21 +169,10 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         .strip_prefix(suite_root)
         .unwrap_or(case.path.as_path());
 
-    if relative.starts_with("test/staging") && !supports_staging_case(relative) {
-        return Some("staging");
-    }
-    if relative.starts_with("test/intl402") && !supports_intl402_case(relative) {
-        return Some("intl402");
-    }
     for feature in UNSUPPORTED_FEATURES {
         if case.metadata.has_feature(feature) && !supports_feature_case(relative, feature) {
             return Some(feature);
         }
-    }
-    if case.metadata.has_feature("import-attributes")
-        && !supports_import_attributes_case(relative, &case.metadata)
-    {
-        return Some("import-attributes");
     }
     None
 }
@@ -204,24 +193,6 @@ fn supports_source_phase_import_case(_relative: &Path) -> bool {
     true
 }
 
-fn supports_import_attributes_case(relative: &Path, metadata: &Test262Metadata) -> bool {
-    if metadata.has_feature("source-phase-imports") || metadata.has_feature("import-defer") {
-        return false;
-    }
-
-    relative.starts_with("test/language/expressions/dynamic-import")
-        || relative.starts_with("test/language/import/import-attributes")
-        || relative.starts_with("test/language/import/import-bytes")
-        || relative.starts_with("test/language/module-code/import-attributes")
-}
-
-fn supports_intl402_case(relative: &Path) -> bool {
-    relative.starts_with("test/intl402")
-}
-
-fn supports_staging_case(relative: &Path) -> bool {
-    relative.starts_with("test/staging")
-}
 
 fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
     if case.metadata.has_flag("raw") {
