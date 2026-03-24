@@ -389,6 +389,11 @@ fn run_core_profile_once(
     cases: &[TestCase],
 ) -> RunSummary {
     let mut summary = RunSummary::default();
+    let progress_interval = if cases.len() <= 1_000 {
+        100.min(cases.len().max(1))
+    } else {
+        PROGRESS_INTERVAL.min(cases.len().max(1))
+    };
 
     for (index, case) in cases.iter().enumerate() {
         summary.total += 1;
@@ -413,7 +418,7 @@ fn run_core_profile_once(
             }
         }
 
-        if (index + 1) % PROGRESS_INTERVAL == 0 {
+        if (index + 1) % progress_interval == 0 {
             let current_pass_rate = summary.passed as f64 / summary.total as f64 * 100.0;
             eprintln!(
                 "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
