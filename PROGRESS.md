@@ -4,7 +4,7 @@
 
 - 执行入口已经切换为 `boa_engine` 包装层，仓库具备可运行的 JS CLI。
 - `test262` runner 已接入真实 frontmatter/harness/negative case 逻辑，不再使用“返回 `Undefined` 就算通过”的伪跑分方式。
-- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`、基础 `Intl`/`intl402` 顶层样本，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、一部分 `import-defer` 和一部分 `source-phase-imports`；仍会跳过 `staging` 和更重的 `intl402` / 高级模块扩展。
+- 当前跑测 profile 为 `core profile`，支持基础 `module`、`$262.createRealm()`、`$262.detachArrayBuffer()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`、完整 `Intl` / `intl402`、完整 `staging`，以及通过兼容层支持 `dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`、`import-defer` 和 `source-phase-imports`。
 
 ## Completed Work
 

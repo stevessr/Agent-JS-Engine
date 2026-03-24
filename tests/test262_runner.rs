@@ -24,7 +24,6 @@ const DEFAULT_TEST262_DIR: &str = "test262";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
-const UNSUPPORTED_FEATURES: &[&str] = &["source-phase-imports", "import-defer"];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Test262Metadata {
@@ -169,28 +168,7 @@ fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
         .strip_prefix(suite_root)
         .unwrap_or(case.path.as_path());
 
-    for feature in UNSUPPORTED_FEATURES {
-        if case.metadata.has_feature(feature) && !supports_feature_case(relative, feature) {
-            return Some(feature);
-        }
-    }
     None
-}
-
-fn supports_feature_case(relative: &Path, feature: &str) -> bool {
-    match feature {
-        "import-defer" => supports_import_defer_case(relative),
-        "source-phase-imports" => supports_source_phase_import_case(relative),
-        _ => false,
-    }
-}
-
-fn supports_import_defer_case(_relative: &Path) -> bool {
-    true
-}
-
-fn supports_source_phase_import_case(_relative: &Path) -> bool {
-    true
 }
 
 
