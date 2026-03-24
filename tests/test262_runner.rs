@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::thread;
 use walkdir::WalkDir;
 
@@ -24,6 +25,7 @@ const DEFAULT_TEST262_DIR: &str = "test262";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
+const DEFAULT_CHUNK_SIZE: usize = 1_000;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct Test262Metadata {
@@ -47,7 +49,6 @@ struct NegativeMetadata {
 #[derive(Debug, Clone)]
 struct TestCase {
     path: PathBuf,
-    source: String,
     metadata: Test262Metadata,
 }
 
@@ -67,6 +68,34 @@ enum Outcome {
 struct CaseResult {
     outcome: Outcome,
     reason: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct RunSummary {
+    total: usize,
+    executed: usize,
+    passed: usize,
+    skipped: usize,
+    skip_reasons: BTreeMap<String, usize>,
+    samples: Vec<String>,
+}
+
+impl RunSummary {
+    fn merge(&mut self, other: Self) {
+        self.total += other.total;
+        self.executed += other.executed;
+        self.passed += other.passed;
+        self.skipped += other.skipped;
+        for (reason, count) in other.skip_reasons {
+            *self.skip_reasons.entry(reason).or_default() += count;
+        }
+        for sample in other.samples {
+            if self.samples.len() >= SAMPLE_LIMIT {
+                break;
+            }
+            self.samples.push(sample);
+        }
+    }
 }
 
 impl Test262Metadata {
@@ -122,6 +151,10 @@ fn extract_metadata(source: &str) -> Test262Metadata {
 
 fn discover_cases(test_root: &Path) -> Vec<TestCase> {
     let filter = std::env::var("TEST262_FILTER").ok();
+    let offset = std::env::var("TEST262_OFFSET")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
     let max_cases = std::env::var("TEST262_MAX_CASES")
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
@@ -147,34 +180,23 @@ fn discover_cases(test_root: &Path) -> Vec<TestCase> {
             let path = entry.into_path();
             let source = fs::read_to_string(&path).ok()?;
             let metadata = extract_metadata(&source);
-            Some(TestCase {
-                path,
-                source,
-                metadata,
-            })
+            Some(TestCase { path, metadata })
         })
         .collect::<Vec<_>>();
 
     cases.sort_by(|left, right| left.path.cmp(&right.path));
+    if offset > 0 {
+        cases = cases.into_iter().skip(offset).collect();
+    }
     if let Some(max_cases) = max_cases {
         cases.truncate(max_cases);
     }
     cases
 }
 
-fn skip_reason(case: &TestCase, suite_root: &Path) -> Option<&'static str> {
-    let relative = case
-        .path
-        .strip_prefix(suite_root)
-        .unwrap_or(case.path.as_path());
-
-    None
-}
-
-
-fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
+fn build_source(case: &TestCase, case_source: &str, harness: &HarnessCache) -> String {
     if case.metadata.has_flag("raw") {
-        return case.source.clone();
+        return case_source.to_string();
     }
 
     if matches!(
@@ -184,7 +206,7 @@ fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
             .and_then(|negative| negative.phase.as_deref()),
         Some("parse")
     ) {
-        return case.source.clone();
+        return case_source.to_string();
     }
 
     let mut include_order = vec!["sta.js".to_string(), "assert.js".to_string()];
@@ -210,7 +232,7 @@ fn build_source(case: &TestCase, harness: &HarnessCache) -> String {
         combined.push_str("globalThis.$DONE = $DONE;\n");
     }
 
-    combined.push_str(&case.source);
+    combined.push_str(case_source);
     combined
 }
 
@@ -219,15 +241,15 @@ fn expected_error_matches(expected: Option<&str>, actual: &EngineError) -> bool 
 }
 
 fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseResult {
-    if let Some(reason) = skip_reason(case, suite_root) {
+    let Ok(case_source) = fs::read_to_string(&case.path) else {
         return CaseResult {
-            outcome: Outcome::Skipped,
-            reason: Some(reason.to_string()),
+            outcome: Outcome::Failed,
+            reason: Some("failed to read test source".to_string()),
         };
-    }
+    };
 
     let engine = JsEngine::new();
-    let source = build_source(case, harness);
+    let source = build_source(case, &case_source, harness);
     let options = EvalOptions {
         strict: case.metadata.has_flag("onlyStrict"),
         bootstrap_test262: !case.metadata.has_flag("raw"),
@@ -340,7 +362,6 @@ negative:
 fn async_module_source_exports_done_to_global() {
     let case = TestCase {
         path: PathBuf::from("sample.mjs"),
-        source: "asyncTest(async () => {});".to_string(),
         metadata: Test262Metadata {
             flags: vec!["module".to_string(), "async".to_string()],
             ..Default::default()
@@ -357,9 +378,142 @@ fn async_module_source_exports_done_to_global() {
         ]),
     };
 
-    let built = build_source(&case, &harness);
+    let built = build_source(&case, "asyncTest(async () => {});", &harness);
 
     assert!(built.contains("globalThis.$DONE = $DONE;"));
+}
+
+fn run_core_profile_once(
+    suite_root: &Path,
+    harness: &HarnessCache,
+    cases: &[TestCase],
+) -> RunSummary {
+    let mut summary = RunSummary::default();
+
+    for (index, case) in cases.iter().enumerate() {
+        summary.total += 1;
+        let result = run_case(case, harness, suite_root);
+        match result.outcome {
+            Outcome::Passed => {
+                summary.executed += 1;
+                summary.passed += 1;
+            }
+            Outcome::Failed => {
+                summary.executed += 1;
+                if summary.samples.len() < SAMPLE_LIMIT {
+                    let detail = result.reason.unwrap_or_else(|| "failed".to_string());
+                    summary.samples.push(format!("{} ({detail})", case.path.display()));
+                }
+            }
+            Outcome::Skipped => {
+                summary.skipped += 1;
+                if let Some(reason) = result.reason {
+                    *summary.skip_reasons.entry(reason).or_default() += 1;
+                }
+            }
+        }
+
+        if (index + 1) % PROGRESS_INTERVAL == 0 {
+            let current_pass_rate = summary.passed as f64 / summary.total as f64 * 100.0;
+            eprintln!(
+                "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
+                index + 1,
+                cases.len(),
+                summary.passed,
+                summary.skipped,
+                current_pass_rate
+            );
+        }
+    }
+
+    summary
+}
+
+fn run_core_profile_chunked(
+    suite_root: &Path,
+    filter: Option<&str>,
+    total_cases: usize,
+) -> RunSummary {
+    let chunk_size = std::env::var("TEST262_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_CHUNK_SIZE);
+    let exe = std::env::current_exe().expect("failed to locate current test binary");
+    let mut summary = RunSummary::default();
+    let mut offset = 0usize;
+
+    while offset < total_cases {
+        let max_cases = chunk_size.min(total_cases - offset);
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--ignored").arg("--exact").arg("test262_core_profile");
+        cmd.env("TEST262_CHILD", "1");
+        cmd.env("TEST262_DIR", suite_root);
+        cmd.env("TEST262_OFFSET", offset.to_string());
+        cmd.env("TEST262_MAX_CASES", max_cases.to_string());
+        if let Some(filter) = filter {
+            cmd.env("TEST262_FILTER", filter);
+        }
+        let output = cmd.output().expect("failed to run chunked test262 subprocess");
+        if !output.status.success() {
+            panic!(
+                "chunked test262 subprocess failed at offset {}: {}{}",
+                offset,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let chunk = parse_summary_from_output(&output.stdout);
+        summary.merge(chunk);
+        offset += max_cases;
+    }
+
+    summary
+}
+
+fn parse_summary_from_output(stdout: &[u8]) -> RunSummary {
+    let mut summary = RunSummary::default();
+    let text = String::from_utf8_lossy(stdout);
+    let mut in_skip_reasons = false;
+    let mut in_samples = false;
+
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("Total cases: ") {
+            summary.total = value.parse().unwrap_or(0);
+            in_skip_reasons = false;
+            in_samples = false;
+        } else if let Some(value) = line.strip_prefix("Executed: ") {
+            summary.executed = value.parse().unwrap_or(0);
+            in_skip_reasons = false;
+            in_samples = false;
+        } else if let Some(value) = line.strip_prefix("Passed: ") {
+            summary.passed = value.parse().unwrap_or(0);
+            in_skip_reasons = false;
+            in_samples = false;
+        } else if let Some(value) = line.strip_prefix("Skipped: ") {
+            summary.skipped = value.parse().unwrap_or(0);
+            in_skip_reasons = false;
+            in_samples = false;
+        } else if line == "Skip reasons:" {
+            in_skip_reasons = true;
+            in_samples = false;
+        } else if line == "Sample failures:" {
+            in_skip_reasons = false;
+            in_samples = true;
+        } else if in_skip_reasons {
+            if let Some((reason, count)) = line.trim().split_once(':') {
+                summary
+                    .skip_reasons
+                    .insert(reason.trim().to_string(), count.trim().parse().unwrap_or(0));
+            }
+        } else if in_samples {
+            let sample = line.trim();
+            if !sample.is_empty() {
+                summary.samples.push(sample.to_string());
+            }
+        }
+    }
+
+    summary
 }
 
 #[test]
@@ -367,7 +521,14 @@ fn async_module_source_exports_done_to_global() {
 fn test262_core_profile() {
     run_with_large_stack("test262_core_profile", || {
         let filter = std::env::var("TEST262_FILTER").ok();
-        let max_cases = std::env::var("TEST262_MAX_CASES").ok();
+        let max_cases = std::env::var("TEST262_MAX_CASES")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok());
+        let offset = std::env::var("TEST262_OFFSET")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let child_mode = std::env::var("TEST262_CHILD").ok().as_deref() == Some("1");
         let suite_root = PathBuf::from(
             std::env::var("TEST262_DIR").unwrap_or_else(|_| DEFAULT_TEST262_DIR.to_string()),
         );
@@ -383,81 +544,45 @@ fn test262_core_profile() {
 
         let harness = HarnessCache::load(&harness_root);
         let cases = discover_cases(&test_root);
+        let discovered = run_core_profile_once(&suite_root, &harness, &cases);
 
-        let mut total = 0usize;
-        let mut executed = 0usize;
-        let mut passed = 0usize;
-        let mut skipped = 0usize;
-        let mut skip_reasons = BTreeMap::<String, usize>::new();
-        let mut samples = Vec::new();
-
-        for (index, case) in cases.iter().enumerate() {
-            total += 1;
-            let result = run_case(case, &harness, &suite_root);
-            match result.outcome {
-                Outcome::Passed => {
-                    executed += 1;
-                    passed += 1;
-                }
-                Outcome::Failed => {
-                    executed += 1;
-                    if samples.len() < SAMPLE_LIMIT {
-                        let detail = result.reason.unwrap_or_else(|| "failed".to_string());
-                        samples.push(format!("{} ({detail})", case.path.display()));
-                    }
-                }
-                Outcome::Skipped => {
-                    skipped += 1;
-                    if let Some(reason) = result.reason {
-                        *skip_reasons.entry(reason).or_default() += 1;
-                    }
-                }
-            }
-
-            if (index + 1) % PROGRESS_INTERVAL == 0 {
-                let current_pass_rate = passed as f64 / total as f64 * 100.0;
-                eprintln!(
-                    "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
-                    index + 1,
-                    cases.len(),
-                    passed,
-                    skipped,
-                    current_pass_rate
-                );
-            }
-        }
-
-        let total_pass_rate = if total == 0 {
-            0.0
+        let summary = if child_mode || filter.is_some() || max_cases.is_some() || offset > 0 {
+            discovered
         } else {
-            passed as f64 / total as f64 * 100.0
-        };
-        let executed_pass_rate = if executed == 0 {
-            0.0
-        } else {
-            passed as f64 / executed as f64 * 100.0
+            run_core_profile_chunked(&suite_root, filter.as_deref(), discovered.total)
         };
 
-        println!("Total cases: {total}");
-        println!("Executed: {executed}");
-        println!("Passed: {passed}");
-        println!("Skipped: {skipped}");
+        let total_pass_rate = if summary.total == 0 {
+            0.0
+        } else {
+            summary.passed as f64 / summary.total as f64 * 100.0
+        };
+        let executed_pass_rate = if summary.executed == 0 {
+            0.0
+        } else {
+            summary.passed as f64 / summary.executed as f64 * 100.0
+        };
+
+        println!("Total cases: {}", summary.total);
+        println!("Executed: {}", summary.executed);
+        println!("Passed: {}", summary.passed);
+        println!("Skipped: {}", summary.skipped);
         println!("Total pass rate: {total_pass_rate:.2}%");
         println!("Executed pass rate: {executed_pass_rate:.2}%");
-        if !skip_reasons.is_empty() {
+        if !summary.skip_reasons.is_empty() {
             println!("Skip reasons:");
-            for (reason, count) in skip_reasons {
+            for (reason, count) in summary.skip_reasons {
                 println!("  {reason}: {count}");
             }
         }
-        if !samples.is_empty() {
+        if !summary.samples.is_empty() {
             println!("Sample failures:");
-            for sample in samples {
+            for sample in summary.samples {
                 println!("  {sample}");
             }
         }
 
-        if filter.is_none() && max_cases.is_none() {
+        if filter.is_none() && max_cases.is_none() && offset == 0 {
             assert!(
                 total_pass_rate >= 60.0,
                 "expected total pass rate >= 60%, got {total_pass_rate:.2}%"
