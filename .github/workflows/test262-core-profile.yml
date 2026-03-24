@@ -2,35 +2,169 @@ name: test262 core profile
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-  pull_request:
+
+concurrency:
+  group: test262-core-profile-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  test262-core-profile:
+  isolated-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
-      TEST262_CHUNK_SIZE: 100
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test262-core-profile
+
+      - name: Run isolated smoke tests
+        run: cargo test --test isolated_test
+
+  core-profile-shards:
+    needs: isolated-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: 1
+            offset: 0
+            max_cases: 5500
+          - shard: 2
+            offset: 5500
+            max_cases: 5500
+          - shard: 3
+            offset: 11000
+            max_cases: 5500
+          - shard: 4
+            offset: 16500
+            max_cases: 5500
+          - shard: 5
+            offset: 22000
+            max_cases: 5500
+          - shard: 6
+            offset: 27500
+            max_cases: 5500
+          - shard: 7
+            offset: 33000
+            max_cases: 5500
+          - shard: 8
+            offset: 38500
+            max_cases: 5500
+          - shard: 9
+            offset: 44000
+            max_cases: 5500
+          - shard: 10
+            offset: 49500
+            max_cases: 5500
+    env:
+      CARGO_TERM_COLOR: always
+      TEST262_OFFSET: ${{ matrix.offset }}
+      TEST262_MAX_CASES: ${{ matrix.max_cases }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test262-core-profile
 
       - name: Fetch test262 suite
         run: |
           git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
           git -C test262 sparse-checkout set test harness
 
-      - name: Run isolated smoke tests
-        run: cargo test --test isolated_test
+      - name: Run shard ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
 
-      - name: Run test262 core profile
-        run: cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture
+      - name: Extract shard summary
+        if: always()
+        env:
+          SHARD_ID: ${{ matrix.shard }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import re
+
+          text = pathlib.Path('shard.log').read_text() if pathlib.Path('shard.log').exists() else ''
+
+          def last_int(label: str) -> int:
+              matches = re.findall(rf"{re.escape(label)}: (\d+)", text)
+              return int(matches[-1]) if matches else 0
+
+          summary = {
+              'shard': int(os.environ['SHARD_ID']),
+              'total': last_int('Total cases'),
+              'executed': last_int('Executed'),
+              'passed': last_int('Passed'),
+              'skipped': last_int('Skipped'),
+          }
+          pathlib.Path('summary.json').write_text(json.dumps(summary))
+          PY
+
+      - name: Upload shard summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shard-${{ matrix.shard }}
+          path: summary.json
+
+  aggregate:
+    needs: core-profile-shards
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download shard summaries
+        uses: actions/download-artifact@v4
+        with:
+          path: shard-summaries
+
+      - name: Aggregate results
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          total = executed = passed = skipped = 0
+          for summary in pathlib.Path('shard-summaries').rglob('summary.json'):
+              data = json.loads(summary.read_text())
+              total += data.get('total', 0)
+              executed += data.get('executed', 0)
+              passed += data.get('passed', 0)
+              skipped += data.get('skipped', 0)
+
+          total_pass_rate = (passed / total * 100.0) if total else 0.0
+          executed_pass_rate = (passed / executed * 100.0) if executed else 0.0
+
+          print(f'Total cases: {total}')
+          print(f'Executed: {executed}')
+          print(f'Passed: {passed}')
+          print(f'Skipped: {skipped}')
+          print(f'Total pass rate: {total_pass_rate:.2f}%')
+          print(f'Executed pass rate: {executed_pass_rate:.2f}%')
+
+          if total_pass_rate < 60.0:
+              sys.exit(f'expected total pass rate >= 60%, got {total_pass_rate:.2f}%')
+          PY
