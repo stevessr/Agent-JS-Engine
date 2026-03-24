@@ -5,7 +5,7 @@ on:
 
 concurrency:
   group: test262-core-profile-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -68,7 +68,13 @@ jobs:
             max_cases: 5500
           - shard: 10
             offset: 49500
-            max_cases: 5500
+            max_cases: 1500
+          - shard: 11
+            offset: 51000
+            max_cases: 1000
+          - shard: 12
+            offset: 52000
+            max_cases: 1125
     env:
       CARGO_TERM_COLOR: always
       TEST262_OFFSET: ${{ matrix.offset }}
