@@ -98,8 +98,18 @@ jobs:
 
       - name: Run shard ${{ matrix.shard }}
         shell: bash
+        env:
+          SHARD_ID: ${{ matrix.shard }}
         run: |
           set -euo pipefail
+          heartbeat() {
+            while sleep 60; do
+              echo "[heartbeat] shard ${SHARD_ID} still running"
+            done
+          }
+          heartbeat &
+          HEARTBEAT_PID=$!
+          trap 'kill ${HEARTBEAT_PID} >/dev/null 2>&1 || true' EXIT
           cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
 
       - name: Extract shard summary
