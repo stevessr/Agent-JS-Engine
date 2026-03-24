@@ -1,0 +1,36 @@
+name: test262 core profile
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test262-core-profile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      TEST262_CHUNK_SIZE: 250
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch test262 suite
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
+          git -C test262 sparse-checkout set test harness
+
+      - name: Run isolated smoke tests
+        run: cargo test --test isolated_test
+
+      - name: Run test262 core profile
+        run: cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture

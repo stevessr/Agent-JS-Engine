@@ -92,12 +92,18 @@
 16. 启用最小 `Intl` / `intl402` 子集：
    - 在 `Cargo.toml` 为 `boa_engine` 打开 `intl_bundled` feature，使用 Boa 自带 ICU/provider 数据，避免额外 provider wiring
    - 增加 `Intl` smoke tests，验证脚本和 module 入口都能构造 `Intl.NumberFormat` / `Intl.Collator`
-   - runner 当前先放行 `test/intl402/*.js` 顶层基础样本，保守跳过更重的分目录 case
+   - 从 `test/intl402/*.js` 顶层基础样本起步，逐步扩到完整 `intl402`，并最终移除对应 runner gating
    - 验证：
      - `cargo test --test isolated_test engine_exposes_intl_in_eval_scripts -- --exact`：通过
      - `cargo test --test isolated_test engine_exposes_intl_in_file_scripts -- --exact`：通过
      - `cargo test --test isolated_test engine_exposes_intl_in_modules -- --exact`：通过
      - `test/intl402/*.js` 顶层 22 个样本逐个运行：全部通过
+17. 扩展完整 `intl402`、完整 `staging` 和完整 `import-attributes` / `import-defer` / `source-phase-imports` runner 覆盖：
+   - `tests/test262_runner.rs` 已去掉对应 allowlist / feature gating，当前 core profile 不再对这些目录做策略性跳过
+   - `staging`、`intl402`、`import-attributes`、`import-defer`、`source-phase-imports` 均已做目录级回归并通过
+18. 降低 test262 跑测内存占用：
+   - `discover_cases()` 只保留 `path + metadata`，执行 case 时再按需读源码，避免把 5 万多个测试源码常驻内存
+   - `test262_core_profile` 增加分块子进程执行路径，计划优先在 GitHub Actions 上承接整轮长跑，减少本机 OOM / 系统卡死风险
 
 ## Next Steps
 
