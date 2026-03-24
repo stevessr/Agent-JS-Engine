@@ -1,5 +1,5 @@
 use ai_agent::engine::{EngineError, EvalOptions, JsEngine};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -27,7 +27,7 @@ const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
 const DEFAULT_CHUNK_SIZE: usize = 1_000;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct Test262Metadata {
     #[serde(default)]
     includes: Vec<String>,
@@ -39,14 +39,14 @@ struct Test262Metadata {
     negative: Option<NegativeMetadata>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct NegativeMetadata {
     phase: Option<String>,
     #[serde(rename = "type")]
     error_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestCase {
     path: PathBuf,
     metadata: Test262Metadata,
@@ -544,12 +544,11 @@ fn test262_core_profile() {
 
         let harness = HarnessCache::load(&harness_root);
         let cases = discover_cases(&test_root);
-        let discovered = run_core_profile_once(&suite_root, &harness, &cases);
 
         let summary = if child_mode || filter.is_some() || max_cases.is_some() || offset > 0 {
-            discovered
+            run_core_profile_once(&suite_root, &harness, &cases)
         } else {
-            run_core_profile_chunked(&suite_root, filter.as_deref(), discovered.total)
+            run_core_profile_chunked(&suite_root, filter.as_deref(), cases.len())
         };
 
         let total_pass_rate = if summary.total == 0 {

@@ -10,10 +10,10 @@ on:
 jobs:
   test262-core-profile:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     env:
       CARGO_TERM_COLOR: always
-      TEST262_CHUNK_SIZE: 250
+      TEST262_CHUNK_SIZE: 100
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
