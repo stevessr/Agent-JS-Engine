@@ -74,7 +74,16 @@ jobs:
             max_cases: 1000
           - shard: 12
             offset: 52000
-            max_cases: 1125
+            max_cases: 300
+          - shard: 13
+            offset: 52300
+            max_cases: 300
+          - shard: 14
+            offset: 52600
+            max_cases: 300
+          - shard: 15
+            offset: 52900
+            max_cases: 225
     env:
       CARGO_TERM_COLOR: always
       TEST262_OFFSET: ${{ matrix.offset }}
