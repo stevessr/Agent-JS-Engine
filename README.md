@@ -51,7 +51,7 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`、以及对应的 test262 `import-source` 动态 catch / valid syntax / module-code parse 组
 - 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
-- 仍有少量更深层语义边角待继续完善，但 `core profile`、`intl402` 与 `staging` 已可以真实执行验证
+- 仍有少量更深层语义边角待继续完善，但 `core profile`、`intl402` 与 `staging` 已可以真实执行验证；当前也已补上最小 `$262.gc()` host hook，并通过多组 `host-gc-required` 样本验证
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测；test runner 本身会在更大的线程栈上执行，减少深递归/深嵌套样本导致的测试线程炸栈
 - 整轮 `test262_core_profile` 已迁移到 GitHub Actions 执行；workflow 只会在 Rust 源码、Cargo 依赖、runner 测试或 workflow 本身改动时自动触发，降低无关提交的 CI 消耗
 

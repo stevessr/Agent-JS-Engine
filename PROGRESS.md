@@ -121,6 +121,10 @@
      - `test/staging/sm/extensions/ArrayBuffer-slice-arguments-detaching.js`
      - `test/staging/sm/extensions/DataView-construct-arguments-detaching.js`
      - `test/staging/sm/extensions/weakmap.js`
+     - `test/staging/sm/extensions/recursion.js`
+     - `test/staging/sm/generators/gen-with-call-obj.js`
+     - `test/staging/sm/generators/iteration.js`
+     - `test/staging/sm/extensions/dataview.js`
 
 ## Next Steps
 
