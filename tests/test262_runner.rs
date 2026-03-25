@@ -149,7 +149,7 @@ fn extract_metadata(source: &str) -> Test262Metadata {
     serde_yaml::from_str(yaml).unwrap_or_default()
 }
 
-fn discover_cases(test_root: &Path) -> Vec<TestCase> {
+fn discover_case_paths(test_root: &Path) -> Vec<PathBuf> {
     let filter = std::env::var("TEST262_FILTER").ok();
     let offset = std::env::var("TEST262_OFFSET")
         .ok()
@@ -159,7 +159,7 @@ fn discover_cases(test_root: &Path) -> Vec<TestCase> {
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
 
-    let mut cases = WalkDir::new(test_root)
+    let mut paths = WalkDir::new(test_root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file())
@@ -176,22 +176,28 @@ fn discover_cases(test_root: &Path) -> Vec<TestCase> {
                 .as_ref()
                 .is_none_or(|needle| entry.path().to_string_lossy().contains(needle))
         })
-        .filter_map(|entry| {
-            let path = entry.into_path();
+        .map(walkdir::DirEntry::into_path)
+        .collect::<Vec<_>>();
+
+    paths.sort();
+    if offset > 0 {
+        paths = paths.into_iter().skip(offset).collect();
+    }
+    if let Some(max_cases) = max_cases {
+        paths.truncate(max_cases);
+    }
+    paths
+}
+
+fn discover_cases(test_root: &Path) -> Vec<TestCase> {
+    discover_case_paths(test_root)
+        .into_iter()
+        .filter_map(|path| {
             let source = fs::read_to_string(&path).ok()?;
             let metadata = extract_metadata(&source);
             Some(TestCase { path, metadata })
         })
-        .collect::<Vec<_>>();
-
-    cases.sort_by(|left, right| left.path.cmp(&right.path));
-    if offset > 0 {
-        cases = cases.into_iter().skip(offset).collect();
-    }
-    if let Some(max_cases) = max_cases {
-        cases.truncate(max_cases);
-    }
-    cases
+        .collect()
 }
 
 fn build_source(case: &TestCase, case_source: &str, harness: &HarnessCache) -> String {
@@ -548,12 +554,13 @@ fn test262_core_profile() {
         }
 
         let harness = HarnessCache::load(&harness_root);
-        let cases = discover_cases(&test_root);
 
         let summary = if child_mode || filter.is_some() || max_cases.is_some() || offset > 0 {
+            let cases = discover_cases(&test_root);
             run_core_profile_once(&suite_root, &harness, &cases)
         } else {
-            run_core_profile_chunked(&suite_root, filter.as_deref(), cases.len())
+            let total_cases = discover_case_paths(&test_root).len();
+            run_core_profile_chunked(&suite_root, filter.as_deref(), total_cases)
         };
 
         let total_pass_rate = if summary.total == 0 {

@@ -94,20 +94,25 @@ jobs:
             offset: 52365
             max_cases: 5
           - shard: 19
-            offset: 52370
+            offset: 0
             max_cases: 1
+            filter: test/staging/sm/String/raw.js
           - shard: 20
-            offset: 52371
+            offset: 0
             max_cases: 1
+            filter: test/staging/sm/String/regress-369778.js
           - shard: 21
-            offset: 52372
+            offset: 0
             max_cases: 1
+            filter: test/staging/sm/String/replace-GetMethod.js
           - shard: 22
-            offset: 52373
+            offset: 0
             max_cases: 1
+            filter: test/staging/sm/String/replace-bad-dollar-single-quote.js
           - shard: 23
-            offset: 52374
+            offset: 0
             max_cases: 1
+            filter: test/staging/sm/String/replace-flags.js
           - shard: 24
             offset: 52375
             max_cases: 75
@@ -133,6 +138,7 @@ jobs:
       CARGO_TERM_COLOR: always
       TEST262_OFFSET: ${{ matrix.offset }}
       TEST262_MAX_CASES: ${{ matrix.max_cases }}
+      TEST262_FILTER_OVERRIDE: ${{ matrix.filter || '' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -164,6 +170,9 @@ jobs:
           heartbeat &
           HEARTBEAT_PID=$!
           trap 'kill ${HEARTBEAT_PID} >/dev/null 2>&1 || true' EXIT
+          if [ -n "${TEST262_FILTER_OVERRIDE:-}" ]; then
+            export TEST262_FILTER="${TEST262_FILTER_OVERRIDE}"
+          fi
           cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
 
       - name: Extract shard summary
