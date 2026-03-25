@@ -80,23 +80,29 @@ jobs:
             max_cases: 150
           - shard: 14
             offset: 52300
-            max_cases: 75
+            max_cases: 40
           - shard: 15
+            offset: 52340
+            max_cases: 35
+          - shard: 16
             offset: 52375
             max_cases: 75
-          - shard: 16
-            offset: 52450
-            max_cases: 150
           - shard: 17
+            offset: 52450
+            max_cases: 75
+          - shard: 18
+            offset: 52525
+            max_cases: 75
+          - shard: 19
             offset: 52600
             max_cases: 150
-          - shard: 18
+          - shard: 20
             offset: 52750
             max_cases: 150
-          - shard: 19
+          - shard: 21
             offset: 52900
             max_cases: 112
-          - shard: 20
+          - shard: 22
             offset: 53012
             max_cases: 113
     env:
