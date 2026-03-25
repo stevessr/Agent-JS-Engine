@@ -101,9 +101,12 @@
 17. 扩展完整 `intl402`、完整 `staging` 和完整 `import-attributes` / `import-defer` / `source-phase-imports` runner 覆盖：
    - `tests/test262_runner.rs` 已去掉对应 allowlist / feature gating，当前 core profile 不再对这些目录做策略性跳过
    - `staging`、`intl402`、`import-attributes`、`import-defer`、`source-phase-imports` 均已做目录级回归并通过
-18. 降低 test262 跑测内存占用：
+18. 降低 test262 跑测内存占用，并把整轮长跑迁移到 GitHub Actions：
    - `discover_cases()` 只保留 `path + metadata`，执行 case 时再按需读源码，避免把 5 万多个测试源码常驻内存
-   - `test262_core_profile` 增加分块子进程执行路径，计划优先在 GitHub Actions 上承接整轮长跑，减少本机 OOM / 系统卡死风险
+   - `test262_core_profile` 增加分块子进程执行路径，减少单进程长跑的内存压力
+   - `.github/workflows/test262-core-profile.yml` 现在会在 GitHub runner 上做 matrix 分片跑测，并把已知慢例单独隔离成 non-blocking job
+   - 验证：
+     - GitHub Actions run `23537781035`：通过
 
 ## Next Steps
 

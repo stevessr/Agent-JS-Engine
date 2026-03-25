@@ -53,6 +53,7 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
 - 仍有少量更深层语义边角待继续完善，但 `core profile`、`intl402` 与 `staging` 已可以真实执行验证
 - 为每个 case 设置 loop iteration limit，避免单例卡死整轮跑测；test runner 本身会在更大的线程栈上执行，减少深递归/深嵌套样本导致的测试线程炸栈
+- 整轮 `test262_core_profile` 已迁移到 GitHub Actions 执行；workflow 只会在 Rust 源码、Cargo 依赖、runner 测试或 workflow 本身改动时自动触发，降低无关提交的 CI 消耗
 
 已验证样本：
 

@@ -2,6 +2,24 @@ name: test262 core profile
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'run_test262.sh'
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - '.github/workflows/test262-core-profile.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'run_test262.sh'
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - '.github/workflows/test262-core-profile.yml'
 
 concurrency:
   group: test262-core-profile-${{ github.ref }}
