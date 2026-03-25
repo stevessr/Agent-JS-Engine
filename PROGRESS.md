@@ -125,6 +125,7 @@
      - `test/staging/sm/generators/gen-with-call-obj.js`
      - `test/staging/sm/generators/iteration.js`
      - `test/staging/sm/extensions/dataview.js`
+     - `test/staging/sm/regress/regress-1507322-deep-weakmap.js`
 
 ## Next Steps
 
