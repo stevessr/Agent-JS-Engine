@@ -68,3 +68,5 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - `test/built-ins/ArrayBuffer/prototype/transferToFixedLength/`: `24 / 24` 通过
 
 这套策略的目标是先把“真实可执行的 ES 核心能力”稳定拉到 60% 以上，再逐步补齐剩余高级模块语义和宿主能力。
+
+更详细的实现说明见：`TEST262_IMPLEMENTATION.md`

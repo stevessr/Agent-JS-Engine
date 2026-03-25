@@ -127,6 +127,8 @@
      - `test/staging/sm/extensions/dataview.js`
      - `test/staging/sm/regress/regress-1507322-deep-weakmap.js`
 
+详细实现说明见：`TEST262_IMPLEMENTATION.md`
+
 ## Next Steps
 
 - [ ] 继续补 `import-defer` 的 deferred namespace / evaluation 语义，以及更完整的 `source-phase-imports`。
