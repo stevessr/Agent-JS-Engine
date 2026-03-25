@@ -95,26 +95,38 @@ jobs:
             max_cases: 5
           - shard: 19
             offset: 52370
-            max_cases: 5
+            max_cases: 1
           - shard: 20
+            offset: 52371
+            max_cases: 1
+          - shard: 21
+            offset: 52372
+            max_cases: 1
+          - shard: 22
+            offset: 52373
+            max_cases: 1
+          - shard: 23
+            offset: 52374
+            max_cases: 1
+          - shard: 24
             offset: 52375
             max_cases: 75
-          - shard: 21
+          - shard: 25
             offset: 52450
             max_cases: 75
-          - shard: 22
+          - shard: 26
             offset: 52525
             max_cases: 75
-          - shard: 23
+          - shard: 27
             offset: 52600
             max_cases: 150
-          - shard: 24
+          - shard: 28
             offset: 52750
             max_cases: 150
-          - shard: 25
+          - shard: 29
             offset: 52900
             max_cases: 112
-          - shard: 26
+          - shard: 30
             offset: 53012
             max_cases: 113
     env:
