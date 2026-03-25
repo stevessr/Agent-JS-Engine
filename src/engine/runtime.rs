@@ -2165,6 +2165,14 @@ fn build_test262_object(
             NativeFunction::from_fn_ptr(host_detach_array_buffer),
         )
     });
+    let gc = expose_host_hooks.then(|| {
+        build_builtin_function(
+            context,
+            js_string!("gc"),
+            0,
+            NativeFunction::from_fn_ptr(host_gc),
+        )
+    });
     let abstract_module_source =
         expose_host_hooks.then(|| build_abstract_module_source_constructor(context));
     let agent = build_agent_object(context);
@@ -2189,6 +2197,9 @@ fn build_test262_object(
             detach_array_buffer,
             Attribute::all(),
         );
+    }
+    if let Some(gc) = gc {
+        object.property(js_string!("gc"), gc, Attribute::all());
     }
     if let Some(abstract_module_source) = abstract_module_source {
         object.property(
@@ -2776,6 +2787,10 @@ fn host_create_realm(_: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsR
     })?;
     let wrapper = build_test262_object(new_realm, new_global, false, context);
     Ok(wrapper.into())
+}
+
+fn host_gc(_: &BoaValue, _: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {
+    Ok(BoaValue::undefined())
 }
 
 fn host_detach_array_buffer(

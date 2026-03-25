@@ -107,6 +107,20 @@
    - `.github/workflows/test262-core-profile.yml` 现在会在 GitHub runner 上做 matrix 分片跑测，并把已知慢例单独隔离成 non-blocking job
    - 验证：
      - GitHub Actions run `23537781035`：通过
+19. 增加最小 `$262.gc()` host hook：
+   - 在 `src/engine/runtime.rs` 的 `$262` 宿主对象上暴露 `gc()`，当前实现为最小 no-op，返回 `undefined`
+   - 增加 isolated smoke test，验证 `$262.gc` 在 test262 bootstrap 环境中可见且可调用
+   - 已验证的 `host-gc-required` 样本：
+     - `test/staging/sm/extensions/regress-650753.js`
+     - `test/staging/sm/regress/regress-596103.js`
+     - `test/staging/sm/regress/regress-592556-c35.js`
+     - `test/staging/sm/extensions/typedarray-set-detach.js`
+     - `test/staging/sm/object/clear-dictionary-accessor-getset.js`
+     - `test/staging/sm/statements/for-in-with-gc-and-unvisited-deletion.js`
+     - `test/staging/sm/extensions/DataView-set-arguments-detaching.js`
+     - `test/staging/sm/extensions/ArrayBuffer-slice-arguments-detaching.js`
+     - `test/staging/sm/extensions/DataView-construct-arguments-detaching.js`
+     - `test/staging/sm/extensions/weakmap.js`
 
 ## Next Steps
 
