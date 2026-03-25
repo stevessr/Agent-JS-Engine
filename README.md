@@ -47,8 +47,8 @@ cargo run -- [--strict] [--test262] [--module] --eval "print('hi')"
 - 注入 `sta.js`、`assert.js` 和 metadata 指定的 harness 文件
 - 支持 `onlyStrict`、`raw`、`async`、`negative`、基础 `module`、`$262.createRealm()`、跨 realm `evalScript`、`$262.detachArrayBuffer()`、`$262.gc()`、`$262.agent`、`$262.AbstractModuleSource`、原生 `Temporal`、完整 `Intl` / `intl402` 和完整 `staging`
 - 支持基于兼容层的高级模块子集：`dynamic import` 第二参数、`json-modules`、`import-text`、`import-bytes`，并在已缓存模块上复用 dynamic import namespace object
-- 支持 `import-defer` 的兼容子集：`import.defer(...)` 动态调用，以及基于 deferred wrapper module 的最小 `import defer * as ns from ...` 语义；当前可覆盖 dynamic syntax / abrupt-reject / dynamic sync module graph / static syntax / deferred namespace exotic object / evaluation-triggers 大部分子组 / resolution-error / evaluation-sync / module-throws / 同步 re-entrancy 错误组
-- 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`、以及对应的 test262 `import-source` 动态 catch / valid syntax / module-code parse 组
+- 支持 `import-defer` 的兼容子集：`import.defer(...)` 动态调用，以及基于 deferred wrapper module 的最小 `import defer * as ns from ...` 语义；当前目录级回归已经覆盖 dynamic syntax / abrupt-reject / dynamic sync module graph / evaluation-top-level-await / deferred namespace exotic object / evaluation-triggers / resolution-error / evaluation-sync / module-throws / 同步 re-entrancy 错误组
+- 支持 `source-phase-imports` 的兼容子集：`import.source(...)`、最小静态 `import source x from ...`，并已覆盖对应的 test262 `import-source` 目录回归
 - 补上最小 immutable `ArrayBuffer` 宿主语义：`immutable` getter、`transferToImmutable()`、`sliceToImmutable()`、`transfer()` / `transferToFixedLength()` fallback，以及 `DataView.prototype.set*` 的 immutable guard
 - 自动排除 `*_FIXTURE.js` 依赖文件，避免把模块夹具误记为顶层测试
 - 仍有少量更深层语义边角待继续完善，但 `core profile`、`intl402` 与 `staging` 已可以真实执行验证；当前也已补上最小 `$262.gc()` host hook，并通过多组 `host-gc-required` 样本验证
