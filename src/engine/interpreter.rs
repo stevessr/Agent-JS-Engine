@@ -2,6 +2,7 @@ use crate::engine::env::Environment;
 use crate::engine::value::JsValue;
 use crate::parser::ast::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use thiserror::Error;
 
@@ -206,14 +207,47 @@ impl Interpreter {
             }
             Expression::AssignmentExpression(assign) => {
                 let val = self.eval_expression(&assign.right, Rc::clone(&env))?;
-                if let Expression::Identifier(name) = &assign.left {
-                    // Try to set, if it fails, just define locally
-                    if env.borrow_mut().set(name, val.clone()).is_err() {
-                        env.borrow_mut().define(name.to_string(), val.clone());
+                match &assign.left {
+                    Expression::Identifier(name) => {
+                        if env.borrow_mut().set(name, val.clone()).is_err() {
+                            env.borrow_mut().define(name.to_string(), val.clone());
+                        }
+                        Ok(val)
                     }
-                    Ok(val)
-                } else {
-                    Ok(JsValue::Undefined)
+                    Expression::MemberExpression(mem) => {
+                        let obj_val = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                        let prop_key = if mem.computed {
+                            self.eval_expression(&mem.property, Rc::clone(&env))?
+                                .as_string()
+                        } else {
+                            match &mem.property {
+                                Expression::Identifier(id) => id.to_string(),
+                                _ => return Ok(JsValue::Undefined),
+                            }
+                        };
+                        match &obj_val {
+                            JsValue::Array(arr) => {
+                                if prop_key == "length" {
+                                    // arr.length = n — truncate or extend
+                                    let new_len = val.as_number() as usize;
+                                    arr.borrow_mut().resize(new_len, JsValue::Undefined);
+                                } else if let Ok(idx) = prop_key.parse::<usize>() {
+                                    let mut arr = arr.borrow_mut();
+                                    if idx >= arr.len() {
+                                        arr.resize(idx + 1, JsValue::Undefined);
+                                    }
+                                    arr[idx] = val.clone();
+                                }
+                                Ok(val)
+                            }
+                            JsValue::Object(obj) => {
+                                obj.borrow_mut().insert(prop_key, val.clone());
+                                Ok(val)
+                            }
+                            _ => Ok(JsValue::Undefined),
+                        }
+                    }
+                    _ => Ok(JsValue::Undefined),
                 }
             }
             Expression::BinaryExpression(bin) => {
@@ -276,17 +310,79 @@ impl Interpreter {
                     UnaryOperator::Delete => Ok(JsValue::Boolean(true)), // Stub for now
                 }
             }
-            Expression::ArrayExpression(_elements) => {
-                // Return dummy array for now. Proper Array needs object/heap management.
-                Ok(JsValue::Undefined)
+            Expression::ArrayExpression(elements) => {
+                let mut values = Vec::new();
+                for elem in elements {
+                    match elem {
+                        Some(expr) => values.push(self.eval_expression(expr, Rc::clone(&env))?),
+                        None => values.push(JsValue::Undefined),
+                    }
+                }
+                Ok(JsValue::Array(Rc::new(RefCell::new(values))))
             }
-            Expression::ObjectExpression(_properties) => {
-                // Return dummy object
-                Ok(JsValue::Undefined)
+            Expression::ObjectExpression(properties) => {
+                let mut map = HashMap::new();
+                for (key, val_expr) in properties {
+                    let key_str = match key {
+                        ObjectKey::Identifier(s) => s.to_string(),
+                        ObjectKey::String(s) => s.to_string(),
+                        ObjectKey::Number(n) => {
+                            if n.fract() == 0.0 && *n >= 0.0 && *n < 1e15 {
+                                format!("{}", *n as i64)
+                            } else {
+                                n.to_string()
+                            }
+                        }
+                    };
+                    let val = self.eval_expression(val_expr, Rc::clone(&env))?;
+                    map.insert(key_str, val);
+                }
+                Ok(JsValue::Object(Rc::new(RefCell::new(map))))
             }
-            Expression::MemberExpression(_mem) => {
-                // Stub
-                Ok(JsValue::Undefined)
+            Expression::MemberExpression(mem) => {
+                let obj_val = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                let prop_key = if mem.computed {
+                    self.eval_expression(&mem.property, Rc::clone(&env))?.as_string()
+                } else {
+                    match &mem.property {
+                        Expression::Identifier(id) => id.to_string(),
+                        _ => return Ok(JsValue::Undefined),
+                    }
+                };
+                match &obj_val {
+                    JsValue::Array(arr) => {
+                        if prop_key == "length" {
+                            return Ok(JsValue::Number(arr.borrow().len() as f64));
+                        }
+                        if let Ok(idx) = prop_key.parse::<usize>() {
+                            return Ok(arr
+                                .borrow()
+                                .get(idx)
+                                .cloned()
+                                .unwrap_or(JsValue::Undefined));
+                        }
+                        Ok(JsValue::Undefined)
+                    }
+                    JsValue::Object(obj) => Ok(obj
+                        .borrow()
+                        .get(&prop_key)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined)),
+                    JsValue::String(s) => {
+                        if prop_key == "length" {
+                            return Ok(JsValue::Number(s.chars().count() as f64));
+                        }
+                        if let Ok(idx) = prop_key.parse::<usize>() {
+                            return Ok(s
+                                .chars()
+                                .nth(idx)
+                                .map(|c| JsValue::String(c.to_string()))
+                                .unwrap_or(JsValue::Undefined));
+                        }
+                        Ok(JsValue::Undefined)
+                    }
+                    _ => Ok(JsValue::Undefined),
+                }
             }
             Expression::CallExpression(_call) => {
                 // Stub

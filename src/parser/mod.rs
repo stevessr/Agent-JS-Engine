@@ -553,33 +553,110 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_literal(&mut self) -> Result<Expression<'a>, ParseError> {
-        let mut depth = 1;
-        self.advance()?; // '['
-        while depth > 0 && self.current_token.is_some() {
-            if self.current_token == Some(Token::LBracket) {
-                depth += 1;
+        self.advance()?; // consume '['
+        let mut elements = Vec::new();
+        while self.current_token != Some(Token::RBracket) && self.current_token.is_some() {
+            if self.current_token == Some(Token::Comma) {
+                // Sparse/elision element
+                elements.push(None);
+                self.advance()?;
+            } else {
+                elements.push(Some(self.parse_assignment_expression()?));
+                if !self.consume_opt(Token::Comma)? {
+                    break;
+                }
             }
-            if self.current_token == Some(Token::RBracket) {
-                depth -= 1;
-            }
-            self.advance()?;
         }
-        Ok(Expression::ArrayExpression(vec![]))
+        self.consume_opt(Token::RBracket)?;
+        Ok(Expression::ArrayExpression(elements))
     }
 
     fn parse_object_literal(&mut self) -> Result<Expression<'a>, ParseError> {
-        let mut depth = 1;
-        self.advance()?; // '{'
-        while depth > 0 && self.current_token.is_some() {
-            if self.current_token == Some(Token::LBrace) {
-                depth += 1;
+        self.advance()?; // consume '{'
+        let mut properties = Vec::new();
+
+        while self.current_token != Some(Token::RBrace) && self.current_token.is_some() {
+            match self.current_token.clone() {
+                Some(Token::Identifier(id)) => {
+                    let name = id;
+                    self.advance()?;
+                    if self.consume_opt(Token::Colon)? {
+                        // Regular property: { name: expr }
+                        let val = self.parse_assignment_expression()?;
+                        properties.push((ObjectKey::Identifier(name), val));
+                    } else if self.current_token == Some(Token::LParen) {
+                        // Method shorthand: { name(...) { ... } }
+                        self.advance()?; // consume '('
+                        let mut params = Vec::new();
+                        while let Some(Token::Identifier(param)) = self.current_token {
+                            params.push(param);
+                            self.advance()?;
+                            if !self.consume_opt(Token::Comma)? {
+                                break;
+                            }
+                        }
+                        self.consume_opt(Token::RParen)?;
+                        let body = self.parse_block_statement()?;
+                        let func = FunctionDeclaration {
+                            id: Some(name),
+                            params,
+                            body,
+                        };
+                        properties.push((
+                            ObjectKey::Identifier(name),
+                            Expression::FunctionExpression(Box::new(func)),
+                        ));
+                    } else {
+                        // Shorthand property: { name }
+                        properties.push((
+                            ObjectKey::Identifier(name),
+                            Expression::Identifier(name),
+                        ));
+                    }
+                }
+                Some(Token::String(s)) => {
+                    let key = s;
+                    self.advance()?;
+                    self.consume_opt(Token::Colon)?;
+                    let val = self.parse_assignment_expression()?;
+                    properties.push((ObjectKey::String(key), val));
+                }
+                Some(Token::Number(n)) => {
+                    let key = n;
+                    self.advance()?;
+                    self.consume_opt(Token::Colon)?;
+                    let val = self.parse_assignment_expression()?;
+                    properties.push((ObjectKey::Number(key), val));
+                }
+                Some(Token::LBracket) => {
+                    // Computed key: { [expr]: expr } — skip for now
+                    let mut depth = 1;
+                    self.advance()?; // consume '['
+                    while depth > 0 && self.current_token.is_some() {
+                        if self.current_token == Some(Token::LBracket) {
+                            depth += 1;
+                        }
+                        if self.current_token == Some(Token::RBracket) {
+                            depth -= 1;
+                        }
+                        self.advance()?;
+                    }
+                    self.consume_opt(Token::Colon)?;
+                    self.parse_assignment_expression()?; // discard value
+                }
+                Some(Token::DotDotDot) => {
+                    // Spread: { ...expr } — skip for now
+                    self.advance()?; // consume '...'
+                    self.parse_assignment_expression()?; // discard spread expr
+                }
+                _ => break, // stop on any other token
             }
-            if self.current_token == Some(Token::RBrace) {
-                depth -= 1;
-            }
-            self.advance()?;
+
+            self.consume_opt(Token::Comma)?;
         }
-        Ok(Expression::ObjectExpression(vec![]))
+
+        self.consume_opt(Token::RBrace)?; // consume '}'
+        Ok(Expression::ObjectExpression(properties))
     }
 
     fn parse_primary(&mut self) -> Result<Expression<'a>, ParseError> {

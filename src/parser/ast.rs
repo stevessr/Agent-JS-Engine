@@ -116,6 +116,7 @@ pub enum Expression<'a> {
 pub enum ObjectKey<'a> {
     Identifier(&'a str),
     String(&'a str),
+    Number(f64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
