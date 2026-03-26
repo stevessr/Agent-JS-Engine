@@ -1,5 +1,5 @@
 use crate::engine::env::Environment;
-use crate::engine::value::JsValue;
+use crate::engine::value::{FunctionValue, JsValue};
 use crate::parser::ast::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,6 +24,7 @@ pub enum RuntimeError {
 pub struct Interpreter {
     pub global_env: Rc<RefCell<Environment>>,
     pub instruction_count: usize,
+    pub functions: Vec<FunctionDeclaration<'static>>,
 }
 
 impl Interpreter {
@@ -31,6 +32,7 @@ impl Interpreter {
         Self {
             global_env: Rc::new(RefCell::new(Environment::new(None))),
             instruction_count: 0,
+            functions: Vec::new(),
         }
     }
 
@@ -168,9 +170,16 @@ impl Interpreter {
 
                 final_val
             }
-            Statement::FunctionDeclaration(_func) => {
-                // A very simplified function representation via Environment.
-                // We will store AST nodes in Environment instead in later patches, for now skip.
+            Statement::FunctionDeclaration(func) => {
+                if let Some(name) = func.id {
+                    let id = self.functions.len();
+                    self.functions.push(clone_function_declaration(func));
+                    let function = JsValue::Function(Rc::new(FunctionValue {
+                        id,
+                        env: Rc::clone(&env),
+                    }));
+                    env.borrow_mut().define(name.to_string(), function);
+                }
                 Ok(JsValue::Undefined)
             }
             Statement::ReturnStatement(expr) => {
@@ -288,9 +297,39 @@ impl Interpreter {
                 // Stub
                 Ok(JsValue::Undefined)
             }
-            Expression::CallExpression(_call) => {
-                // Stub
-                Ok(JsValue::Undefined)
+            Expression::CallExpression(call) => {
+                let callee = self.eval_expression(&call.callee, Rc::clone(&env))?;
+                let args = call
+                    .arguments
+                    .iter()
+                    .map(|arg| self.eval_expression(arg, Rc::clone(&env)))
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                match callee {
+                    JsValue::Function(function) => {
+                        let declaration = self
+                            .functions
+                            .get(function.id)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::TypeError("function body missing".into()))?;
+                        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(
+                            &function.env,
+                        )))));
+                        for (index, param) in declaration.params.iter().enumerate() {
+                            let value = args.get(index).cloned().unwrap_or(JsValue::Undefined);
+                            call_env.borrow_mut().define(param.to_string(), value);
+                        }
+                        match self.eval_statement(
+                            &Statement::BlockStatement(declaration.body.clone()),
+                            call_env,
+                        ) {
+                            Ok(value) => Ok(value),
+                            Err(RuntimeError::Return(value)) => Ok(value),
+                            Err(error) => Err(error),
+                        }
+                    }
+                    _ => Err(RuntimeError::TypeError("value is not callable".into())),
+                }
             }
             Expression::UpdateExpression(update) => {
                 let id = match &update.argument {
@@ -314,9 +353,23 @@ impl Interpreter {
                     Ok(JsValue::Number(current_val))
                 }
             }
-            Expression::ArrowFunctionExpression(_) => Ok(JsValue::Undefined),
+            Expression::ArrowFunctionExpression(func) => {
+                let id = self.functions.len();
+                self.functions.push(clone_function_declaration(func));
+                Ok(JsValue::Function(Rc::new(FunctionValue {
+                    id,
+                    env: Rc::clone(&env),
+                })))
+            }
             Expression::ClassExpression(_) => Ok(JsValue::Undefined),
-            Expression::FunctionExpression(_func) => Ok(JsValue::Undefined),
+            Expression::FunctionExpression(func) => {
+                let id = self.functions.len();
+                self.functions.push(clone_function_declaration(func));
+                Ok(JsValue::Function(Rc::new(FunctionValue {
+                    id,
+                    env: Rc::clone(&env),
+                })))
+            }
             Expression::ThisExpression => Ok(JsValue::Undefined),
             Expression::SequenceExpression(seq) => {
                 let mut res = JsValue::Undefined;
@@ -339,6 +392,175 @@ impl Interpreter {
             }
             Expression::NewExpression(_new_exp) => Ok(JsValue::Undefined),
         }
+    }
+}
+
+fn clone_function_declaration(func: &FunctionDeclaration<'_>) -> FunctionDeclaration<'static> {
+    let id = func.id.map(|value| {
+        let leaked: &'static mut str = String::leak(value.to_string());
+        leaked as &'static str
+    });
+    let params = func
+        .params
+        .iter()
+        .map(|param| {
+            let leaked: &'static mut str = String::leak((*param).to_string());
+            leaked as &'static str
+        })
+        .collect();
+    FunctionDeclaration {
+        id,
+        params,
+        body: clone_block_statement(&func.body),
+    }
+}
+
+fn clone_block_statement(block: &BlockStatement<'_>) -> BlockStatement<'static> {
+    BlockStatement {
+        body: block.body.iter().map(clone_statement).collect(),
+    }
+}
+
+fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
+    match stmt {
+        Statement::ExpressionStatement(expr) => Statement::ExpressionStatement(clone_expression(expr)),
+        Statement::BlockStatement(block) => Statement::BlockStatement(clone_block_statement(block)),
+        Statement::IfStatement(stmt) => Statement::IfStatement(IfStatement {
+            test: clone_expression(&stmt.test),
+            consequent: Box::new(clone_statement(&stmt.consequent)),
+            alternate: stmt.alternate.as_ref().map(|alt| Box::new(clone_statement(alt))),
+        }),
+        Statement::WhileStatement(stmt) => Statement::WhileStatement(WhileStatement {
+            test: clone_expression(&stmt.test),
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
+        Statement::ForStatement(stmt) => Statement::ForStatement(ForStatement {
+            init: stmt.init.as_ref().map(|init| Box::new(clone_statement(init))),
+            test: stmt.test.as_ref().map(clone_expression),
+            update: stmt.update.as_ref().map(clone_expression),
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
+        Statement::TryStatement(stmt) => Statement::TryStatement(TryStatement {
+            block: clone_block_statement(&stmt.block),
+            handler: stmt.handler.as_ref().map(|handler| {
+                let param = handler.param.map(|value| {
+                    let leaked: &'static mut str = String::leak(value.to_string());
+                    leaked as &'static str
+                });
+                CatchClause {
+                    param,
+                    body: clone_block_statement(&handler.body),
+                }
+            }),
+            finalizer: stmt.finalizer.as_ref().map(clone_block_statement),
+        }),
+        Statement::ThrowStatement(expr) => Statement::ThrowStatement(clone_expression(expr)),
+        Statement::VariableDeclaration(decl) => Statement::VariableDeclaration(VariableDeclaration {
+            kind: decl.kind.clone(),
+            declarations: decl
+                .declarations
+                .iter()
+                .map(|decl| VariableDeclarator {
+                    id: String::leak(decl.id.to_string()),
+                    init: decl.init.as_ref().map(clone_expression),
+                })
+                .collect(),
+        }),
+        Statement::FunctionDeclaration(func) => {
+            Statement::FunctionDeclaration(clone_function_declaration(func))
+        }
+        Statement::ReturnStatement(expr) => {
+            Statement::ReturnStatement(expr.as_ref().map(clone_expression))
+        }
+        Statement::EmptyStatement => Statement::EmptyStatement,
+    }
+}
+
+fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
+    match expr {
+        Expression::Literal(Literal::Number(n)) => Expression::Literal(Literal::Number(*n)),
+        Expression::Literal(Literal::String(s)) => {
+            Expression::Literal(Literal::String(String::leak((*s).to_string())))
+        }
+        Expression::Literal(Literal::Boolean(b)) => Expression::Literal(Literal::Boolean(*b)),
+        Expression::Literal(Literal::Null) => Expression::Literal(Literal::Null),
+        Expression::Identifier(name) => Expression::Identifier(String::leak((*name).to_string())),
+        Expression::BinaryExpression(expr) => Expression::BinaryExpression(Box::new(BinaryExpression {
+            operator: expr.operator.clone(),
+            left: clone_expression(&expr.left),
+            right: clone_expression(&expr.right),
+        })),
+        Expression::UnaryExpression(expr) => Expression::UnaryExpression(Box::new(UnaryExpression {
+            operator: expr.operator.clone(),
+            argument: clone_expression(&expr.argument),
+            prefix: expr.prefix,
+        })),
+        Expression::AssignmentExpression(expr) => Expression::AssignmentExpression(Box::new(AssignmentExpression {
+            operator: expr.operator.clone(),
+            left: clone_expression(&expr.left),
+            right: clone_expression(&expr.right),
+        })),
+        Expression::MemberExpression(expr) => Expression::MemberExpression(Box::new(MemberExpression {
+            object: clone_expression(&expr.object),
+            property: clone_expression(&expr.property),
+            computed: expr.computed,
+        })),
+        Expression::CallExpression(expr) => Expression::CallExpression(Box::new(CallExpression {
+            callee: clone_expression(&expr.callee),
+            arguments: expr.arguments.iter().map(clone_expression).collect(),
+        })),
+        Expression::NewExpression(expr) => Expression::NewExpression(Box::new(CallExpression {
+            callee: clone_expression(&expr.callee),
+            arguments: expr.arguments.iter().map(clone_expression).collect(),
+        })),
+        Expression::FunctionExpression(func) => {
+            Expression::FunctionExpression(Box::new(clone_function_declaration(func)))
+        }
+        Expression::ArrowFunctionExpression(func) => {
+            Expression::ArrowFunctionExpression(Box::new(clone_function_declaration(func)))
+        }
+        Expression::UpdateExpression(expr) => Expression::UpdateExpression(Box::new(UpdateExpression {
+            operator: expr.operator.clone(),
+            argument: clone_expression(&expr.argument),
+            prefix: expr.prefix,
+        })),
+        Expression::SequenceExpression(seq) => {
+            Expression::SequenceExpression(seq.iter().map(clone_expression).collect())
+        }
+        Expression::ConditionalExpression { test, consequent, alternate } => {
+            Expression::ConditionalExpression {
+                test: Box::new(clone_expression(test)),
+                consequent: Box::new(clone_expression(consequent)),
+                alternate: Box::new(clone_expression(alternate)),
+            }
+        }
+        Expression::ArrayExpression(values) => {
+            Expression::ArrayExpression(values.iter().map(|value| value.as_ref().map(clone_expression)).collect())
+        }
+        Expression::ObjectExpression(values) => Expression::ObjectExpression(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let key = match key {
+                        ObjectKey::Identifier(name) => {
+                            ObjectKey::Identifier(String::leak((*name).to_string()))
+                        }
+                        ObjectKey::String(name) => {
+                            ObjectKey::String(String::leak((*name).to_string()))
+                        }
+                    };
+                    (key, clone_expression(value))
+                })
+                .collect(),
+        ),
+        Expression::ClassExpression(expr) => {
+            let id = expr.id.map(|value| {
+                let leaked: &'static mut str = String::leak(value.to_string());
+                leaked as &'static str
+            });
+            Expression::ClassExpression(Box::new(ClassDeclaration { id }))
+        }
+        Expression::ThisExpression => Expression::ThisExpression,
     }
 }
 

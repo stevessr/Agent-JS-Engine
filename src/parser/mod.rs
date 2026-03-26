@@ -520,7 +520,7 @@ impl<'a> Parser<'a> {
                 let mut args = Vec::new();
                 if self.current_token != Some(Token::RParen) {
                     loop {
-                        args.push(self.parse_expression()?);
+                        args.push(self.parse_assignment_expression()?);
                         if !self.consume_opt(Token::Comma)? {
                             break;
                         }

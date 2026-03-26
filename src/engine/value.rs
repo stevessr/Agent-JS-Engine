@@ -1,12 +1,36 @@
+use crate::engine::env::Environment;
 use crate::engine::interpreter::RuntimeError;
+use std::cell::RefCell;
+use std::rc::Rc;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
+pub struct FunctionValue {
+    pub id: usize,
+    pub env: Rc<RefCell<Environment>>,
+}
+
+#[derive(Debug, Clone)]
 pub enum JsValue {
     Undefined,
     Null,
     Boolean(bool),
     Number(f64),
     String(String),
+    Function(Rc<FunctionValue>),
+}
+
+impl PartialEq for JsValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (JsValue::Undefined, JsValue::Undefined) => true,
+            (JsValue::Null, JsValue::Null) => true,
+            (JsValue::Boolean(left), JsValue::Boolean(right)) => left == right,
+            (JsValue::Number(left), JsValue::Number(right)) => left == right,
+            (JsValue::String(left), JsValue::String(right)) => left == right,
+            (JsValue::Function(left), JsValue::Function(right)) => Rc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
 }
 
 impl JsValue {
@@ -16,6 +40,7 @@ impl JsValue {
             JsValue::Boolean(b) => *b,
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
+            JsValue::Function(_) => true,
         }
     }
 
@@ -26,6 +51,7 @@ impl JsValue {
             JsValue::Boolean(_) => "boolean".to_string(),
             JsValue::Number(_) => "number".to_string(),
             JsValue::String(_) => "string".to_string(),
+            JsValue::Function(_) => "function".to_string(),
         }
     }
 
@@ -42,6 +68,7 @@ impl JsValue {
             }
             JsValue::Null => 0.0,
             JsValue::Undefined => f64::NAN,
+            JsValue::Function(_) => f64::NAN,
         }
     }
 
@@ -52,6 +79,7 @@ impl JsValue {
             JsValue::Boolean(b) => b.to_string(),
             JsValue::Null => "null".to_string(),
             JsValue::Undefined => "undefined".to_string(),
+            JsValue::Function(_) => "function () { [native code] }".to_string(),
         }
     }
 
