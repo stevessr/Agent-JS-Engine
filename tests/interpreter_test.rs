@@ -662,3 +662,51 @@ fn interpreter_evaluates_unary_bitnot_on_zero() {
     let result = eval_with_interpreter("~0;");
     assert_eq!(result, JsValue::Number(-1.0));
 }
+
+#[test]
+fn interpreter_evaluates_nullish_coalescing_with_undefined() {
+    let result = eval_with_interpreter("undefined ?? 5;");
+    assert_eq!(result, JsValue::Number(5.0));
+}
+
+#[test]
+fn interpreter_evaluates_nullish_coalescing_with_null() {
+    let result = eval_with_interpreter("null ?? 5;");
+    assert_eq!(result, JsValue::Number(5.0));
+}
+
+#[test]
+fn interpreter_does_not_treat_zero_as_nullish() {
+    let result = eval_with_interpreter("0 ?? 5;");
+    assert_eq!(result, JsValue::Number(0.0));
+}
+
+#[test]
+fn interpreter_evaluates_bitwise_binary_and_on_null() {
+    let result = eval_with_interpreter("null & 1;");
+    assert_eq!(result, JsValue::Number(0.0));
+}
+
+#[test]
+fn interpreter_evaluates_bitwise_binary_or_on_undefined() {
+    let result = eval_with_interpreter("undefined | 1;");
+    assert_eq!(result, JsValue::Number(1.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_null() {
+    let result = eval_with_interpreter("~null;");
+    assert_eq!(result, JsValue::Number(-1.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_undefined() {
+    let result = eval_with_interpreter("~undefined;");
+    assert_eq!(result, JsValue::Number(-1.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_string_number() {
+    let result = eval_with_interpreter("~'5';");
+    assert_eq!(result, JsValue::Number(-6.0));
+}

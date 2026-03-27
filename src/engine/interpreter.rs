@@ -426,6 +426,12 @@ impl Interpreter {
                         }
                         return self.eval_expression(&bin.right, env);
                     }
+                    BinaryOperator::NullishCoalescing => {
+                        if !matches!(left, JsValue::Undefined | JsValue::Null) {
+                            return Ok(left);
+                        }
+                        return self.eval_expression(&bin.right, env);
+                    }
                     _ => {}
                 }
 
