@@ -29,6 +29,21 @@ permissions:
   contents: read
 
 jobs:
+  prepare-test262:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch test262 suite
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
+          git -C test262 sparse-checkout set test harness
+
+      - name: Upload test262 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-suite
+          path: test262
+
   isolated-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -50,7 +65,9 @@ jobs:
         run: cargo test --test isolated_test
 
   core-profile-shards:
-    needs: isolated-smoke
+    needs:
+      - prepare-test262
+      - isolated-smoke
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -165,10 +182,11 @@ jobs:
         with:
           shared-key: test262-core-profile
 
-      - name: Fetch test262 suite
-        run: |
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
-          git -C test262 sparse-checkout set test harness
+      - name: Download test262 suite
+        uses: actions/download-artifact@v4
+        with:
+          name: test262-suite
+          path: .
 
       - name: Run shard ${{ matrix.shard }}
         shell: bash
@@ -218,13 +236,15 @@ jobs:
 
       - name: Upload shard summary
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: shard-${{ matrix.shard }}
           path: summary.json
 
   known-slow-tail-case:
-    needs: isolated-smoke
+    needs:
+      - prepare-test262
+      - isolated-smoke
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -246,10 +266,11 @@ jobs:
         with:
           shared-key: test262-core-profile
 
-      - name: Fetch test262 suite
-        run: |
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
-          git -C test262 sparse-checkout set test harness
+      - name: Download test262 suite
+        uses: actions/download-artifact@v4
+        with:
+          name: test262-suite
+          path: .
 
       - name: Run known slow tail case
         shell: bash
@@ -268,7 +289,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download shard summaries
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v4
         with:
           path: shard-summaries
 
