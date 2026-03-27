@@ -64,6 +64,19 @@ impl Interpreter {
         }
     }
 
+    fn to_int32(&self, value: &JsValue) -> i32 {
+        self.to_uint32(value) as i32
+    }
+
+    fn to_uint32(&self, value: &JsValue) -> u32 {
+        let number = value.as_number();
+        if !number.is_finite() || number == 0.0 {
+            return 0;
+        }
+
+        number.trunc().rem_euclid(4294967296.0) as u32
+    }
+
     fn assignment_result(
         &self,
         operator: &AssignmentOperator,
@@ -78,6 +91,30 @@ impl Interpreter {
             AssignmentOperator::DivideAssign => left.div(right),
             AssignmentOperator::PercentAssign => {
                 Ok(JsValue::Number(left.as_number() % right.as_number()))
+            }
+            AssignmentOperator::LogicAndAssign
+            | AssignmentOperator::LogicOrAssign
+            | AssignmentOperator::NullishAssign => Ok(right.clone()),
+            AssignmentOperator::BitAndAssign => Ok(JsValue::Number(
+                (self.to_int32(left) & self.to_int32(right)) as f64,
+            )),
+            AssignmentOperator::BitOrAssign => Ok(JsValue::Number(
+                (self.to_int32(left) | self.to_int32(right)) as f64,
+            )),
+            AssignmentOperator::BitXorAssign => Ok(JsValue::Number(
+                (self.to_int32(left) ^ self.to_int32(right)) as f64,
+            )),
+            AssignmentOperator::ShiftLeftAssign => {
+                let shift = self.to_uint32(right) & 0x1f;
+                Ok(JsValue::Number((self.to_int32(left) << shift) as f64))
+            }
+            AssignmentOperator::ShiftRightAssign => {
+                let shift = self.to_uint32(right) & 0x1f;
+                Ok(JsValue::Number((self.to_int32(left) >> shift) as f64))
+            }
+            AssignmentOperator::UnsignedShiftRightAssign => {
+                let shift = self.to_uint32(right) & 0x1f;
+                Ok(JsValue::Number((self.to_uint32(left) >> shift) as f64))
             }
         }
     }
@@ -299,10 +336,23 @@ impl Interpreter {
                 Ok(env.borrow().get(name).unwrap_or(JsValue::Undefined))
             }
             Expression::AssignmentExpression(assign) => {
-                let right = self.eval_expression(&assign.right, Rc::clone(&env))?;
                 match &assign.left {
                     Expression::Identifier(name) => {
                         let current = env.borrow().get(name).unwrap_or(JsValue::Undefined);
+                        let should_assign = match assign.operator {
+                            AssignmentOperator::LogicAndAssign => current.is_truthy(),
+                            AssignmentOperator::LogicOrAssign => !current.is_truthy(),
+                            AssignmentOperator::NullishAssign => {
+                                matches!(current, JsValue::Undefined | JsValue::Null)
+                            }
+                            _ => true,
+                        };
+
+                        if !should_assign {
+                            return Ok(current);
+                        }
+
+                        let right = self.eval_expression(&assign.right, Rc::clone(&env))?;
                         let value = self.assignment_result(&assign.operator, &current, &right)?;
                         if env.borrow_mut().set(name, value.clone()).is_err() {
                             env.borrow_mut().define(name.to_string(), value.clone());
@@ -311,7 +361,7 @@ impl Interpreter {
                     }
                     Expression::MemberExpression(mem) => {
                         let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
-                        let property_key = self.member_property_key(mem, env)?;
+                        let property_key = self.member_property_key(mem, Rc::clone(&env))?;
                         let current = match &object {
                             JsValue::Object(values) => values
                                 .borrow()
@@ -339,6 +389,21 @@ impl Interpreter {
                             }
                             _ => return Err(RuntimeError::TypeError("value is not an object".into())),
                         };
+
+                        let should_assign = match assign.operator {
+                            AssignmentOperator::LogicAndAssign => current.is_truthy(),
+                            AssignmentOperator::LogicOrAssign => !current.is_truthy(),
+                            AssignmentOperator::NullishAssign => {
+                                matches!(current, JsValue::Undefined | JsValue::Null)
+                            }
+                            _ => true,
+                        };
+
+                        if !should_assign {
+                            return Ok(current);
+                        }
+
+                        let right = self.eval_expression(&assign.right, env)?;
                         let value = self.assignment_result(&assign.operator, &current, &right)?;
                         self.write_member_value(object, &property_key, value)
                     }
@@ -372,6 +437,27 @@ impl Interpreter {
                     BinaryOperator::Divide => left.div(&right),
                     BinaryOperator::Percent => {
                         Ok(JsValue::Number(left.as_number() % right.as_number()))
+                    }
+                    BinaryOperator::BitAnd => Ok(JsValue::Number(
+                        (self.to_int32(&left) & self.to_int32(&right)) as f64,
+                    )),
+                    BinaryOperator::BitOr => Ok(JsValue::Number(
+                        (self.to_int32(&left) | self.to_int32(&right)) as f64,
+                    )),
+                    BinaryOperator::BitXor => Ok(JsValue::Number(
+                        (self.to_int32(&left) ^ self.to_int32(&right)) as f64,
+                    )),
+                    BinaryOperator::ShiftLeft => {
+                        let shift = self.to_uint32(&right) & 0x1f;
+                        Ok(JsValue::Number((self.to_int32(&left) << shift) as f64))
+                    }
+                    BinaryOperator::ShiftRight => {
+                        let shift = self.to_uint32(&right) & 0x1f;
+                        Ok(JsValue::Number((self.to_int32(&left) >> shift) as f64))
+                    }
+                    BinaryOperator::LogicalShiftRight => {
+                        let shift = self.to_uint32(&right) & 0x1f;
+                        Ok(JsValue::Number((self.to_uint32(&left) >> shift) as f64))
                     }
                     BinaryOperator::EqEq => Ok(JsValue::Boolean(left == right)), // Needs abstract equality
                     BinaryOperator::EqEqEq => Ok(JsValue::Boolean(left == right)),

@@ -313,6 +313,15 @@ impl<'a> Parser<'a> {
                 || self.current_token == Some(Token::MultiplyAssign)
                 || self.current_token == Some(Token::DivideAssign)
                 || self.current_token == Some(Token::PercentAssign)
+                || self.current_token == Some(Token::LogicAndAssign)
+                || self.current_token == Some(Token::LogicOrAssign)
+                || self.current_token == Some(Token::NullishAssign)
+                || self.current_token == Some(Token::BitAndAssign)
+                || self.current_token == Some(Token::BitOrAssign)
+                || self.current_token == Some(Token::BitXorAssign)
+                || self.current_token == Some(Token::LeftShiftAssign)
+                || self.current_token == Some(Token::RightShiftAssign)
+                || self.current_token == Some(Token::UnsignedRightShiftAssign)
             {
                 return Err(ParseError::UnexpectedToken {
                     expected: "Assign".to_string(),
@@ -378,6 +387,15 @@ impl<'a> Parser<'a> {
             || self.current_token == Some(Token::MultiplyAssign)
             || self.current_token == Some(Token::DivideAssign)
             || self.current_token == Some(Token::PercentAssign)
+            || self.current_token == Some(Token::LogicAndAssign)
+            || self.current_token == Some(Token::LogicOrAssign)
+            || self.current_token == Some(Token::NullishAssign)
+            || self.current_token == Some(Token::BitAndAssign)
+            || self.current_token == Some(Token::BitOrAssign)
+            || self.current_token == Some(Token::BitXorAssign)
+            || self.current_token == Some(Token::LeftShiftAssign)
+            || self.current_token == Some(Token::RightShiftAssign)
+            || self.current_token == Some(Token::UnsignedRightShiftAssign)
         {
             let operator = match self.current_token.clone().unwrap() {
                 Token::PlusAssign => AssignmentOperator::PlusAssign,
@@ -385,6 +403,15 @@ impl<'a> Parser<'a> {
                 Token::MultiplyAssign => AssignmentOperator::MultiplyAssign,
                 Token::DivideAssign => AssignmentOperator::DivideAssign,
                 Token::PercentAssign => AssignmentOperator::PercentAssign,
+                Token::LogicAndAssign => AssignmentOperator::LogicAndAssign,
+                Token::LogicOrAssign => AssignmentOperator::LogicOrAssign,
+                Token::NullishAssign => AssignmentOperator::NullishAssign,
+                Token::BitAndAssign => AssignmentOperator::BitAndAssign,
+                Token::BitOrAssign => AssignmentOperator::BitOrAssign,
+                Token::BitXorAssign => AssignmentOperator::BitXorAssign,
+                Token::LeftShiftAssign => AssignmentOperator::ShiftLeftAssign,
+                Token::RightShiftAssign => AssignmentOperator::ShiftRightAssign,
+                Token::UnsignedRightShiftAssign => AssignmentOperator::UnsignedShiftRightAssign,
                 _ => AssignmentOperator::Assign,
             };
             self.advance()?;

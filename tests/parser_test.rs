@@ -195,3 +195,165 @@ fn parser_rejects_compound_assignment_in_variable_declaration() {
 
     assert!(format!("{error}").contains("Assign"));
 }
+
+#[test]
+fn parser_preserves_logical_or_assign_operator() {
+    let source = "x ||= 1";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::LogicOrAssign));
+            assert!(matches!(assign.left, Expression::Identifier("x")));
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_preserves_logical_and_assign_on_member() {
+    let source = "obj.foo &&= 2";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::LogicAndAssign));
+            match &assign.left {
+                Expression::MemberExpression(member) => {
+                    assert!(!member.computed);
+                    assert!(matches!(member.object, Expression::Identifier("obj")));
+                    assert!(matches!(member.property, Expression::Identifier("foo")));
+                }
+                other => panic!("expected member expression left-hand side, got {other:?}"),
+            }
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(2.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_preserves_nullish_assign_on_computed_member() {
+    let source = "arr[0] ??= 3";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::NullishAssign));
+            match &assign.left {
+                Expression::MemberExpression(member) => {
+                    assert!(member.computed);
+                    assert!(matches!(member.object, Expression::Identifier("arr")));
+                    assert!(matches!(member.property, Expression::Literal(Literal::Number(0.0))));
+                }
+                other => panic!("expected member expression left-hand side, got {other:?}"),
+            }
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(3.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_rejects_logical_assignment_in_variable_declaration() {
+    let source = "let x ||= 1;";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let error = parser
+        .parse_program()
+        .expect_err("logical assignment in declaration should fail");
+
+    assert!(format!("{error}").contains("Assign"));
+}
+
+#[test]
+fn parser_preserves_bitand_assign_operator() {
+    let source = "x &= 1";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::BitAndAssign));
+            assert!(matches!(assign.left, Expression::Identifier("x")));
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_preserves_shift_assign_on_member() {
+    let source = "obj.foo <<= 2";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::ShiftLeftAssign));
+            match &assign.left {
+                Expression::MemberExpression(member) => {
+                    assert!(!member.computed);
+                    assert!(matches!(member.object, Expression::Identifier("obj")));
+                    assert!(matches!(member.property, Expression::Identifier("foo")));
+                }
+                other => panic!("expected member expression left-hand side, got {other:?}"),
+            }
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(2.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_preserves_unsigned_shift_assign_on_computed_member() {
+    let source = "arr[0] >>>= 1";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
+            assert!(matches!(assign.operator, AssignmentOperator::UnsignedShiftRightAssign));
+            match &assign.left {
+                Expression::MemberExpression(member) => {
+                    assert!(member.computed);
+                    assert!(matches!(member.object, Expression::Identifier("arr")));
+                    assert!(matches!(member.property, Expression::Literal(Literal::Number(0.0))));
+                }
+                other => panic!("expected member expression left-hand side, got {other:?}"),
+            }
+            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+        }
+        other => panic!("expected assignment expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_rejects_bitwise_assignment_in_variable_declaration() {
+    let source = "let x &= 1;";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let error = parser
+        .parse_program()
+        .expect_err("bitwise assignment in declaration should fail");
+
+    assert!(format!("{error}").contains("Assign"));
+}

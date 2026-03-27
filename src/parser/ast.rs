@@ -176,6 +176,15 @@ pub enum AssignmentOperator {
     MultiplyAssign,
     DivideAssign,
     PercentAssign,
+    LogicAndAssign,
+    LogicOrAssign,
+    NullishAssign,
+    BitAndAssign,
+    BitOrAssign,
+    BitXorAssign,
+    ShiftLeftAssign,
+    ShiftRightAssign,
+    UnsignedShiftRightAssign,
 }
 
 #[derive(Debug, Clone)]
