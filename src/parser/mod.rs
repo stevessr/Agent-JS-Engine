@@ -305,23 +305,19 @@ impl<'a> Parser<'a> {
                 _ => break, // just break if it's not identifier (robustness)
             };
 
-            let init = if self.current_token == Some(Token::Assign)
-                || self.current_token == Some(Token::PlusAssign)
+            let init = if self.current_token == Some(Token::Assign) {
+                self.advance()?;
+                Some(self.parse_expression()?)
+            } else if self.current_token == Some(Token::PlusAssign)
                 || self.current_token == Some(Token::MinusAssign)
                 || self.current_token == Some(Token::MultiplyAssign)
                 || self.current_token == Some(Token::DivideAssign)
                 || self.current_token == Some(Token::PercentAssign)
             {
-                let _operator = match self.current_token.clone().unwrap() {
-                    Token::PlusAssign => AssignmentOperator::PlusAssign,
-                    Token::MinusAssign => AssignmentOperator::MinusAssign,
-                    Token::MultiplyAssign => AssignmentOperator::MultiplyAssign,
-                    Token::DivideAssign => AssignmentOperator::DivideAssign,
-                    Token::PercentAssign => AssignmentOperator::PercentAssign,
-                    _ => AssignmentOperator::Assign,
-                };
-                self.advance()?;
-                Some(self.parse_expression()?)
+                return Err(ParseError::UnexpectedToken {
+                    expected: "Assign".to_string(),
+                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                });
             } else {
                 None
             };
@@ -383,7 +379,7 @@ impl<'a> Parser<'a> {
             || self.current_token == Some(Token::DivideAssign)
             || self.current_token == Some(Token::PercentAssign)
         {
-            let _operator = match self.current_token.clone().unwrap() {
+            let operator = match self.current_token.clone().unwrap() {
                 Token::PlusAssign => AssignmentOperator::PlusAssign,
                 Token::MinusAssign => AssignmentOperator::MinusAssign,
                 Token::MultiplyAssign => AssignmentOperator::MultiplyAssign,
@@ -395,7 +391,7 @@ impl<'a> Parser<'a> {
             let right = self.parse_assignment_expression()?;
             Ok(Expression::AssignmentExpression(Box::new(
                 AssignmentExpression {
-                    operator: AssignmentOperator::Assign,
+                    operator,
                     left,
                     right,
                 },
@@ -553,33 +549,97 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_array_literal(&mut self) -> Result<Expression<'a>, ParseError> {
-        let mut depth = 1;
         self.advance()?; // '['
-        while depth > 0 && self.current_token.is_some() {
-            if self.current_token == Some(Token::LBracket) {
-                depth += 1;
+        let mut elements = Vec::new();
+
+        while self.current_token.is_some() && self.current_token != Some(Token::RBracket) {
+            if self.current_token == Some(Token::DotDotDot) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "array element without spread".to_string(),
+                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                });
             }
-            if self.current_token == Some(Token::RBracket) {
-                depth -= 1;
+
+            if self.current_token == Some(Token::Comma) {
+                elements.push(None);
+                self.advance()?;
+                continue;
             }
-            self.advance()?;
+
+            elements.push(Some(self.parse_assignment_expression()?));
+
+            if self.current_token == Some(Token::Comma) {
+                self.advance()?;
+            } else {
+                break;
+            }
         }
-        Ok(Expression::ArrayExpression(vec![]))
+
+        if !self.consume_opt(Token::RBracket)? {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RBracket".to_string(),
+                found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+            });
+        }
+
+        Ok(Expression::ArrayExpression(elements))
     }
 
     fn parse_object_literal(&mut self) -> Result<Expression<'a>, ParseError> {
-        let mut depth = 1;
         self.advance()?; // '{'
-        while depth > 0 && self.current_token.is_some() {
-            if self.current_token == Some(Token::LBrace) {
-                depth += 1;
+        let mut properties = Vec::new();
+
+        while self.current_token.is_some() && self.current_token != Some(Token::RBrace) {
+            if self.current_token == Some(Token::DotDotDot) {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "object property without spread".to_string(),
+                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                });
             }
-            if self.current_token == Some(Token::RBrace) {
-                depth -= 1;
+
+            let key = match self.current_token.clone() {
+                Some(Token::Identifier(name)) => {
+                    self.advance()?;
+                    ObjectKey::Identifier(name)
+                }
+                Some(Token::String(name)) => {
+                    self.advance()?;
+                    ObjectKey::String(name)
+                }
+                Some(token) => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "Identifier or String".to_string(),
+                        found: Some(format!("{:?}", token)),
+                    });
+                }
+                None => return Err(ParseError::UnexpectedEOF),
+            };
+
+            if !self.consume_opt(Token::Colon)? {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "Colon".to_string(),
+                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                });
             }
-            self.advance()?;
+
+            let value = self.parse_assignment_expression()?;
+            properties.push((key, value));
+
+            if self.current_token == Some(Token::Comma) {
+                self.advance()?;
+            } else {
+                break;
+            }
         }
-        Ok(Expression::ObjectExpression(vec![]))
+
+        if !self.consume_opt(Token::RBrace)? {
+            return Err(ParseError::UnexpectedToken {
+                expected: "RBrace".to_string(),
+                found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+            });
+        }
+
+        Ok(Expression::ObjectExpression(properties))
     }
 
     fn parse_primary(&mut self) -> Result<Expression<'a>, ParseError> {

@@ -1,6 +1,7 @@
 use crate::engine::env::Environment;
 use crate::engine::interpreter::RuntimeError;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -16,6 +17,8 @@ pub enum JsValue {
     Boolean(bool),
     Number(f64),
     String(String),
+    Array(Rc<RefCell<Vec<JsValue>>>),
+    Object(Rc<RefCell<HashMap<String, JsValue>>>),
     Function(Rc<FunctionValue>),
 }
 
@@ -27,6 +30,16 @@ impl PartialEq for JsValue {
             (JsValue::Boolean(left), JsValue::Boolean(right)) => left == right,
             (JsValue::Number(left), JsValue::Number(right)) => left == right,
             (JsValue::String(left), JsValue::String(right)) => left == right,
+            (JsValue::Array(left), JsValue::Array(right)) => {
+                let left = left.borrow();
+                let right = right.borrow();
+                *left == *right
+            }
+            (JsValue::Object(left), JsValue::Object(right)) => {
+                let left = left.borrow();
+                let right = right.borrow();
+                *left == *right
+            }
             (JsValue::Function(left), JsValue::Function(right)) => Rc::ptr_eq(left, right),
             _ => false,
         }
@@ -40,7 +53,7 @@ impl JsValue {
             JsValue::Boolean(b) => *b,
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
-            JsValue::Function(_) => true,
+            JsValue::Array(_) | JsValue::Object(_) | JsValue::Function(_) => true,
         }
     }
 
@@ -51,6 +64,7 @@ impl JsValue {
             JsValue::Boolean(_) => "boolean".to_string(),
             JsValue::Number(_) => "number".to_string(),
             JsValue::String(_) => "string".to_string(),
+            JsValue::Array(_) | JsValue::Object(_) => "object".to_string(),
             JsValue::Function(_) => "function".to_string(),
         }
     }
@@ -68,7 +82,7 @@ impl JsValue {
             }
             JsValue::Null => 0.0,
             JsValue::Undefined => f64::NAN,
-            JsValue::Function(_) => f64::NAN,
+            JsValue::Array(_) | JsValue::Object(_) | JsValue::Function(_) => f64::NAN,
         }
     }
 
@@ -79,6 +93,16 @@ impl JsValue {
             JsValue::Boolean(b) => b.to_string(),
             JsValue::Null => "null".to_string(),
             JsValue::Undefined => "undefined".to_string(),
+            JsValue::Array(values) => values
+                .borrow()
+                .iter()
+                .map(|value| match value {
+                    JsValue::Undefined | JsValue::Null => String::new(),
+                    _ => value.as_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            JsValue::Object(_) => "[object Object]".to_string(),
             JsValue::Function(_) => "function () { [native code] }".to_string(),
         }
     }

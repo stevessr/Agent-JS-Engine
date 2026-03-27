@@ -36,6 +36,91 @@ impl Interpreter {
         }
     }
 
+    fn member_property_key(
+        &mut self,
+        mem: &MemberExpression,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<String, RuntimeError> {
+        if mem.computed {
+            let property = self.eval_expression(&mem.property, env)?;
+            Ok(match property {
+                JsValue::String(value) => value,
+                JsValue::Number(value) => {
+                    if value.fract() == 0.0 {
+                        format!("{value:.0}")
+                    } else {
+                        value.to_string()
+                    }
+                }
+                _ => property.as_string(),
+            })
+        } else {
+            match &mem.property {
+                Expression::Identifier(name) => Ok((*name).to_string()),
+                other => Err(RuntimeError::TypeError(format!(
+                    "invalid member property: {other:?}"
+                ))),
+            }
+        }
+    }
+
+    fn assignment_result(
+        &self,
+        operator: &AssignmentOperator,
+        left: &JsValue,
+        right: &JsValue,
+    ) -> Result<JsValue, RuntimeError> {
+        match operator {
+            AssignmentOperator::Assign => Ok(right.clone()),
+            AssignmentOperator::PlusAssign => left.add(right),
+            AssignmentOperator::MinusAssign => left.sub(right),
+            AssignmentOperator::MultiplyAssign => left.mul(right),
+            AssignmentOperator::DivideAssign => left.div(right),
+            AssignmentOperator::PercentAssign => {
+                Ok(JsValue::Number(left.as_number() % right.as_number()))
+            }
+        }
+    }
+
+    fn write_member_value(
+        &self,
+        object: JsValue,
+        property_key: &str,
+        value: JsValue,
+    ) -> Result<JsValue, RuntimeError> {
+        match object {
+            JsValue::Object(values) => {
+                values.borrow_mut().insert(property_key.to_string(), value.clone());
+                Ok(value)
+            }
+            JsValue::Array(values) => {
+                if property_key == "length" {
+                    return Err(RuntimeError::TypeError(
+                        "array length assignment is not supported".into(),
+                    ));
+                }
+
+                let index = property_key.parse::<usize>().map_err(|_| {
+                    RuntimeError::TypeError(
+                        "array assignment requires a non-negative integer index".into(),
+                    )
+                })?;
+
+                let mut values = values.borrow_mut();
+                while values.len() < index {
+                    values.push(JsValue::Undefined);
+                }
+                if values.len() == index {
+                    values.push(value.clone());
+                } else {
+                    values[index] = value.clone();
+                }
+                Ok(value)
+            }
+            _ => Err(RuntimeError::TypeError("value is not an object".into())),
+        }
+    }
+
     fn check_timeout(&mut self) -> Result<(), RuntimeError> {
         self.instruction_count += 1;
         if self.instruction_count > 2_000 {
@@ -214,15 +299,50 @@ impl Interpreter {
                 Ok(env.borrow().get(name).unwrap_or(JsValue::Undefined))
             }
             Expression::AssignmentExpression(assign) => {
-                let val = self.eval_expression(&assign.right, Rc::clone(&env))?;
-                if let Expression::Identifier(name) = &assign.left {
-                    // Try to set, if it fails, just define locally
-                    if env.borrow_mut().set(name, val.clone()).is_err() {
-                        env.borrow_mut().define(name.to_string(), val.clone());
+                let right = self.eval_expression(&assign.right, Rc::clone(&env))?;
+                match &assign.left {
+                    Expression::Identifier(name) => {
+                        let current = env.borrow().get(name).unwrap_or(JsValue::Undefined);
+                        let value = self.assignment_result(&assign.operator, &current, &right)?;
+                        if env.borrow_mut().set(name, value.clone()).is_err() {
+                            env.borrow_mut().define(name.to_string(), value.clone());
+                        }
+                        Ok(value)
                     }
-                    Ok(val)
-                } else {
-                    Ok(JsValue::Undefined)
+                    Expression::MemberExpression(mem) => {
+                        let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                        let property_key = self.member_property_key(mem, env)?;
+                        let current = match &object {
+                            JsValue::Object(values) => values
+                                .borrow()
+                                .get(&property_key)
+                                .cloned()
+                                .unwrap_or(JsValue::Undefined),
+                            JsValue::Array(values) => {
+                                let values = values.borrow();
+                                if property_key == "length" {
+                                    JsValue::Number(values.len() as f64)
+                                } else {
+                                    match property_key.parse::<usize>() {
+                                        Ok(index) => values
+                                            .get(index)
+                                            .cloned()
+                                            .unwrap_or(JsValue::Undefined),
+                                        Err(_) => {
+                                            return Err(RuntimeError::TypeError(
+                                                "array assignment requires a non-negative integer index"
+                                                    .into(),
+                                            ))
+                                        }
+                                    }
+                                }
+                            }
+                            _ => return Err(RuntimeError::TypeError("value is not an object".into())),
+                        };
+                        let value = self.assignment_result(&assign.operator, &current, &right)?;
+                        self.write_member_value(object, &property_key, value)
+                    }
+                    _ => Ok(JsValue::Undefined),
                 }
             }
             Expression::BinaryExpression(bin) => {
@@ -250,6 +370,9 @@ impl Interpreter {
                     BinaryOperator::Minus => left.sub(&right),
                     BinaryOperator::Multiply => left.mul(&right),
                     BinaryOperator::Divide => left.div(&right),
+                    BinaryOperator::Percent => {
+                        Ok(JsValue::Number(left.as_number() % right.as_number()))
+                    }
                     BinaryOperator::EqEq => Ok(JsValue::Boolean(left == right)), // Needs abstract equality
                     BinaryOperator::EqEqEq => Ok(JsValue::Boolean(left == right)),
                     BinaryOperator::NotEq => Ok(JsValue::Boolean(left != right)),
@@ -285,17 +408,48 @@ impl Interpreter {
                     UnaryOperator::Delete => Ok(JsValue::Boolean(true)), // Stub for now
                 }
             }
-            Expression::ArrayExpression(_elements) => {
-                // Return dummy array for now. Proper Array needs object/heap management.
-                Ok(JsValue::Undefined)
+            Expression::ArrayExpression(elements) => {
+                let values = elements
+                    .iter()
+                    .map(|element| match element {
+                        Some(expr) => self.eval_expression(expr, Rc::clone(&env)),
+                        None => Ok(JsValue::Undefined),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(JsValue::Array(Rc::new(RefCell::new(values))))
             }
-            Expression::ObjectExpression(_properties) => {
-                // Return dummy object
-                Ok(JsValue::Undefined)
+            Expression::ObjectExpression(properties) => {
+                let mut values = std::collections::HashMap::new();
+                for (key, value) in properties {
+                    let key = match key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
+                    };
+                    values.insert(key, self.eval_expression(value, Rc::clone(&env))?);
+                }
+                Ok(JsValue::Object(Rc::new(RefCell::new(values))))
             }
-            Expression::MemberExpression(_mem) => {
-                // Stub
-                Ok(JsValue::Undefined)
+            Expression::MemberExpression(mem) => {
+                let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                let property_key = self.member_property_key(mem, env)?;
+
+                match object {
+                    JsValue::Object(values) => Ok(values
+                        .borrow()
+                        .get(&property_key)
+                        .cloned()
+                        .unwrap_or(JsValue::Undefined)),
+                    JsValue::Array(values) => {
+                        let values = values.borrow();
+                        if property_key == "length" {
+                            return Ok(JsValue::Number(values.len() as f64));
+                        }
+                        match property_key.parse::<usize>() {
+                            Ok(index) => Ok(values.get(index).cloned().unwrap_or(JsValue::Undefined)),
+                            Err(_) => Ok(JsValue::Undefined),
+                        }
+                    }
+                    _ => Err(RuntimeError::TypeError("value is not an object".into())),
+                }
             }
             Expression::CallExpression(call) => {
                 let callee = self.eval_expression(&call.callee, Rc::clone(&env))?;
