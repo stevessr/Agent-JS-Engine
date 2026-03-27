@@ -186,7 +186,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: test262-suite
-          path: .
+          path: test262
 
       - name: Run shard ${{ matrix.shard }}
         shell: bash
@@ -270,7 +270,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: test262-suite
-          path: .
+          path: test262
 
       - name: Run known slow tail case
         shell: bash
