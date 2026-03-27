@@ -143,6 +143,7 @@ pub enum UnaryOperator {
     Minus,
     Plus,
     LogicNot,
+    BitNot,
     Typeof,
     Void,
     Delete,

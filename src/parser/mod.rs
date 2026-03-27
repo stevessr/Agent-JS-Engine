@@ -491,6 +491,7 @@ impl<'a> Parser<'a> {
                 Token::Minus => Some(UnaryOperator::Minus),
                 Token::Plus => Some(UnaryOperator::Plus),
                 Token::LogicNot => Some(UnaryOperator::LogicNot),
+                Token::BitNot => Some(UnaryOperator::BitNot),
                 Token::Typeof => Some(UnaryOperator::Typeof),
                 Token::Void => Some(UnaryOperator::Void),
                 Token::Delete => Some(UnaryOperator::Delete),

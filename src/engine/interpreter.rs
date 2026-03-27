@@ -489,6 +489,9 @@ impl Interpreter {
                         }
                     }
                     UnaryOperator::LogicNot => Ok(JsValue::Boolean(!arg.is_truthy())),
+                    UnaryOperator::BitNot => {
+                        Ok(JsValue::Number((!self.to_int32(&arg)) as f64))
+                    }
                     UnaryOperator::Typeof => Ok(JsValue::String(arg.type_of())),
                     UnaryOperator::Void => Ok(JsValue::Undefined),
                     UnaryOperator::Delete => Ok(JsValue::Boolean(true)), // Stub for now

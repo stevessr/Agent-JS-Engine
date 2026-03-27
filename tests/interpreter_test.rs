@@ -638,3 +638,27 @@ fn interpreter_errors_on_array_length_bitwise_assignment() {
 
     assert!(matches!(error, RuntimeError::TypeError(_)));
 }
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_number() {
+    let result = eval_with_interpreter("~5;");
+    assert_eq!(result, JsValue::Number(-6.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_negative_one() {
+    let result = eval_with_interpreter("~-1;");
+    assert_eq!(result, JsValue::Number(0.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_true() {
+    let result = eval_with_interpreter("~true;");
+    assert_eq!(result, JsValue::Number(-2.0));
+}
+
+#[test]
+fn interpreter_evaluates_unary_bitnot_on_zero() {
+    let result = eval_with_interpreter("~0;");
+    assert_eq!(result, JsValue::Number(-1.0));
+}

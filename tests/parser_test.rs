@@ -357,3 +357,21 @@ fn parser_rejects_bitwise_assignment_in_variable_declaration() {
 
     assert!(format!("{error}").contains("Assign"));
 }
+
+#[test]
+fn parser_parses_unary_bitnot_expression() {
+    let source = "~x";
+
+    let lexer = Lexer::new(source);
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::UnaryExpression(unary)) => {
+            assert!(matches!(unary.operator, ai_agent::parser::ast::UnaryOperator::BitNot));
+            assert!(matches!(unary.argument, Expression::Identifier("x")));
+            assert!(unary.prefix);
+        }
+        other => panic!("expected unary expression, got {other:?}"),
+    }
+}
