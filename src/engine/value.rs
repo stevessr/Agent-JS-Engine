@@ -30,7 +30,16 @@ impl std::fmt::Debug for NativeFunction {
     }
 }
 
-pub type JsObjectMap = Rc<RefCell<HashMap<String, JsValue>>>;
+#[derive(Debug, Clone)]
+pub enum PropertyValue {
+    Data(JsValue),
+    Accessor {
+        getter: Option<JsValue>,
+        setter: Option<JsValue>,
+    },
+}
+
+pub type JsObjectMap = Rc<RefCell<HashMap<String, PropertyValue>>>;
 
 #[derive(Debug, Clone)]
 pub enum JsValue {
@@ -68,7 +77,8 @@ pub fn new_object_map() -> JsObjectMap {
 
 pub fn object_with_proto(proto: JsValue) -> JsValue {
     let map = new_object_map();
-    map.borrow_mut().insert("__proto__".to_string(), proto);
+    map.borrow_mut()
+        .insert("__proto__".to_string(), PropertyValue::Data(proto));
     JsValue::Object(map)
 }
 
@@ -76,7 +86,8 @@ pub fn object_with_proto(proto: JsValue) -> JsValue {
 pub fn make_object(pairs: impl IntoIterator<Item = (&'static str, JsValue)>) -> JsValue {
     let map = new_object_map();
     for (k, v) in pairs {
-        map.borrow_mut().insert(k.to_string(), v);
+        map.borrow_mut()
+            .insert(k.to_string(), PropertyValue::Data(v));
     }
     JsValue::Object(map)
 }
@@ -84,11 +95,17 @@ pub fn make_object(pairs: impl IntoIterator<Item = (&'static str, JsValue)>) -> 
 /// Create a JS Error object with `name` and `message`.
 pub fn make_error(name: &str, message: &str) -> JsValue {
     let mut map = HashMap::new();
-    map.insert("name".to_string(), JsValue::String(name.to_string()));
-    map.insert("message".to_string(), JsValue::String(message.to_string()));
+    map.insert(
+        "name".to_string(),
+        PropertyValue::Data(JsValue::String(name.to_string())),
+    );
+    map.insert(
+        "message".to_string(),
+        PropertyValue::Data(JsValue::String(message.to_string())),
+    );
     map.insert(
         "stack".to_string(),
-        JsValue::String(format!("{name}: {message}")),
+        PropertyValue::Data(JsValue::String(format!("{name}: {message}"))),
     );
     JsValue::Object(Rc::new(RefCell::new(map)))
 }
@@ -175,8 +192,10 @@ impl JsValue {
             JsValue::Object(map) => {
                 // Error-like objects stringify as "Name: message"
                 let map = map.borrow();
-                if let (Some(JsValue::String(name)), Some(JsValue::String(msg))) =
-                    (map.get("name"), map.get("message"))
+                if let (
+                    Some(PropertyValue::Data(JsValue::String(name))),
+                    Some(PropertyValue::Data(JsValue::String(msg))),
+                ) = (map.get("name"), map.get("message"))
                 {
                     if matches!(
                         name.as_str(),
@@ -303,30 +322,37 @@ impl JsValue {
     }
 }
 
-pub fn get_object_property(map: &JsObjectMap, key: &str) -> JsValue {
+pub fn get_property_value(map: &JsObjectMap, key: &str) -> Option<PropertyValue> {
     if let Some(value) = map.borrow().get(key).cloned() {
-        return value;
+        return Some(value);
     }
 
     let proto = map.borrow().get("__proto__").cloned();
     match proto {
-        Some(JsValue::Object(proto_map)) => get_object_property(&proto_map, key),
-        Some(JsValue::Function(function)) => get_object_property(&function.properties, key),
-        _ => JsValue::Undefined,
+        Some(PropertyValue::Data(JsValue::Object(proto_map))) => {
+            get_property_value(&proto_map, key)
+        }
+        Some(PropertyValue::Data(JsValue::Function(function))) => {
+            get_property_value(&function.properties, key)
+        }
+        _ => None,
+    }
+}
+
+pub fn get_object_property(map: &JsObjectMap, key: &str) -> JsValue {
+    match get_property_value(map, key) {
+        Some(PropertyValue::Data(value)) => value,
+        Some(PropertyValue::Accessor {
+            getter: Some(getter),
+            ..
+        }) => getter,
+        Some(PropertyValue::Accessor { getter: None, .. }) => JsValue::Undefined,
+        None => JsValue::Undefined,
     }
 }
 
 pub fn has_object_property(map: &JsObjectMap, key: &str) -> bool {
-    if map.borrow().contains_key(key) {
-        return true;
-    }
-
-    let proto = map.borrow().get("__proto__").cloned();
-    match proto {
-        Some(JsValue::Object(proto_map)) => has_object_property(&proto_map, key),
-        Some(JsValue::Function(function)) => has_object_property(&function.properties, key),
-        _ => false,
-    }
+    get_property_value(map, key).is_some()
 }
 
 /// Format a number the way JS does.

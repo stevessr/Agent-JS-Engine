@@ -115,6 +115,16 @@ pub enum ClassElement<'a> {
         value: FunctionDeclaration<'a>,
         is_static: bool,
     },
+    Getter {
+        key: ObjectKey<'a>,
+        body: FunctionDeclaration<'a>,
+        is_static: bool,
+    },
+    Setter {
+        key: ObjectKey<'a>,
+        body: FunctionDeclaration<'a>,
+        is_static: bool,
+    },
     Field {
         key: ObjectKey<'a>,
         initializer: Option<Expression<'a>>,
@@ -203,6 +213,13 @@ pub enum TemplatePart<'a> {
     Expr(Expression<'a>),
 }
 
+#[derive(Debug, Clone)]
+pub enum ObjectPropertyKind<'a> {
+    Value(Expression<'a>),
+    Getter(FunctionDeclaration<'a>),
+    Setter(FunctionDeclaration<'a>),
+}
+
 /// An object property (key-value, shorthand, method, spread, computed)
 #[derive(Debug, Clone)]
 pub struct ObjectProperty<'a> {
@@ -211,6 +228,7 @@ pub struct ObjectProperty<'a> {
     pub shorthand: bool,
     pub computed: bool,
     pub method: bool,
+    pub kind: ObjectPropertyKind<'a>,
 }
 
 #[derive(Debug, Clone)]

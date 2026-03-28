@@ -885,15 +885,42 @@ impl<'a> Parser<'a> {
                 let spread_expr = self.parse_assignment_expression()?;
                 properties.push(ObjectProperty {
                     key: ObjectKey::Identifier(""),
-                    value: Expression::SpreadElement(Box::new(spread_expr)),
+                    value: Expression::SpreadElement(Box::new(spread_expr.clone())),
                     shorthand: false,
                     computed: false,
                     method: false,
+                    kind: ObjectPropertyKind::Value(Expression::SpreadElement(Box::new(
+                        spread_expr,
+                    ))),
                 });
                 if self.current_token == Some(Token::Comma) {
                     self.advance()?;
                 }
                 continue;
+            }
+
+            let mut accessor_kind = None;
+            if matches!(self.current_token, Some(Token::Identifier("get" | "set"))) {
+                let marker = if matches!(self.current_token, Some(Token::Identifier("get"))) {
+                    "get"
+                } else {
+                    "set"
+                };
+                let mut lookahead = self.lexer.clone();
+                if let Ok(next_token) = lookahead.next_token() {
+                    let is_accessor =
+                        matches!(
+                            next_token,
+                            Token::Identifier(_)
+                                | Token::String(_)
+                                | Token::Number(_)
+                                | Token::LBracket
+                        ) && matches!(lookahead.next_token().ok(), Some(Token::LParen));
+                    if is_accessor {
+                        accessor_kind = Some(marker);
+                        self.advance()?;
+                    }
+                }
             }
 
             // computed key: { [expr]: value }
@@ -927,24 +954,33 @@ impl<'a> Parser<'a> {
                 (k, false)
             };
 
-            // method shorthand: { foo() { ... } }
+            // method shorthand/accessor: { foo() { ... } } / { get foo() {} }
             if self.current_token == Some(Token::LParen) {
                 let func = self.parse_function_body_from_params()?;
+                let kind = match accessor_kind {
+                    Some("get") => ObjectPropertyKind::Getter(func.clone()),
+                    Some("set") => ObjectPropertyKind::Setter(func.clone()),
+                    _ => ObjectPropertyKind::Value(Expression::FunctionExpression(Box::new(
+                        func.clone(),
+                    ))),
+                };
                 properties.push(ObjectProperty {
                     key,
                     value: Expression::FunctionExpression(Box::new(func)),
                     shorthand: false,
                     computed,
-                    method: true,
+                    method: accessor_kind.is_none(),
+                    kind,
                 });
             } else if self.consume_opt(Token::Colon)? {
                 let value = self.parse_assignment_expression()?;
                 properties.push(ObjectProperty {
                     key,
-                    value,
+                    value: value.clone(),
                     shorthand: false,
                     computed,
                     method: false,
+                    kind: ObjectPropertyKind::Value(value),
                 });
             } else {
                 // shorthand: { foo }
@@ -963,6 +999,7 @@ impl<'a> Parser<'a> {
                     shorthand: true,
                     computed: false,
                     method: false,
+                    kind: ObjectPropertyKind::Value(Expression::Identifier(name)),
                 });
             }
 
@@ -1085,6 +1122,60 @@ impl<'a> Parser<'a> {
                     });
                 }
             };
+
+            let mut accessor_kind = None;
+            if matches!(key, ObjectKey::Identifier("get" | "set"))
+                && self.current_token != Some(Token::LParen)
+            {
+                let accessor = match key {
+                    ObjectKey::Identifier("get") => "get",
+                    ObjectKey::Identifier("set") => "set",
+                    _ => unreachable!(),
+                };
+                let actual_key = match self.current_token.clone() {
+                    Some(Token::Identifier(name)) => {
+                        self.advance()?;
+                        ObjectKey::Identifier(name)
+                    }
+                    Some(Token::String(name)) => {
+                        self.advance()?;
+                        ObjectKey::String(name)
+                    }
+                    Some(Token::Number(n)) => {
+                        self.advance()?;
+                        ObjectKey::Number(n)
+                    }
+                    Some(Token::LBracket) => {
+                        self.advance()?;
+                        let expr = self.parse_expression()?;
+                        self.consume_opt(Token::RBracket)?;
+                        ObjectKey::Computed(Box::new(expr))
+                    }
+                    token => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "accessor key".to_string(),
+                            found: token.map(|t| format!("{:?}", t)),
+                        });
+                    }
+                };
+                accessor_kind = Some(accessor);
+                if self.current_token == Some(Token::LParen) {
+                    let func = self.parse_function_body_from_params()?;
+                    match accessor {
+                        "get" => body.push(ClassElement::Getter {
+                            key: actual_key,
+                            body: func,
+                            is_static,
+                        }),
+                        _ => body.push(ClassElement::Setter {
+                            key: actual_key,
+                            body: func,
+                            is_static,
+                        }),
+                    }
+                    continue;
+                }
+            }
 
             if self.current_token == Some(Token::LParen) {
                 let func = self.parse_function_body_from_params()?;

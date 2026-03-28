@@ -1,6 +1,7 @@
 use crate::engine::env::Environment;
 use crate::engine::value::{
-    FunctionValue, JsValue, get_object_property, has_object_property, object_with_proto,
+    FunctionValue, JsValue, PropertyValue, get_object_property, get_property_value,
+    has_object_property, object_with_proto,
 };
 use crate::parser::ast::*;
 use std::cell::RefCell;
@@ -129,16 +130,31 @@ impl Interpreter {
     }
 
     fn write_member_value(
-        &self,
+        &mut self,
         object: JsValue,
         property_key: &str,
         value: JsValue,
     ) -> Result<JsValue, RuntimeError> {
         match object {
             JsValue::Object(values) => {
-                values
-                    .borrow_mut()
-                    .insert(property_key.to_string(), value.clone());
+                if let Some(PropertyValue::Accessor {
+                    setter: Some(setter),
+                    ..
+                }) = get_property_value(&values, property_key)
+                {
+                    if let JsValue::Function(function) = setter {
+                        self.call_function_value(
+                            function,
+                            JsValue::Object(Rc::clone(&values)),
+                            vec![value.clone()],
+                        )?;
+                        return Ok(value);
+                    }
+                }
+                values.borrow_mut().insert(
+                    property_key.to_string(),
+                    crate::engine::value::PropertyValue::Data(value.clone()),
+                );
                 Ok(value)
             }
             JsValue::Array(values) => {
@@ -163,6 +179,27 @@ impl Interpreter {
                 } else {
                     values[index] = value.clone();
                 }
+                Ok(value)
+            }
+            JsValue::Function(function) => {
+                if let Some(PropertyValue::Accessor {
+                    setter: Some(setter),
+                    ..
+                }) = get_property_value(&function.properties, property_key)
+                {
+                    if let JsValue::Function(setter_fn) = setter {
+                        self.call_function_value(
+                            setter_fn,
+                            JsValue::Function(Rc::clone(&function)),
+                            vec![value.clone()],
+                        )?;
+                        return Ok(value);
+                    }
+                }
+                function
+                    .properties
+                    .borrow_mut()
+                    .insert(property_key.to_string(), PropertyValue::Data(value.clone()));
                 Ok(value)
             }
             _ => Err(RuntimeError::TypeError("value is not an object".into())),
@@ -197,9 +234,10 @@ impl Interpreter {
         self.functions.push(clone_function_declaration(func));
         let prototype = object_with_proto(JsValue::Null);
         let properties = crate::engine::value::new_object_map();
-        properties
-            .borrow_mut()
-            .insert("prototype".to_string(), prototype.clone());
+        properties.borrow_mut().insert(
+            "prototype".to_string(),
+            crate::engine::value::PropertyValue::Data(prototype.clone()),
+        );
         JsValue::Function(Rc::new(FunctionValue {
             id,
             env,
@@ -259,16 +297,18 @@ impl Interpreter {
         };
 
         if let JsValue::Object(proto_map) = &function.prototype {
-            proto_map
-                .borrow_mut()
-                .insert("__proto__".to_string(), super_prototype.clone());
-            proto_map
-                .borrow_mut()
-                .insert("constructor".to_string(), class_value.clone());
+            proto_map.borrow_mut().insert(
+                "__proto__".to_string(),
+                crate::engine::value::PropertyValue::Data(super_prototype.clone()),
+            );
+            proto_map.borrow_mut().insert(
+                "constructor".to_string(),
+                crate::engine::value::PropertyValue::Data(class_value.clone()),
+            );
         }
         function.properties.borrow_mut().insert(
             "__proto__".to_string(),
-            super_value.clone().unwrap_or(JsValue::Null),
+            crate::engine::value::PropertyValue::Data(super_value.clone().unwrap_or(JsValue::Null)),
         );
 
         for element in &class_decl.body {
@@ -298,10 +338,92 @@ impl Interpreter {
                         function
                             .properties
                             .borrow_mut()
-                            .insert(method_key, method_value);
+                            .insert(method_key, PropertyValue::Data(method_value));
                     } else if let JsValue::Object(proto_map) = &function.prototype {
-                        proto_map.borrow_mut().insert(method_key, method_value);
+                        proto_map
+                            .borrow_mut()
+                            .insert(method_key, PropertyValue::Data(method_value));
                     }
+                }
+                ClassElement::Getter {
+                    key,
+                    body,
+                    is_static,
+                } => {
+                    let property_key = match key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                            (*name).to_string()
+                        }
+                        ObjectKey::Number(n) => n.to_string(),
+                        ObjectKey::Computed(expr) => {
+                            self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                        }
+                    };
+                    let getter = self.create_function_value_with_meta(
+                        body,
+                        Rc::clone(&env),
+                        Some(super_prototype.clone()),
+                        false,
+                        false,
+                    );
+                    let target = if *is_static {
+                        &function.properties
+                    } else if let JsValue::Object(proto_map) = &function.prototype {
+                        proto_map
+                    } else {
+                        unreachable!()
+                    };
+                    let setter = match get_property_value(target, &property_key) {
+                        Some(PropertyValue::Accessor { setter, .. }) => setter,
+                        _ => None,
+                    };
+                    target.borrow_mut().insert(
+                        property_key,
+                        PropertyValue::Accessor {
+                            getter: Some(getter),
+                            setter,
+                        },
+                    );
+                }
+                ClassElement::Setter {
+                    key,
+                    body,
+                    is_static,
+                } => {
+                    let property_key = match key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                            (*name).to_string()
+                        }
+                        ObjectKey::Number(n) => n.to_string(),
+                        ObjectKey::Computed(expr) => {
+                            self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                        }
+                    };
+                    let setter_fn = self.create_function_value_with_meta(
+                        body,
+                        Rc::clone(&env),
+                        Some(super_prototype.clone()),
+                        false,
+                        false,
+                    );
+                    let target = if *is_static {
+                        &function.properties
+                    } else if let JsValue::Object(proto_map) = &function.prototype {
+                        proto_map
+                    } else {
+                        unreachable!()
+                    };
+                    let getter = match get_property_value(target, &property_key) {
+                        Some(PropertyValue::Accessor { getter, .. }) => getter,
+                        _ => None,
+                    };
+                    target.borrow_mut().insert(
+                        property_key,
+                        PropertyValue::Accessor {
+                            getter,
+                            setter: Some(setter_fn),
+                        },
+                    );
                 }
                 ClassElement::Field {
                     key,
@@ -321,10 +443,10 @@ impl Interpreter {
                         Some(expr) => self.eval_expression(expr, Rc::clone(&env))?,
                         None => JsValue::Undefined,
                     };
-                    function
-                        .properties
-                        .borrow_mut()
-                        .insert(field_key, field_value);
+                    function.properties.borrow_mut().insert(
+                        field_key,
+                        crate::engine::value::PropertyValue::Data(field_value),
+                    );
                 }
                 _ => {}
             }
@@ -777,11 +899,10 @@ impl Interpreter {
                     let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
                     let property_key = self.member_property_key(mem, Rc::clone(&env))?;
                     let current = match &object {
-                        JsValue::Object(values) => values
-                            .borrow()
-                            .get(&property_key)
-                            .cloned()
-                            .unwrap_or(JsValue::Undefined),
+                        JsValue::Object(values) => get_object_property(values, &property_key),
+                        JsValue::Function(function) => {
+                            get_object_property(&function.properties, &property_key)
+                        }
                         JsValue::Array(values) => {
                             let values = values.borrow();
                             if property_key == "length" {
@@ -889,14 +1010,20 @@ impl Interpreter {
                     BinaryOperator::Instanceof => match (&left, &right) {
                         (JsValue::Object(object), JsValue::Function(function)) => {
                             let prototype = function.prototype.clone();
-                            let mut current = object.borrow().get("__proto__").cloned();
+                            let mut current = match object.borrow().get("__proto__").cloned() {
+                                Some(PropertyValue::Data(value)) => Some(value),
+                                _ => None,
+                            };
                             while let Some(value) = current {
                                 if js_strict_eq(&value, &prototype) {
                                     return Ok(JsValue::Boolean(true));
                                 }
                                 current = match value {
                                     JsValue::Object(proto) => {
-                                        proto.borrow().get("__proto__").cloned()
+                                        match proto.borrow().get("__proto__").cloned() {
+                                            Some(PropertyValue::Data(value)) => Some(value),
+                                            _ => None,
+                                        }
                                     }
                                     _ => None,
                                 };
@@ -958,39 +1085,58 @@ impl Interpreter {
             Expression::ObjectExpression(properties) => {
                 let mut values = std::collections::HashMap::new();
                 for prop in properties {
-                    if prop.method {
-                        // method shorthand: treat as function value
-                        let key = match &prop.key {
-                            ObjectKey::Identifier(name) | ObjectKey::String(name) => {
-                                (*name).to_string()
-                            }
-                            ObjectKey::Number(n) => n.to_string(),
-                            ObjectKey::Computed(expr) => {
-                                self.eval_expression(expr, Rc::clone(&env))?.as_string()
-                            }
-                        };
-                        let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
-                        values.insert(key, val);
-                    } else if let Expression::SpreadElement(spread_expr) = &prop.value {
-                        // spread: { ...obj }
-                        let spread_val = self.eval_expression(spread_expr, Rc::clone(&env))?;
-                        if let JsValue::Object(map) = spread_val {
-                            for (k, v) in map.borrow().iter() {
-                                values.insert(k.clone(), v.clone());
+                    let key = match &prop.key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                            (*name).to_string()
+                        }
+                        ObjectKey::Number(n) => n.to_string(),
+                        ObjectKey::Computed(expr) => {
+                            self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                        }
+                    };
+                    match &prop.kind {
+                        ObjectPropertyKind::Getter(func) => {
+                            let getter = self.create_function_value(func, Rc::clone(&env));
+                            let setter = match values.get(&key).cloned() {
+                                Some(PropertyValue::Accessor { setter, .. }) => setter,
+                                _ => None,
+                            };
+                            values.insert(
+                                key,
+                                PropertyValue::Accessor {
+                                    getter: Some(getter),
+                                    setter,
+                                },
+                            );
+                        }
+                        ObjectPropertyKind::Setter(func) => {
+                            let setter_fn = self.create_function_value(func, Rc::clone(&env));
+                            let getter = match values.get(&key).cloned() {
+                                Some(PropertyValue::Accessor { getter, .. }) => getter,
+                                _ => None,
+                            };
+                            values.insert(
+                                key,
+                                PropertyValue::Accessor {
+                                    getter,
+                                    setter: Some(setter_fn),
+                                },
+                            );
+                        }
+                        ObjectPropertyKind::Value(_) => {
+                            if let Expression::SpreadElement(spread_expr) = &prop.value {
+                                let spread_val =
+                                    self.eval_expression(spread_expr, Rc::clone(&env))?;
+                                if let JsValue::Object(map) = spread_val {
+                                    for (k, v) in map.borrow().iter() {
+                                        values.insert(k.clone(), v.clone());
+                                    }
+                                }
+                            } else {
+                                let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
+                                values.insert(key, PropertyValue::Data(val));
                             }
                         }
-                    } else {
-                        let key = match &prop.key {
-                            ObjectKey::Identifier(name) | ObjectKey::String(name) => {
-                                (*name).to_string()
-                            }
-                            ObjectKey::Number(n) => n.to_string(),
-                            ObjectKey::Computed(expr) => {
-                                self.eval_expression(expr, Rc::clone(&env))?.as_string()
-                            }
-                        };
-                        let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
-                        values.insert(key, val);
                     }
                 }
                 Ok(JsValue::Object(Rc::new(RefCell::new(values))))
@@ -999,10 +1145,31 @@ impl Interpreter {
                 if matches!(mem.object, Expression::SuperExpression) {
                     let super_binding = env.borrow().get("super").unwrap_or(JsValue::Undefined);
                     let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                    let this_value = env.borrow().get("this").unwrap_or(JsValue::Undefined);
                     return match super_binding {
-                        JsValue::Object(values) => Ok(get_object_property(&values, &property_key)),
+                        JsValue::Object(values) => match get_property_value(&values, &property_key)
+                        {
+                            Some(PropertyValue::Accessor {
+                                getter: Some(JsValue::Function(function)),
+                                ..
+                            }) => self.call_function_value(function, this_value, vec![]),
+                            Some(PropertyValue::Data(value)) => Ok(value),
+                            _ => Ok(JsValue::Undefined),
+                        },
                         JsValue::Function(function) => {
-                            Ok(function.prototype.get_property(&property_key))
+                            let target = &function.prototype;
+                            if let JsValue::Object(map) = target {
+                                match get_property_value(map, &property_key) {
+                                    Some(PropertyValue::Accessor {
+                                        getter: Some(JsValue::Function(function)),
+                                        ..
+                                    }) => self.call_function_value(function, this_value, vec![]),
+                                    Some(PropertyValue::Data(value)) => Ok(value),
+                                    _ => Ok(JsValue::Undefined),
+                                }
+                            } else {
+                                Ok(JsValue::Undefined)
+                            }
                         }
                         _ => Err(RuntimeError::TypeError(
                             "super is not available in this context".into(),
@@ -1011,10 +1178,21 @@ impl Interpreter {
                 }
 
                 let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
-                let property_key = self.member_property_key(mem, env)?;
+                let property_key = self.member_property_key(mem, Rc::clone(&env))?;
 
                 match object {
-                    JsValue::Object(values) => Ok(get_object_property(&values, &property_key)),
+                    JsValue::Object(values) => match get_property_value(&values, &property_key) {
+                        Some(PropertyValue::Accessor {
+                            getter: Some(JsValue::Function(function)),
+                            ..
+                        }) => self.call_function_value(
+                            function,
+                            JsValue::Object(Rc::clone(&values)),
+                            vec![],
+                        ),
+                        Some(PropertyValue::Data(value)) => Ok(value),
+                        _ => Ok(JsValue::Undefined),
+                    },
                     JsValue::Array(values) => {
                         let values = values.borrow();
                         if property_key == "length" {
@@ -1041,7 +1219,18 @@ impl Interpreter {
                         }
                     },
                     JsValue::Function(function) => {
-                        Ok(get_object_property(&function.properties, &property_key))
+                        match get_property_value(&function.properties, &property_key) {
+                            Some(PropertyValue::Accessor {
+                                getter: Some(JsValue::Function(getter)),
+                                ..
+                            }) => self.call_function_value(
+                                getter,
+                                JsValue::Function(Rc::clone(&function)),
+                                vec![],
+                            ),
+                            Some(PropertyValue::Data(value)) => Ok(value),
+                            _ => Ok(JsValue::Undefined),
+                        }
                     }
                     _ => Err(RuntimeError::TypeError("value is not an object".into())),
                 }
@@ -1151,12 +1340,7 @@ impl Interpreter {
                         return Ok(JsValue::Undefined);
                     };
                     let current_val = match &object {
-                        JsValue::Object(map) => map
-                            .borrow()
-                            .get(&property_key)
-                            .cloned()
-                            .unwrap_or(JsValue::Undefined)
-                            .as_number(),
+                        JsValue::Object(map) => get_object_property(map, &property_key).as_number(),
                         JsValue::Array(arr) => arr
                             .borrow()
                             .get(property_key.parse::<usize>().unwrap_or(usize::MAX))
@@ -1438,6 +1622,52 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
                             is_static: *is_static,
                         }
                     }
+                    ClassElement::Getter {
+                        key,
+                        body,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Getter {
+                            key,
+                            body: clone_function_declaration(body),
+                            is_static: *is_static,
+                        }
+                    }
+                    ClassElement::Setter {
+                        key,
+                        body,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Setter {
+                            key,
+                            body: clone_function_declaration(body),
+                            is_static: *is_static,
+                        }
+                    }
                     ClassElement::Field {
                         key,
                         initializer,
@@ -1619,12 +1849,24 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
                             ObjectKey::Computed(Box::new(clone_expression(expr)))
                         }
                     };
+                    let kind = match &prop.kind {
+                        ObjectPropertyKind::Value(value) => {
+                            ObjectPropertyKind::Value(clone_expression(value))
+                        }
+                        ObjectPropertyKind::Getter(func) => {
+                            ObjectPropertyKind::Getter(clone_function_declaration(func))
+                        }
+                        ObjectPropertyKind::Setter(func) => {
+                            ObjectPropertyKind::Setter(clone_function_declaration(func))
+                        }
+                    };
                     ObjectProperty {
                         key,
                         value: clone_expression(&prop.value),
                         shorthand: prop.shorthand,
                         computed: prop.computed,
                         method: prop.method,
+                        kind,
                     }
                 })
                 .collect(),
@@ -1666,6 +1908,52 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
                         ClassElement::Method {
                             key,
                             value: clone_function_declaration(value),
+                            is_static: *is_static,
+                        }
+                    }
+                    ClassElement::Getter {
+                        key,
+                        body,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Getter {
+                            key,
+                            body: clone_function_declaration(body),
+                            is_static: *is_static,
+                        }
+                    }
+                    ClassElement::Setter {
+                        key,
+                        body,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Setter {
+                            key,
+                            body: clone_function_declaration(body),
                             is_static: *is_static,
                         }
                     }

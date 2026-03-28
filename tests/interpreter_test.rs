@@ -980,3 +980,96 @@ fn interpreter_initializes_static_fields_in_order() {
 
     assert_eq!(result, JsValue::Number(3.0));
 }
+
+#[test]
+fn interpreter_reads_object_getter() {
+    let result = eval_with_interpreter(
+        r#"
+        let obj = {
+            inner: 42,
+            get value() { return this.inner; }
+        };
+        obj.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_writes_object_setter() {
+    let result = eval_with_interpreter(
+        r#"
+        let obj = {
+            inner: 0,
+            set value(v) { this.inner = v; }
+        };
+        obj.value = 42;
+        obj.inner;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_reads_class_getter() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            constructor() { this.inner = 42; }
+            get value() { return this.inner; }
+        }
+        new Foo().value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_writes_class_setter() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            constructor() { this.inner = 0; }
+            set value(v) { this.inner = v; }
+        }
+        let foo = new Foo();
+        foo.value = 42;
+        foo.inner;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_reads_static_getter() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static get value() { return 42; }
+        }
+        Foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_writes_static_setter() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static inner = 0;
+            static set value(v) { this.inner = v; }
+        }
+        Foo.value = 42;
+        Foo.inner;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}

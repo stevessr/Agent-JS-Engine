@@ -1,8 +1,8 @@
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
 use ai_agent::parser::ast::{
-    AssignmentOperator, BinaryOperator, ClassElement, Expression, Literal, ObjectKey, Param,
-    Statement,
+    AssignmentOperator, BinaryOperator, ClassElement, Expression, Literal, ObjectKey,
+    ObjectPropertyKind, Param, Statement,
 };
 
 #[test]
@@ -818,6 +818,63 @@ fn parser_parses_computed_static_method() {
                     is_static: true,
                     ..
                 } if matches!(expr.as_ref(), Expression::Identifier("key"))
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_object_getter_and_setter() {
+    let lexer = Lexer::new("({ get value() {}, set value(v) {} })");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::ObjectExpression(properties)) => {
+            assert!(matches!(properties[0].kind, ObjectPropertyKind::Getter(_)));
+            assert!(matches!(properties[1].kind, ObjectPropertyKind::Setter(_)));
+        }
+        other => panic!("expected object expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_class_getter_and_setter() {
+    let lexer = Lexer::new("class Foo { get value() {} set value(v) {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(class_decl.body[0], ClassElement::Getter { .. }));
+            assert!(matches!(class_decl.body[1], ClassElement::Setter { .. }));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_static_getter_and_setter() {
+    let lexer = Lexer::new("class Foo { static get value() {} static set value(v) {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                class_decl.body[0],
+                ClassElement::Getter {
+                    is_static: true,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                class_decl.body[1],
+                ClassElement::Setter {
+                    is_static: true,
+                    ..
+                }
             ));
         }
         other => panic!("expected class declaration, got {other:?}"),
