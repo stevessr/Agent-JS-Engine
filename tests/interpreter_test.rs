@@ -1116,3 +1116,24 @@ fn interpreter_preserves_this_for_optional_method_calls() {
     );
     assert_eq!(result, JsValue::Number(42.0));
 }
+
+#[test]
+fn interpreter_creates_regexp_literal_object() {
+    let result = eval_with_interpreter("/foo/;");
+    match result {
+        JsValue::Object(_) => {}
+        other => panic!("expected regexp object, got {other:?}"),
+    }
+}
+
+#[test]
+fn interpreter_exposes_regexp_source() {
+    let result = eval_with_interpreter("/foo/.source;");
+    assert_eq!(result, JsValue::String("foo".to_string()));
+}
+
+#[test]
+fn interpreter_exposes_regexp_flags() {
+    let result = eval_with_interpreter("/foo/gi.flags;");
+    assert_eq!(result, JsValue::String("gi".to_string()));
+}

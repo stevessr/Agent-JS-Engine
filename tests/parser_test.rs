@@ -930,3 +930,27 @@ fn parser_parses_optional_call_expression() {
         other => panic!("expected optional call expression, got {other:?}"),
     }
 }
+
+#[test]
+fn parser_parses_regex_literal() {
+    let lexer = Lexer::new("/foo/");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::Literal(Literal::RegExp("foo", ""))) => {}
+        other => panic!("expected regexp literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_regex_literal_with_flags() {
+    let lexer = Lexer::new("/foo/gi");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::Literal(Literal::RegExp("foo", "gi"))) => {}
+        other => panic!("expected regexp literal with flags, got {other:?}"),
+    }
+}

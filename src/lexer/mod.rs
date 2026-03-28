@@ -190,6 +190,26 @@ impl<'a> Lexer<'a> {
         }
 
         let c = self.peek().unwrap();
+        if c == '/' && self.peek_n(1) != Some('/') && self.peek_n(1) != Some('*') {
+            let rest = &self.input[self.pos..];
+            if let Some(end) = rest[1..].find('/') {
+                let pattern = &rest[1..1 + end];
+                if !pattern.is_empty() {
+                    let after = &rest[1 + end + 1..];
+                    let mut flag_len = 0;
+                    for ch in after.chars() {
+                        if ch.is_ascii_alphabetic() {
+                            flag_len += ch.len_utf8();
+                        } else {
+                            break;
+                        }
+                    }
+                    let flags = &after[..flag_len];
+                    self.pos += 1 + end + 1 + flag_len;
+                    return Ok(Token::Regex(pattern, flags));
+                }
+            }
+        }
 
         if c.is_ascii_alphabetic() || c == '_' || c == '$' {
             return Ok(self.lex_identifier());

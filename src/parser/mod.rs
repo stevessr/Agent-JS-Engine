@@ -1466,16 +1466,15 @@ impl<'a> Parser<'a> {
                     Ok(Expression::Identifier("AsyncDummy"))
                 }
             }
+            Some(Token::Regex(pattern, flags)) => {
+                let pattern = *pattern;
+                let flags = *flags;
+                self.advance()?;
+                Ok(Expression::Literal(Literal::RegExp(pattern, flags)))
+            }
             Some(Token::Slash) | Some(Token::DivideAssign) => {
                 self.advance()?;
-                while self.current_token.is_some() && self.current_token != Some(Token::Slash) {
-                    self.advance()?;
-                }
-                self.advance()?; // '/'
-                if let Some(Token::Identifier(_)) = self.current_token {
-                    self.advance()?;
-                } // flags
-                Ok(Expression::Literal(Literal::String("regex_dummy".into())))
+                Ok(Expression::Identifier("CatchAllDummy"))
             }
             Some(Token::Template(s)) => {
                 let v = *s;

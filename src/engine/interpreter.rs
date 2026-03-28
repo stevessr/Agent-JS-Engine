@@ -858,9 +858,10 @@ impl Interpreter {
                 Literal::Null => Ok(JsValue::Null),
                 Literal::Undefined => Ok(JsValue::Undefined),
                 Literal::BigInt(n) => Ok(JsValue::Number(*n as f64)),
-                Literal::RegExp(_, _) => Ok(JsValue::Object(Rc::new(RefCell::new(
-                    std::collections::HashMap::new(),
-                )))),
+                Literal::RegExp(pattern, flags) => Ok(crate::engine::value::make_object([
+                    ("source", JsValue::String(pattern.to_string())),
+                    ("flags", JsValue::String(flags.to_string())),
+                ])),
             },
             Expression::Identifier(name) => {
                 match *name {
