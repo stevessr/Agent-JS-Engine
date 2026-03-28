@@ -943,6 +943,84 @@ fn engine_bootstraps_temporal_in_test262_agents() {
     assert_eq!(output.value.as_deref(), Some("ok"));
 }
 
+#[test]
+fn engine_drains_async_function_microtasks_in_scripts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            async function f() {
+              return await Promise.resolve(42);
+            }
+            f().then((value) => print(String(value)));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["42".to_string()]);
+}
+
+#[test]
+fn engine_drains_promise_rejection_handlers_in_scripts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            async function f() {
+              throw new Error('boom');
+            }
+            f().catch((error) => print(error.message));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["boom".to_string()]);
+}
+
+#[test]
+fn engine_drains_nested_microtask_chains_in_scripts() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            Promise.resolve(1)
+              .then((value) => value + 1)
+              .then((value) => print(String(value + 1)));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["3".to_string()]);
+}
+
+#[test]
+fn engine_supports_top_level_await_in_modules() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        const value = await Promise.resolve(42);
+        print(String(value));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["42".to_string()]);
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

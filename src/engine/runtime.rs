@@ -461,9 +461,7 @@ impl JsEngine {
             .eval(Source::from_bytes(source.as_str()))
             .map_err(|err| convert_error(err, &mut context))?;
 
-        context
-            .run_jobs()
-            .map_err(|err| convert_error(err, &mut context))?;
+        drain_jobs_for_eval(&mut context)?;
 
         Ok(EvalOutput {
             value: display_value(&result, &mut context),
@@ -511,9 +509,7 @@ impl JsEngine {
             ))
             .map_err(|err| convert_error(err, &mut context))?;
 
-        context
-            .run_jobs()
-            .map_err(|err| convert_error(err, &mut context))?;
+        drain_jobs_for_eval(&mut context)?;
 
         Ok(EvalOutput {
             value: display_value(&result, &mut context),
@@ -565,24 +561,40 @@ impl JsEngine {
         );
 
         let promise = module.load_link_evaluate(&mut context);
-        context
-            .run_jobs()
-            .map_err(|err| convert_error(err, &mut context))?;
+        let value = settle_promise_for_eval(
+            &promise,
+            &mut context,
+            "module promise remained pending after job queue drain",
+        )?;
 
-        match promise.state() {
-            PromiseState::Fulfilled(value) => Ok(EvalOutput {
-                value: display_value(&value, &mut context),
-                printed: take_print_buffer(),
-            }),
-            PromiseState::Rejected(reason) => Err(convert_error(
-                JsError::from_opaque(reason.clone()),
-                &mut context,
-            )),
-            PromiseState::Pending => Err(EngineError {
-                name: "ModuleError".to_string(),
-                message: "module promise remained pending after job queue drain".to_string(),
-            }),
+        Ok(EvalOutput {
+            value: display_value(&value, &mut context),
+            printed: take_print_buffer(),
+        })
+    }
+}
+
+fn drain_jobs_for_eval(context: &mut Context) -> Result<(), EngineError> {
+    context
+        .run_jobs()
+        .map_err(|err| convert_error(err, context))
+}
+
+fn settle_promise_for_eval(
+    promise: &JsPromise,
+    context: &mut Context,
+    pending_message: &str,
+) -> Result<BoaValue, EngineError> {
+    drain_jobs_for_eval(context)?;
+    match promise.state() {
+        PromiseState::Fulfilled(value) => Ok(value),
+        PromiseState::Rejected(reason) => {
+            Err(convert_error(JsError::from_opaque(reason.clone()), context))
         }
+        PromiseState::Pending => Err(EngineError {
+            name: "ModuleError".to_string(),
+            message: pending_message.to_string(),
+        }),
     }
 }
 
@@ -1463,8 +1475,19 @@ fn ensure_deferred_module_loaded_and_linked(
             module.link(context)?;
             let source = std::fs::read_to_string(path).unwrap_or_default();
             if is_async_module_source(&source) {
-                let _ = module.evaluate(context);
+                let evaluate_promise = module.evaluate(context);
                 context.run_jobs()?;
+                match evaluate_promise.state() {
+                    PromiseState::Fulfilled(_) => {}
+                    PromiseState::Rejected(reason) => {
+                        return Err(JsError::from_opaque(reason.clone()));
+                    }
+                    PromiseState::Pending => {
+                        return Err(JsNativeError::typ()
+                            .with_message("deferred namespace module remained pending during evaluation")
+                            .into());
+                    }
+                }
             }
         }
         PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
