@@ -1,6 +1,7 @@
 use ai_agent::engine::Interpreter;
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
+use ai_agent::parser::ast::Param;
 
 #[test]
 fn debug_function_params_are_stored() {
@@ -17,5 +18,6 @@ fn debug_function_params_are_stored() {
     let mut interpreter = Interpreter::new();
     let _ = interpreter.eval_program(&program);
     assert_eq!(interpreter.functions.len(), 1);
-    assert_eq!(interpreter.functions[0].params, vec!["a", "b"]);
+    assert!(matches!(interpreter.functions[0].params[0], Param::Simple("a")));
+    assert!(matches!(interpreter.functions[0].params[1], Param::Simple("b")));
 }

@@ -45,7 +45,7 @@ pub enum Token<'a> {
     Identifier(&'a str),
     Number(f64),
     String(&'a str),
-    Template(&'a str),
+    Template(&'a str, bool),
     Regex(&'a str, &'a str),
     Plus,
     Minus,
@@ -121,15 +121,26 @@ pub enum LexerError {
     UnterminatedRegex,
 }
 
+#[derive(Clone, Debug)]
+enum LexerContext {
+    TemplateExpression { brace_depth: usize },
+    TemplateContinuation,
+}
+
 #[derive(Clone)]
 pub struct Lexer<'a> {
     input: &'a str,
     pos: usize,
+    contexts: Vec<LexerContext>,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        Self {
+            input,
+            pos: 0,
+            contexts: Vec::new(),
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -184,12 +195,51 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Token<'a>, LexerError> {
+        if matches!(self.contexts.last(), Some(LexerContext::TemplateContinuation)) {
+            if self.pos >= self.input.len() {
+                return Err(LexerError::UnterminatedTemplate);
+            }
+            return self.lex_template_chunk();
+        }
+
         self.skip_whitespace_and_comments();
         if self.pos >= self.input.len() {
-            return Ok(Token::Eof);
+            return if self.contexts.is_empty() {
+                Ok(Token::Eof)
+            } else {
+                Err(LexerError::UnterminatedTemplate)
+            };
         }
 
         let c = self.peek().unwrap();
+        if matches!(self.contexts.last(), Some(LexerContext::TemplateExpression { .. })) {
+            match c {
+                '{' => {
+                    if let Some(LexerContext::TemplateExpression { brace_depth }) =
+                        self.contexts.last_mut()
+                    {
+                        *brace_depth += 1;
+                    }
+                    self.advance();
+                    return Ok(Token::LBrace);
+                }
+                '}' => {
+                    self.advance();
+                    if let Some(LexerContext::TemplateExpression { brace_depth }) =
+                        self.contexts.last_mut()
+                    {
+                        if *brace_depth == 0 {
+                            self.contexts.pop();
+                            self.contexts.push(LexerContext::TemplateContinuation);
+                        } else {
+                            *brace_depth -= 1;
+                        }
+                    }
+                    return Ok(Token::RBrace);
+                }
+                _ => {}
+            }
+        }
         if c == '/' && self.peek_n(1) != Some('/') && self.peek_n(1) != Some('*') {
             let rest = &self.input[self.pos..];
             if let Some(end) = rest[1..].find('/') {
@@ -418,6 +468,7 @@ impl<'a> Lexer<'a> {
                     Ok(Token::Question)
                 }
             }
+            '`' => self.lex_template_chunk(),
             '.' => {
                 if self.peek() == Some('.') && self.peek_n(1) == Some('.') {
                     self.advance();
@@ -570,5 +621,47 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(LexerError::UnterminatedString)
+    }
+
+    fn lex_template_chunk(&mut self) -> Result<Token<'a>, LexerError> {
+        let continuing = matches!(self.contexts.last(), Some(LexerContext::TemplateContinuation));
+        if continuing {
+            self.contexts.pop();
+        } else if matches!(self.peek(), Some('`')) {
+            self.advance();
+        }
+
+        let start = self.pos;
+        let mut escaped = false;
+        while let Some(c) = self.peek() {
+            if escaped {
+                self.advance();
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' => {
+                    escaped = true;
+                    self.advance();
+                }
+                '`' => {
+                    let chunk = &self.input[start..self.pos];
+                    self.advance();
+                    return Ok(Token::Template(chunk, true));
+                }
+                '$' if self.peek_n(1) == Some('{') => {
+                    let chunk = &self.input[start..self.pos];
+                    self.advance();
+                    self.advance();
+                    self.contexts
+                        .push(LexerContext::TemplateExpression { brace_depth: 0 });
+                    return Ok(Token::Template(chunk, false));
+                }
+                _ => {
+                    self.advance();
+                }
+            }
+        }
+        Err(LexerError::UnterminatedTemplate)
     }
 }

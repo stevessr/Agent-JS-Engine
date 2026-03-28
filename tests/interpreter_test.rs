@@ -1137,3 +1137,29 @@ fn interpreter_exposes_regexp_flags() {
     let result = eval_with_interpreter("/foo/gi.flags;");
     assert_eq!(result, JsValue::String("gi".to_string()));
 }
+
+#[test]
+fn interpreter_evaluates_template_literal() {
+    let result = eval_with_interpreter(
+        r#"
+        let value = 41;
+        `answer: ${value + 1}`;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::String("answer: 42".to_string()));
+}
+
+#[test]
+fn interpreter_evaluates_tagged_template_expression() {
+    let result = eval_with_interpreter(
+        r#"
+        function tag(strings, value) {
+            return strings[0] + value + strings[1];
+        }
+        tag`answer: ${41 + 1}!`;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::String("answer: 42!".to_string()));
+}

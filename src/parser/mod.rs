@@ -869,6 +869,9 @@ impl<'a> Parser<'a> {
                     arguments: args,
                     optional: false,
                 }));
+            } else if matches!(self.current_token, Some(Token::Template(_, _))) {
+                let parts = self.parse_template_parts()?;
+                expr = Expression::TaggedTemplateExpression(Box::new(expr), parts);
             } else {
                 break;
             }
@@ -1476,11 +1479,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Expression::Identifier("CatchAllDummy"))
             }
-            Some(Token::Template(s)) => {
-                let v = *s;
-                self.advance()?;
-                Ok(Expression::Literal(Literal::String(v)))
-            }
+            Some(Token::Template(_, _)) => Ok(Expression::TemplateLiteral(self.parse_template_parts()?)),
             _ => {
                 self.advance()?;
                 Ok(Expression::Identifier("CatchAllDummy"))
@@ -1498,6 +1497,41 @@ impl<'a> Parser<'a> {
                 body: vec![Statement::ReturnStatement(Some(expr))],
             })
         }
+    }
+
+    fn parse_template_parts(&mut self) -> Result<Vec<TemplatePart<'a>>, ParseError> {
+        let mut parts = Vec::new();
+
+        loop {
+            match self.current_token.clone() {
+                Some(Token::Template(chunk, is_tail)) => {
+                    self.advance()?;
+                    parts.push(TemplatePart::String(chunk));
+                    if is_tail {
+                        break;
+                    }
+
+                    let expr = self.parse_expression()?;
+                    parts.push(TemplatePart::Expr(expr));
+
+                    if !matches!(self.current_token, Some(Token::RBrace)) {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "RBrace".to_string(),
+                            found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                        });
+                    }
+                    self.advance()?;
+                }
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "Template".to_string(),
+                        found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                    });
+                }
+            }
+        }
+
+        Ok(parts)
     }
 }
 

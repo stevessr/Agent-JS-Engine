@@ -2,7 +2,7 @@ use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
 use ai_agent::parser::ast::{
     AssignmentOperator, BinaryOperator, ClassElement, Expression, Literal, ObjectKey,
-    ObjectPropertyKind, Param, Statement,
+    ObjectPropertyKind, Param, Statement, TemplatePart,
 };
 
 #[test]
@@ -952,5 +952,57 @@ fn parser_parses_regex_literal_with_flags() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::Literal(Literal::RegExp("foo", "gi"))) => {}
         other => panic!("expected regexp literal with flags, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_template_literal_with_expression() {
+    let lexer = Lexer::new("`a${value}b`");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::TemplateLiteral(parts)) => {
+            assert_eq!(parts.len(), 3);
+            assert!(matches!(parts[0], TemplatePart::String("a")));
+            assert!(matches!(parts[1], TemplatePart::Expr(Expression::Identifier("value"))));
+            assert!(matches!(parts[2], TemplatePart::String("b")));
+        }
+        other => panic!("expected template literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_template_literal_with_empty_segments() {
+    let lexer = Lexer::new("`${value}`");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::TemplateLiteral(parts)) => {
+            assert_eq!(parts.len(), 3);
+            assert!(matches!(parts[0], TemplatePart::String("")));
+            assert!(matches!(parts[1], TemplatePart::Expr(Expression::Identifier("value"))));
+            assert!(matches!(parts[2], TemplatePart::String("")));
+        }
+        other => panic!("expected template literal, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_tagged_template_expression() {
+    let lexer = Lexer::new("tag`a${value}b`");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::TaggedTemplateExpression(tag, parts)) => {
+            assert!(matches!(tag.as_ref(), Expression::Identifier("tag")));
+            assert_eq!(parts.len(), 3);
+            assert!(matches!(parts[0], TemplatePart::String("a")));
+            assert!(matches!(parts[1], TemplatePart::Expr(Expression::Identifier("value"))));
+            assert!(matches!(parts[2], TemplatePart::String("b")));
+        }
+        other => panic!("expected tagged template expression, got {other:?}"),
     }
 }
