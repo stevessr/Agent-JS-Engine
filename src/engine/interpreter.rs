@@ -1,5 +1,7 @@
 use crate::engine::env::Environment;
-use crate::engine::value::{FunctionValue, JsValue};
+use crate::engine::value::{
+    get_object_property, has_object_property, object_with_proto, FunctionValue, JsValue,
+};
 use crate::parser::ast::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -13,10 +15,14 @@ pub enum RuntimeError {
     TypeError(String),
     #[error("Syntax Error: {0}")]
     SyntaxError(String),
-    #[error("Return: {0:?}")] // Control flow for return
+    #[error("Return: {0:?}")]
     Return(JsValue),
-    #[error("Throw: {0:?}")] // Control flow for throw
+    #[error("Throw: {0:?}")]
     Throw(JsValue),
+    #[error("Break: {0:?}")]
+    Break(Option<String>),
+    #[error("Continue: {0:?}")]
+    Continue(Option<String>),
     #[error("Timeout: Infinite loop or too many instructions")]
     Timeout,
 }
@@ -92,6 +98,9 @@ impl Interpreter {
             AssignmentOperator::PercentAssign => {
                 Ok(JsValue::Number(left.as_number() % right.as_number()))
             }
+            AssignmentOperator::PowerAssign => {
+                Ok(JsValue::Number(left.as_number().powf(right.as_number())))
+            }
             AssignmentOperator::LogicAndAssign
             | AssignmentOperator::LogicOrAssign
             | AssignmentOperator::NullishAssign => Ok(right.clone()),
@@ -166,6 +175,73 @@ impl Interpreter {
         Ok(())
     }
 
+    fn create_function_value(
+        &mut self,
+        func: &FunctionDeclaration,
+        env: Rc<RefCell<Environment>>,
+    ) -> JsValue {
+        let id = self.functions.len();
+        self.functions.push(clone_function_declaration(func));
+        let prototype = object_with_proto(JsValue::Null);
+        JsValue::Function(Rc::new(FunctionValue {
+            id,
+            env,
+            prototype,
+        }))
+    }
+
+    fn call_function_value(
+        &mut self,
+        function: Rc<FunctionValue>,
+        this_value: JsValue,
+        args: Vec<JsValue>,
+    ) -> Result<JsValue, RuntimeError> {
+        let declaration = self
+            .functions
+            .get(function.id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::TypeError("function body missing".into()))?;
+        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&function.env)))));
+        call_env
+            .borrow_mut()
+            .define("this".to_string(), this_value);
+
+        let mut arg_index = 0;
+        for param in &declaration.params {
+            match param {
+                Param::Simple(name) => {
+                    let value = args.get(arg_index).cloned().unwrap_or(JsValue::Undefined);
+                    call_env.borrow_mut().define(name.to_string(), value);
+                    arg_index += 1;
+                }
+                Param::Rest(name) => {
+                    let rest: Vec<JsValue> = args[arg_index..].to_vec();
+                    call_env.borrow_mut().define(
+                        name.to_string(),
+                        JsValue::Array(Rc::new(RefCell::new(rest))),
+                    );
+                    break;
+                }
+                Param::Default(name, default_expr) => {
+                    let value = match args.get(arg_index) {
+                        Some(JsValue::Undefined) | None => {
+                            self.eval_expression(default_expr, Rc::clone(&call_env))?
+                        }
+                        Some(v) => v.clone(),
+                    };
+                    call_env.borrow_mut().define(name.to_string(), value);
+                    arg_index += 1;
+                }
+            }
+        }
+
+        match self.eval_statement(&Statement::BlockStatement(declaration.body.clone()), call_env) {
+            Ok(value) => Ok(value),
+            Err(RuntimeError::Return(value)) => Ok(value),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn eval_program(&mut self, program: &Program) -> Result<JsValue, RuntimeError> {
         let mut last_val = JsValue::Undefined;
         for stmt in &program.body {
@@ -224,7 +300,29 @@ impl Interpreter {
                     if !test_val.is_truthy() {
                         break;
                     }
-                    last_val = self.eval_statement(&while_stmt.body, Rc::clone(&env))?;
+                    match self.eval_statement(&while_stmt.body, Rc::clone(&env)) {
+                        Ok(val) => last_val = val,
+                        Err(RuntimeError::Break(None)) => break,
+                        Err(RuntimeError::Continue(None)) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(last_val)
+            }
+            Statement::DoWhileStatement(while_stmt) => {
+                let mut last_val = JsValue::Undefined;
+                loop {
+                    self.check_timeout()?;
+                    match self.eval_statement(&while_stmt.body, Rc::clone(&env)) {
+                        Ok(val) => last_val = val,
+                        Err(RuntimeError::Break(None)) => break,
+                        Err(RuntimeError::Continue(None)) => {}
+                        Err(e) => return Err(e),
+                    }
+                    let test_val = self.eval_expression(&while_stmt.test, Rc::clone(&env))?;
+                    if !test_val.is_truthy() {
+                        break;
+                    }
                 }
                 Ok(last_val)
             }
@@ -242,14 +340,134 @@ impl Interpreter {
                             break;
                         }
                     }
-                    last_val = self.eval_statement(&for_stmt.body, Rc::clone(&for_env))?;
+                    match self.eval_statement(&for_stmt.body, Rc::clone(&for_env)) {
+                        Ok(val) => last_val = val,
+                        Err(RuntimeError::Break(None)) => break,
+                        Err(RuntimeError::Continue(None)) => {}
+                        Err(e) => return Err(e),
+                    }
                     if let Some(update) = &for_stmt.update {
                         self.eval_expression(update, Rc::clone(&for_env))?;
                     }
                 }
                 Ok(last_val)
             }
-            Statement::TryStatement(try_stmt) => {
+            Statement::ForInStatement(for_in) => {
+                let right = self.eval_expression(&for_in.right, Rc::clone(&env))?;
+                let keys: Vec<String> = match &right {
+                    JsValue::Object(map) => map.borrow().keys().cloned().collect(),
+                    JsValue::Array(arr) => (0..arr.borrow().len()).map(|i| i.to_string()).collect(),
+                    _ => vec![],
+                };
+                let binding_name = extract_for_binding(&for_in.left);
+                let mut last_val = JsValue::Undefined;
+                for key in keys {
+                    self.check_timeout()?;
+                    let iter_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
+                    if let Some(name) = &binding_name {
+                        iter_env.borrow_mut().define(name.clone(), JsValue::String(key));
+                    }
+                    match self.eval_statement(&for_in.body, Rc::clone(&iter_env)) {
+                        Ok(val) => last_val = val,
+                        Err(RuntimeError::Break(None)) => break,
+                        Err(RuntimeError::Continue(None)) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(last_val)
+            }
+            Statement::ForOfStatement(for_of) => {
+                let right = self.eval_expression(&for_of.right, Rc::clone(&env))?;
+                let items: Vec<JsValue> = match &right {
+                    JsValue::Array(arr) => arr.borrow().clone(),
+                    JsValue::String(s) => s.chars().map(|c| JsValue::String(c.to_string())).collect(),
+                    _ => vec![],
+                };
+                let binding_name = extract_for_binding(&for_of.left);
+                let mut last_val = JsValue::Undefined;
+                for item in items {
+                    self.check_timeout()?;
+                    let iter_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
+                    if let Some(name) = &binding_name {
+                        iter_env.borrow_mut().define(name.clone(), item);
+                    }
+                    match self.eval_statement(&for_of.body, Rc::clone(&iter_env)) {
+                        Ok(val) => last_val = val,
+                        Err(RuntimeError::Break(None)) => break,
+                        Err(RuntimeError::Continue(None)) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(last_val)
+            }
+            Statement::SwitchStatement(switch) => {
+                let discriminant = self.eval_expression(&switch.discriminant, Rc::clone(&env))?;
+                let mut matched = false;
+                let mut default_index: Option<usize> = None;
+                let mut last_val = JsValue::Undefined;
+
+                // find default case index
+                for (i, case) in switch.cases.iter().enumerate() {
+                    if case.test.is_none() {
+                        default_index = Some(i);
+                    }
+                }
+
+                'outer: for (i, case) in switch.cases.iter().enumerate() {
+                    if !matched {
+                        match &case.test {
+                            None => continue, // skip default on first pass
+                            Some(test) => {
+                                let test_val = self.eval_expression(test, Rc::clone(&env))?;
+                                if !js_strict_eq(&discriminant, &test_val) {
+                                    continue;
+                                }
+                                matched = true;
+                            }
+                        }
+                    }
+                    for stmt in &case.consequent {
+                        match self.eval_statement(stmt, Rc::clone(&env)) {
+                            Ok(val) => last_val = val,
+                            Err(RuntimeError::Break(None)) => break 'outer,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    let _ = i;
+                }
+
+                // if nothing matched, run default
+                if !matched {
+                    if let Some(di) = default_index {
+                        let mut in_default = true;
+                        'default: for case in switch.cases.iter().skip(di) {
+                            if in_default || case.test.is_none() {
+                                in_default = false;
+                            }
+                            for stmt in &case.consequent {
+                                match self.eval_statement(stmt, Rc::clone(&env)) {
+                                    Ok(val) => last_val = val,
+                                    Err(RuntimeError::Break(None)) => break 'default,
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(last_val)
+            }
+            Statement::BreakStatement(label) => {
+                Err(RuntimeError::Break(label.map(|s| s.to_string())))
+            }
+            Statement::ContinueStatement(label) => {
+                Err(RuntimeError::Continue(label.map(|s| s.to_string())))
+            }
+            Statement::LabeledStatement(labeled) => {
+                match self.eval_statement(&labeled.body, Rc::clone(&env)) {
+                    Err(RuntimeError::Break(Some(ref l))) if l == labeled.label => Ok(JsValue::Undefined),
+                    other => other,
+                }
+            }            Statement::TryStatement(try_stmt) => {
                 let res = self.eval_statement(
                     &Statement::BlockStatement(try_stmt.block.clone()),
                     Rc::clone(&env),
@@ -258,6 +476,8 @@ impl Interpreter {
                     Ok(val) => Ok(val),
                     Err(RuntimeError::Return(v)) => Err(RuntimeError::Return(v)),
                     Err(RuntimeError::Timeout) => Err(RuntimeError::Timeout),
+                    Err(RuntimeError::Break(label)) => Err(RuntimeError::Break(label)),
+                    Err(RuntimeError::Continue(label)) => Err(RuntimeError::Continue(label)),
                     Err(e) => {
                         if let Some(handler) = &try_stmt.handler {
                             let catch_env =
@@ -294,12 +514,7 @@ impl Interpreter {
             }
             Statement::FunctionDeclaration(func) => {
                 if let Some(name) = func.id {
-                    let id = self.functions.len();
-                    self.functions.push(clone_function_declaration(func));
-                    let function = JsValue::Function(Rc::new(FunctionValue {
-                        id,
-                        env: Rc::clone(&env),
-                    }));
+                    let function = self.create_function_value(func, Rc::clone(&env));
                     env.borrow_mut().define(name.to_string(), function);
                 }
                 Ok(JsValue::Undefined)
@@ -331,8 +546,18 @@ impl Interpreter {
                 Literal::String(s) => Ok(JsValue::String(s.to_string())),
                 Literal::Boolean(b) => Ok(JsValue::Boolean(*b)),
                 Literal::Null => Ok(JsValue::Null),
+                Literal::Undefined => Ok(JsValue::Undefined),
+                Literal::BigInt(n) => Ok(JsValue::Number(*n as f64)),
+                Literal::RegExp(_, _) => Ok(JsValue::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))),
             },
             Expression::Identifier(name) => {
+                match *name {
+                    "undefined" => return Ok(JsValue::Undefined),
+                    "NaN" => return Ok(JsValue::Number(f64::NAN)),
+                    "Infinity" => return Ok(JsValue::Number(f64::INFINITY)),
+                    "null" => return Ok(JsValue::Null),
+                    _ => {}
+                }
                 Ok(env.borrow().get(name).unwrap_or(JsValue::Undefined))
             }
             Expression::AssignmentExpression(assign) => {
@@ -465,35 +690,54 @@ impl Interpreter {
                         let shift = self.to_uint32(&right) & 0x1f;
                         Ok(JsValue::Number((self.to_uint32(&left) >> shift) as f64))
                     }
-                    BinaryOperator::EqEq => Ok(JsValue::Boolean(left == right)), // Needs abstract equality
-                    BinaryOperator::EqEqEq => Ok(JsValue::Boolean(left == right)),
-                    BinaryOperator::NotEq => Ok(JsValue::Boolean(left != right)),
-                    BinaryOperator::NotEqEq => Ok(JsValue::Boolean(left != right)),
+                    BinaryOperator::EqEq => Ok(JsValue::Boolean(js_abstract_eq(&left, &right))),
+                    BinaryOperator::EqEqEq => Ok(JsValue::Boolean(js_strict_eq(&left, &right))),
+                    BinaryOperator::NotEq => Ok(JsValue::Boolean(!js_abstract_eq(&left, &right))),
+                    BinaryOperator::NotEqEq => Ok(JsValue::Boolean(!js_strict_eq(&left, &right))),
                     BinaryOperator::Less => left.lt(&right),
                     BinaryOperator::LessEq => left.le(&right),
                     BinaryOperator::Greater => left.gt(&right),
                     BinaryOperator::GreaterEq => left.ge(&right),
+                    BinaryOperator::Power => Ok(JsValue::Number(left.as_number().powf(right.as_number()))),
+                    BinaryOperator::Instanceof => match (&left, &right) {
+                        (JsValue::Object(object), JsValue::Function(function)) => {
+                            let prototype = function.prototype.clone();
+                            let mut current = object.borrow().get("__proto__").cloned();
+                            while let Some(value) = current {
+                                if js_strict_eq(&value, &prototype) {
+                                    return Ok(JsValue::Boolean(true));
+                                }
+                                current = match value {
+                                    JsValue::Object(proto) => proto.borrow().get("__proto__").cloned(),
+                                    _ => None,
+                                };
+                            }
+                            Ok(JsValue::Boolean(false))
+                        }
+                        _ => Ok(JsValue::Boolean(false)),
+                    },
+                    BinaryOperator::In => {
+                        let key = left.as_string();
+                        match &right {
+                            JsValue::Object(map) => Ok(JsValue::Boolean(has_object_property(map, &key))),
+                            JsValue::Array(arr) => {
+                                if let Ok(idx) = key.parse::<usize>() {
+                                    Ok(JsValue::Boolean(idx < arr.borrow().len()))
+                                } else {
+                                    Ok(JsValue::Boolean(false))
+                                }
+                            }
+                            _ => Err(RuntimeError::TypeError("right-hand side of 'in' is not an object".into())),
+                        }
+                    }
                     _ => Ok(JsValue::Undefined),
                 }
             }
             Expression::UnaryExpression(unary) => {
                 let arg = self.eval_expression(&unary.argument, env)?;
                 match unary.operator {
-                    UnaryOperator::Minus => {
-                        if let JsValue::Number(n) = arg {
-                            Ok(JsValue::Number(-n))
-                        } else {
-                            Ok(JsValue::Number(f64::NAN))
-                        }
-                    }
-                    UnaryOperator::Plus => {
-                        // Cast to number
-                        if let JsValue::Number(n) = arg {
-                            Ok(JsValue::Number(n))
-                        } else {
-                            Ok(JsValue::Number(f64::NAN))
-                        }
-                    }
+                    UnaryOperator::Minus => Ok(JsValue::Number(-arg.as_number())),
+                    UnaryOperator::Plus => Ok(JsValue::Number(arg.as_number())),
                     UnaryOperator::LogicNot => Ok(JsValue::Boolean(!arg.is_truthy())),
                     UnaryOperator::BitNot => {
                         Ok(JsValue::Number((!self.to_int32(&arg)) as f64))
@@ -504,22 +748,51 @@ impl Interpreter {
                 }
             }
             Expression::ArrayExpression(elements) => {
-                let values = elements
-                    .iter()
-                    .map(|element| match element {
-                        Some(expr) => self.eval_expression(expr, Rc::clone(&env)),
-                        None => Ok(JsValue::Undefined),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut values = Vec::new();
+                for element in elements {
+                    match element {
+                        Some(Expression::SpreadElement(spread_expr)) => {
+                            let spread_val = self.eval_expression(spread_expr, Rc::clone(&env))?;
+                            match spread_val {
+                                JsValue::Array(arr) => values.extend(arr.borrow().clone()),
+                                other => values.push(other),
+                            }
+                        }
+                        Some(expr) => values.push(self.eval_expression(expr, Rc::clone(&env))?),
+                        None => values.push(JsValue::Undefined),
+                    }
+                }
                 Ok(JsValue::Array(Rc::new(RefCell::new(values))))
             }
             Expression::ObjectExpression(properties) => {
                 let mut values = std::collections::HashMap::new();
-                for (key, value) in properties {
-                    let key = match key {
-                        ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
-                    };
-                    values.insert(key, self.eval_expression(value, Rc::clone(&env))?);
+                for prop in properties {
+                    if prop.method {
+                        // method shorthand: treat as function value
+                        let key = match &prop.key {
+                            ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
+                            ObjectKey::Number(n) => n.to_string(),
+                            ObjectKey::Computed(expr) => self.eval_expression(expr, Rc::clone(&env))?.as_string(),
+                        };
+                        let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
+                        values.insert(key, val);
+                    } else if let Expression::SpreadElement(spread_expr) = &prop.value {
+                        // spread: { ...obj }
+                        let spread_val = self.eval_expression(spread_expr, Rc::clone(&env))?;
+                        if let JsValue::Object(map) = spread_val {
+                            for (k, v) in map.borrow().iter() {
+                                values.insert(k.clone(), v.clone());
+                            }
+                        }
+                    } else {
+                        let key = match &prop.key {
+                            ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
+                            ObjectKey::Number(n) => n.to_string(),
+                            ObjectKey::Computed(expr) => self.eval_expression(expr, Rc::clone(&env))?.as_string(),
+                        };
+                        let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
+                        values.insert(key, val);
+                    }
                 }
                 Ok(JsValue::Object(Rc::new(RefCell::new(values))))
             }
@@ -528,11 +801,7 @@ impl Interpreter {
                 let property_key = self.member_property_key(mem, env)?;
 
                 match object {
-                    JsValue::Object(values) => Ok(values
-                        .borrow()
-                        .get(&property_key)
-                        .cloned()
-                        .unwrap_or(JsValue::Undefined)),
+                    JsValue::Object(values) => Ok(get_object_property(&values, &property_key)),
                     JsValue::Array(values) => {
                         let values = values.borrow();
                         if property_key == "length" {
@@ -543,83 +812,99 @@ impl Interpreter {
                             Err(_) => Ok(JsValue::Undefined),
                         }
                     }
+                    JsValue::String(s) => {
+                        match property_key.as_str() {
+                            "length" => Ok(JsValue::Number(s.chars().count() as f64)),
+                            _ => {
+                                if let Ok(index) = property_key.parse::<usize>() {
+                                    Ok(s.chars().nth(index)
+                                        .map(|c| JsValue::String(c.to_string()))
+                                        .unwrap_or(JsValue::Undefined))
+                                } else {
+                                    Ok(JsValue::Undefined)
+                                }
+                            }
+                        }
+                    }
+                    JsValue::Function(function) => Ok(match property_key.as_str() {
+                        "prototype" => function.prototype.clone(),
+                        _ => JsValue::Undefined,
+                    }),
                     _ => Err(RuntimeError::TypeError("value is not an object".into())),
                 }
             }
             Expression::CallExpression(call) => {
-                let callee = self.eval_expression(&call.callee, Rc::clone(&env))?;
-                let args = call
-                    .arguments
-                    .iter()
-                    .map(|arg| self.eval_expression(arg, Rc::clone(&env)))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let (callee, this_value) = match &call.callee {
+                    Expression::MemberExpression(mem) => {
+                        let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                        let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                        let callee = match &object {
+                            JsValue::Object(values) => get_object_property(values, &property_key),
+                            _ => object.get_property(&property_key),
+                        };
+                        (callee, object)
+                    }
+                    _ => (
+                        self.eval_expression(&call.callee, Rc::clone(&env))?,
+                        JsValue::Undefined,
+                    ),
+                };
+                let mut args = Vec::new();
+                for arg in &call.arguments {
+                    match arg {
+                        Expression::SpreadElement(spread_expr) => {
+                            let spread_val = self.eval_expression(spread_expr, Rc::clone(&env))?;
+                            match spread_val {
+                                JsValue::Array(arr) => args.extend(arr.borrow().clone()),
+                                other => args.push(other),
+                            }
+                        }
+                        expr => args.push(self.eval_expression(expr, Rc::clone(&env))?),
+                    }
+                }
 
                 match callee {
-                    JsValue::Function(function) => {
-                        let declaration = self
-                            .functions
-                            .get(function.id)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::TypeError("function body missing".into()))?;
-                        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(
-                            &function.env,
-                        )))));
-                        for (index, param) in declaration.params.iter().enumerate() {
-                            let value = args.get(index).cloned().unwrap_or(JsValue::Undefined);
-                            call_env.borrow_mut().define(param.to_string(), value);
-                        }
-                        match self.eval_statement(
-                            &Statement::BlockStatement(declaration.body.clone()),
-                            call_env,
-                        ) {
-                            Ok(value) => Ok(value),
-                            Err(RuntimeError::Return(value)) => Ok(value),
-                            Err(error) => Err(error),
-                        }
-                    }
+                    JsValue::Function(function) => self.call_function_value(function, this_value, args),
                     _ => Err(RuntimeError::TypeError("value is not callable".into())),
                 }
             }
             Expression::UpdateExpression(update) => {
-                let id = match &update.argument {
-                    Expression::Identifier(name) => name,
-                    _ => return Ok(JsValue::Undefined),
-                };
-                let current_val = env
-                    .borrow()
-                    .get(id)
-                    .unwrap_or(JsValue::Undefined)
-                    .as_number();
-                let new_val = if update.operator == crate::parser::ast::UpdateOperator::PlusPlus {
-                    current_val + 1.0
-                } else {
-                    current_val - 1.0
-                };
-                env.borrow_mut().set(id, JsValue::Number(new_val)).ok();
-                if update.prefix {
-                    Ok(JsValue::Number(new_val))
-                } else {
-                    Ok(JsValue::Number(current_val))
+                match &update.argument {
+                    Expression::Identifier(name) => {
+                        let current_val = env.borrow().get(name).unwrap_or(JsValue::Undefined).as_number();
+                        let new_val = if update.operator == UpdateOperator::PlusPlus { current_val + 1.0 } else { current_val - 1.0 };
+                        env.borrow_mut().set(name, JsValue::Number(new_val)).ok();
+                        if update.prefix { Ok(JsValue::Number(new_val)) } else { Ok(JsValue::Number(current_val)) }
+                    }
+                    Expression::MemberExpression(mem) => {
+                        let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                        let property_key = if mem.computed {
+                            self.eval_expression(&mem.property, Rc::clone(&env))?.as_string()
+                        } else if let Expression::Identifier(name) = &mem.property {
+                            name.to_string()
+                        } else {
+                            return Ok(JsValue::Undefined);
+                        };
+                        let current_val = match &object {
+                            JsValue::Object(map) => map.borrow().get(&property_key).cloned().unwrap_or(JsValue::Undefined).as_number(),
+                            JsValue::Array(arr) => arr.borrow().get(property_key.parse::<usize>().unwrap_or(usize::MAX)).cloned().unwrap_or(JsValue::Undefined).as_number(),
+                            _ => f64::NAN,
+                        };
+                        let new_val = if update.operator == UpdateOperator::PlusPlus { current_val + 1.0 } else { current_val - 1.0 };
+                        self.write_member_value(object, &property_key, JsValue::Number(new_val))?;
+                        if update.prefix { Ok(JsValue::Number(new_val)) } else { Ok(JsValue::Number(current_val)) }
+                    }
+                    _ => Ok(JsValue::Undefined),
                 }
             }
             Expression::ArrowFunctionExpression(func) => {
-                let id = self.functions.len();
-                self.functions.push(clone_function_declaration(func));
-                Ok(JsValue::Function(Rc::new(FunctionValue {
-                    id,
-                    env: Rc::clone(&env),
-                })))
+                Ok(self.create_function_value(func, Rc::clone(&env)))
             }
             Expression::ClassExpression(_) => Ok(JsValue::Undefined),
             Expression::FunctionExpression(func) => {
-                let id = self.functions.len();
-                self.functions.push(clone_function_declaration(func));
-                Ok(JsValue::Function(Rc::new(FunctionValue {
-                    id,
-                    env: Rc::clone(&env),
-                })))
+                Ok(self.create_function_value(func, Rc::clone(&env)))
             }
-            Expression::ThisExpression => Ok(JsValue::Undefined),
+            Expression::ThisExpression => Ok(env.borrow().get("this").unwrap_or(JsValue::Undefined)),
             Expression::SequenceExpression(seq) => {
                 let mut res = JsValue::Undefined;
                 for expr in seq {
@@ -639,7 +924,87 @@ impl Interpreter {
                     self.eval_expression(alternate, env.clone())
                 }
             }
-            Expression::NewExpression(_new_exp) => Ok(JsValue::Undefined),
+            Expression::NewExpression(new_exp) => {
+                let callee = self.eval_expression(&new_exp.callee, Rc::clone(&env))?;
+                let mut args = Vec::new();
+                for arg in &new_exp.arguments {
+                    match arg {
+                        Expression::SpreadElement(spread_expr) => {
+                            let spread_val = self.eval_expression(spread_expr, Rc::clone(&env))?;
+                            match spread_val {
+                                JsValue::Array(arr) => args.extend(arr.borrow().clone()),
+                                other => args.push(other),
+                            }
+                        }
+                        expr => args.push(self.eval_expression(expr, Rc::clone(&env))?),
+                    }
+                }
+
+                match callee {
+                    JsValue::Function(function) => {
+                        let instance = object_with_proto(function.prototype.clone());
+                        let result = self.call_function_value(Rc::clone(&function), instance.clone(), args)?;
+                        match result {
+                            JsValue::Object(_) => Ok(result),
+                            _ => Ok(instance),
+                        }
+                    }
+                    _ => Err(RuntimeError::TypeError("value is not a constructor".into())),
+                }
+            },
+            Expression::SpreadElement(expr) => self.eval_expression(expr, env),
+            Expression::TemplateLiteral(parts) => {
+                let mut result = String::new();
+                for part in parts {
+                    match part {
+                        TemplatePart::String(s) => result.push_str(s),
+                        TemplatePart::Expr(expr) => {
+                            let val = self.eval_expression(expr, Rc::clone(&env))?;
+                            result.push_str(&val.as_string());
+                        }
+                    }
+                }
+                Ok(JsValue::String(result))
+            }
+            Expression::YieldExpression(_) => Ok(JsValue::Undefined),
+            Expression::AwaitExpression(expr) => self.eval_expression(expr, env),
+            Expression::TaggedTemplateExpression(tag, parts) => {
+                // Evaluate the template parts and call the tag function
+                let tag_val = self.eval_expression(tag, Rc::clone(&env))?;
+                let mut strings = Vec::new();
+                let mut values = Vec::new();
+                for part in parts {
+                    match part {
+                        TemplatePart::String(s) => strings.push(JsValue::String(s.to_string())),
+                        TemplatePart::Expr(expr) => {
+                            values.push(self.eval_expression(expr, Rc::clone(&env))?);
+                        }
+                    }
+                }
+                let strings_arr = JsValue::Array(Rc::new(RefCell::new(strings)));
+                let mut call_args = vec![strings_arr];
+                call_args.extend(values);
+                match tag_val {
+                    JsValue::Function(function) => {
+                        let declaration = self
+                            .functions
+                            .get(function.id)
+                            .cloned()
+                            .ok_or_else(|| RuntimeError::TypeError("tag function body missing".into()))?;
+                        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&function.env)))));
+                        for (i, param) in declaration.params.iter().enumerate() {
+                            let value = call_args.get(i).cloned().unwrap_or(JsValue::Undefined);
+                            call_env.borrow_mut().define(param.name().to_string(), value);
+                        }
+                        match self.eval_statement(&Statement::BlockStatement(declaration.body.clone()), call_env) {
+                            Ok(v) => Ok(v),
+                            Err(RuntimeError::Return(v)) => Ok(v),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    _ => Err(RuntimeError::TypeError("tag is not callable".into())),
+                }
+            }
         }
     }
 }
@@ -649,18 +1014,20 @@ fn clone_function_declaration(func: &FunctionDeclaration<'_>) -> FunctionDeclara
         let leaked: &'static mut str = String::leak(value.to_string());
         leaked as &'static str
     });
-    let params = func
-        .params
-        .iter()
-        .map(|param| {
-            let leaked: &'static mut str = String::leak((*param).to_string());
-            leaked as &'static str
-        })
-        .collect();
+    let params = func.params.iter().map(clone_param).collect();
     FunctionDeclaration {
         id,
         params,
         body: clone_block_statement(&func.body),
+        is_generator: func.is_generator,
+    }
+}
+
+fn clone_param(param: &Param<'_>) -> Param<'static> {
+    match param {
+        Param::Simple(name) => Param::Simple(String::leak(name.to_string())),
+        Param::Rest(name) => Param::Rest(String::leak(name.to_string())),
+        Param::Default(name, expr) => Param::Default(String::leak(name.to_string()), clone_expression(expr)),
     }
 }
 
@@ -722,6 +1089,37 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
             Statement::ReturnStatement(expr.as_ref().map(clone_expression))
         }
         Statement::EmptyStatement => Statement::EmptyStatement,
+        Statement::DoWhileStatement(stmt) => Statement::DoWhileStatement(WhileStatement {
+            test: clone_expression(&stmt.test),
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
+        Statement::ForInStatement(stmt) => Statement::ForInStatement(ForInStatement {
+            left: Box::new(clone_statement(&stmt.left)),
+            right: clone_expression(&stmt.right),
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
+        Statement::ForOfStatement(stmt) => Statement::ForOfStatement(ForOfStatement {
+            left: Box::new(clone_statement(&stmt.left)),
+            right: clone_expression(&stmt.right),
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
+        Statement::SwitchStatement(stmt) => Statement::SwitchStatement(SwitchStatement {
+            discriminant: clone_expression(&stmt.discriminant),
+            cases: stmt.cases.iter().map(|case| SwitchCase {
+                test: case.test.as_ref().map(clone_expression),
+                consequent: case.consequent.iter().map(clone_statement).collect(),
+            }).collect(),
+        }),
+        Statement::BreakStatement(label) => Statement::BreakStatement(
+            label.map(|s| { let l: &'static mut str = String::leak(s.to_string()); l as &'static str })
+        ),
+        Statement::ContinueStatement(label) => Statement::ContinueStatement(
+            label.map(|s| { let l: &'static mut str = String::leak(s.to_string()); l as &'static str })
+        ),
+        Statement::LabeledStatement(stmt) => Statement::LabeledStatement(LabeledStatement {
+            label: { let l: &'static mut str = String::leak(stmt.label.to_string()); l as &'static str },
+            body: Box::new(clone_statement(&stmt.body)),
+        }),
     }
 }
 
@@ -733,6 +1131,12 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
         }
         Expression::Literal(Literal::Boolean(b)) => Expression::Literal(Literal::Boolean(*b)),
         Expression::Literal(Literal::Null) => Expression::Literal(Literal::Null),
+        Expression::Literal(Literal::Undefined) => Expression::Literal(Literal::Undefined),
+        Expression::Literal(Literal::BigInt(n)) => Expression::Literal(Literal::BigInt(*n)),
+        Expression::Literal(Literal::RegExp(pattern, flags)) => Expression::Literal(Literal::RegExp(
+            String::leak((*pattern).to_string()),
+            String::leak((*flags).to_string()),
+        )),
         Expression::Identifier(name) => Expression::Identifier(String::leak((*name).to_string())),
         Expression::BinaryExpression(expr) => Expression::BinaryExpression(Box::new(BinaryExpression {
             operator: expr.operator.clone(),
@@ -753,14 +1157,17 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
             object: clone_expression(&expr.object),
             property: clone_expression(&expr.property),
             computed: expr.computed,
+            optional: expr.optional,
         })),
         Expression::CallExpression(expr) => Expression::CallExpression(Box::new(CallExpression {
             callee: clone_expression(&expr.callee),
             arguments: expr.arguments.iter().map(clone_expression).collect(),
+            optional: expr.optional,
         })),
         Expression::NewExpression(expr) => Expression::NewExpression(Box::new(CallExpression {
             callee: clone_expression(&expr.callee),
             arguments: expr.arguments.iter().map(clone_expression).collect(),
+            optional: expr.optional,
         })),
         Expression::FunctionExpression(func) => {
             Expression::FunctionExpression(Box::new(clone_function_declaration(func)))
@@ -786,21 +1193,22 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
         Expression::ArrayExpression(values) => {
             Expression::ArrayExpression(values.iter().map(|value| value.as_ref().map(clone_expression)).collect())
         }
-        Expression::ObjectExpression(values) => Expression::ObjectExpression(
-            values
-                .iter()
-                .map(|(key, value)| {
-                    let key = match key {
-                        ObjectKey::Identifier(name) => {
-                            ObjectKey::Identifier(String::leak((*name).to_string()))
-                        }
-                        ObjectKey::String(name) => {
-                            ObjectKey::String(String::leak((*name).to_string()))
-                        }
-                    };
-                    (key, clone_expression(value))
-                })
-                .collect(),
+        Expression::ObjectExpression(props) => Expression::ObjectExpression(
+            props.iter().map(|prop| {
+                let key = match &prop.key {
+                    ObjectKey::Identifier(name) => ObjectKey::Identifier(String::leak((*name).to_string())),
+                    ObjectKey::String(name) => ObjectKey::String(String::leak((*name).to_string())),
+                    ObjectKey::Number(n) => ObjectKey::Number(*n),
+                    ObjectKey::Computed(expr) => ObjectKey::Computed(Box::new(clone_expression(expr))),
+                };
+                ObjectProperty {
+                    key,
+                    value: clone_expression(&prop.value),
+                    shorthand: prop.shorthand,
+                    computed: prop.computed,
+                    method: prop.method,
+                }
+            }).collect(),
         ),
         Expression::ClassExpression(expr) => {
             let id = expr.id.map(|value| {
@@ -810,11 +1218,62 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
             Expression::ClassExpression(Box::new(ClassDeclaration { id }))
         }
         Expression::ThisExpression => Expression::ThisExpression,
+        Expression::SpreadElement(expr) => Expression::SpreadElement(Box::new(clone_expression(expr))),
+        Expression::TemplateLiteral(parts) => Expression::TemplateLiteral(
+            parts.iter().map(|part| match part {
+                TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
+                TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
+            }).collect()
+        ),
+        Expression::YieldExpression(expr) => Expression::YieldExpression(expr.as_ref().map(|e| Box::new(clone_expression(e)))),
+        Expression::AwaitExpression(expr) => Expression::AwaitExpression(Box::new(clone_expression(expr))),
+        Expression::TaggedTemplateExpression(tag, parts) => Expression::TaggedTemplateExpression(
+            Box::new(clone_expression(tag)),
+            parts.iter().map(|part| match part {
+                TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
+                TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
+            }).collect()
+        ),
     }
 }
 
 impl Drop for Interpreter {
     fn drop(&mut self) {
         self.global_env.borrow_mut().variables.clear();
+    }
+}
+
+fn js_strict_eq(left: &JsValue, right: &JsValue) -> bool {
+    match (left, right) {
+        (JsValue::Undefined, JsValue::Undefined) => true,
+        (JsValue::Null, JsValue::Null) => true,
+        (JsValue::Boolean(a), JsValue::Boolean(b)) => a == b,
+        (JsValue::Number(a), JsValue::Number(b)) => a == b,
+        (JsValue::String(a), JsValue::String(b)) => a == b,
+        (JsValue::Array(a), JsValue::Array(b)) => Rc::ptr_eq(a, b),
+        (JsValue::Object(a), JsValue::Object(b)) => Rc::ptr_eq(a, b),
+        (JsValue::Function(a), JsValue::Function(b)) => Rc::ptr_eq(a, b),
+        _ => false,
+    }
+}
+
+fn js_abstract_eq(left: &JsValue, right: &JsValue) -> bool {
+    match (left, right) {
+        (JsValue::Null, JsValue::Undefined) | (JsValue::Undefined, JsValue::Null) => true,
+        (JsValue::Number(a), JsValue::String(b)) => *a == b.parse::<f64>().unwrap_or(f64::NAN),
+        (JsValue::String(a), JsValue::Number(b)) => a.parse::<f64>().unwrap_or(f64::NAN) == *b,
+        (JsValue::Boolean(a), _) => js_abstract_eq(&JsValue::Number(if *a { 1.0 } else { 0.0 }), right),
+        (_, JsValue::Boolean(b)) => js_abstract_eq(left, &JsValue::Number(if *b { 1.0 } else { 0.0 })),
+        _ => js_strict_eq(left, right),
+    }
+}
+
+fn extract_for_binding(stmt: &Statement) -> Option<String> {
+    match stmt {
+        Statement::VariableDeclaration(decl) => {
+            decl.declarations.first().map(|d| d.id.to_string())
+        }
+        Statement::ExpressionStatement(Expression::Identifier(name)) => Some(name.to_string()),
+        _ => None,
     }
 }

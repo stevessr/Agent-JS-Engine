@@ -1,6 +1,8 @@
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
-use ai_agent::parser::ast::{AssignmentOperator, Expression, Literal, ObjectKey, Statement};
+use ai_agent::parser::ast::{
+    AssignmentOperator, BinaryOperator, Expression, Literal, ObjectKey, Param, Statement,
+};
 
 #[test]
 fn parser_keeps_multiple_function_parameters() {
@@ -16,7 +18,9 @@ fn parser_keeps_multiple_function_parameters() {
 
     match &program.body[0] {
         Statement::FunctionDeclaration(func) => {
-            assert_eq!(func.params, vec!["a", "b"]);
+            assert_eq!(func.params.len(), 2);
+            assert!(matches!(func.params[0], Param::Simple("a")));
+            assert!(matches!(func.params[1], Param::Simple("b")));
         }
         other => panic!("expected function declaration, got {other:?}"),
     }
@@ -52,14 +56,10 @@ fn parser_parses_object_literals() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::ObjectExpression(properties)) => {
             assert_eq!(properties.len(), 2);
-            assert!(matches!(
-                &properties[0],
-                (ObjectKey::Identifier("foo"), Expression::Literal(Literal::Number(1.0)))
-            ));
-            assert!(matches!(
-                &properties[1],
-                (ObjectKey::String("bar"), Expression::Literal(Literal::Number(2.0)))
-            ));
+            assert!(matches!(&properties[0].key, ObjectKey::Identifier("foo")));
+            assert!(matches!(&properties[0].value, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(&properties[1].key, ObjectKey::String("bar")));
+            assert!(matches!(&properties[1].value, Expression::Literal(Literal::Number(2.0))));
         }
         other => panic!("expected object expression, got {other:?}"),
     }
@@ -373,5 +373,135 @@ fn parser_parses_unary_bitnot_expression() {
             assert!(unary.prefix);
         }
         other => panic!("expected unary expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_respects_binary_operator_precedence() {
+    let lexer = Lexer::new("1 + 2 * 3");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::BinaryExpression(expr)) => {
+            assert!(matches!(expr.operator, BinaryOperator::Plus));
+            assert!(matches!(expr.left, Expression::Literal(Literal::Number(1.0))));
+            match &expr.right {
+                Expression::BinaryExpression(right) => {
+                    assert!(matches!(right.operator, BinaryOperator::Multiply));
+                    assert!(matches!(right.left, Expression::Literal(Literal::Number(2.0))));
+                    assert!(matches!(right.right, Expression::Literal(Literal::Number(3.0))));
+                }
+                other => panic!("expected multiply expression, got {other:?}"),
+            }
+        }
+        other => panic!("expected binary expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_array_spread_expression() {
+    let lexer = Lexer::new("[1, ...rest, 3]");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::ArrayExpression(elements)) => {
+            assert_eq!(elements.len(), 3);
+            assert!(matches!(elements[0], Some(Expression::Literal(Literal::Number(1.0)))));
+            assert!(matches!(
+                &elements[1],
+                Some(Expression::SpreadElement(inner)) if matches!(inner.as_ref(), Expression::Identifier("rest"))
+            ));
+            assert!(matches!(elements[2], Some(Expression::Literal(Literal::Number(3.0)))));
+        }
+        other => panic!("expected array expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_for_in_statement() {
+    let lexer = Lexer::new("for (let key in obj) key;");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ForInStatement(stmt) => {
+            assert!(matches!(stmt.right, Expression::Identifier("obj")));
+            match stmt.left.as_ref() {
+                Statement::VariableDeclaration(decl) => {
+                    assert_eq!(decl.declarations.len(), 1);
+                    assert_eq!(decl.declarations[0].id, "key");
+                }
+                other => panic!("expected variable declaration, got {other:?}"),
+            }
+        }
+        other => panic!("expected for-in statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_for_of_statement() {
+    let lexer = Lexer::new("for (item of list) item;");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ForOfStatement(stmt) => {
+            assert!(matches!(stmt.right, Expression::Identifier("list")));
+            match stmt.left.as_ref() {
+                Statement::ExpressionStatement(Expression::Identifier("item")) => {}
+                other => panic!("expected identifier initializer, got {other:?}"),
+            }
+        }
+        other => panic!("expected for-of statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_switch_statement() {
+    let lexer = Lexer::new("switch (x) { case 1: y; break; default: z; }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::SwitchStatement(stmt) => {
+            assert!(matches!(stmt.discriminant, Expression::Identifier("x")));
+            assert_eq!(stmt.cases.len(), 2);
+            assert!(matches!(stmt.cases[0].test, Some(Expression::Literal(Literal::Number(1.0)))));
+            assert!(matches!(stmt.cases[0].consequent[1], Statement::BreakStatement(None)));
+            assert!(stmt.cases[1].test.is_none());
+        }
+        other => panic!("expected switch statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_do_while_statement() {
+    let lexer = Lexer::new("do x; while (y);");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::DoWhileStatement(stmt) => {
+            assert!(matches!(stmt.test, Expression::Identifier("y")));
+            assert!(matches!(stmt.body.as_ref(), Statement::ExpressionStatement(Expression::Identifier("x"))));
+        }
+        other => panic!("expected do-while statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_labeled_break_statement() {
+    let lexer = Lexer::new("outer: break outer;");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::LabeledStatement(stmt) => {
+            assert_eq!(stmt.label, "outer");
+            assert!(matches!(stmt.body.as_ref(), Statement::BreakStatement(Some("outer"))));
+        }
+        other => panic!("expected labeled statement, got {other:?}"),
     }
 }

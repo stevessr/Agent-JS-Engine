@@ -9,12 +9,19 @@ pub enum Statement<'a> {
     BlockStatement(BlockStatement<'a>),
     IfStatement(IfStatement<'a>),
     WhileStatement(WhileStatement<'a>),
+    DoWhileStatement(WhileStatement<'a>),
     ForStatement(ForStatement<'a>),
+    ForInStatement(ForInStatement<'a>),
+    ForOfStatement(ForOfStatement<'a>),
+    SwitchStatement(SwitchStatement<'a>),
     TryStatement(TryStatement<'a>),
     ThrowStatement(Expression<'a>),
     VariableDeclaration(VariableDeclaration<'a>),
     FunctionDeclaration(FunctionDeclaration<'a>),
     ReturnStatement(Option<Expression<'a>>),
+    BreakStatement(Option<&'a str>),
+    ContinueStatement(Option<&'a str>),
+    LabeledStatement(LabeledStatement<'a>),
     EmptyStatement,
 }
 
@@ -29,6 +36,38 @@ pub struct ForStatement<'a> {
     pub init: Option<Box<Statement<'a>>>,
     pub test: Option<Expression<'a>>,
     pub update: Option<Expression<'a>>,
+    pub body: Box<Statement<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForInStatement<'a> {
+    pub left: Box<Statement<'a>>,
+    pub right: Expression<'a>,
+    pub body: Box<Statement<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ForOfStatement<'a> {
+    pub left: Box<Statement<'a>>,
+    pub right: Expression<'a>,
+    pub body: Box<Statement<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchStatement<'a> {
+    pub discriminant: Expression<'a>,
+    pub cases: Vec<SwitchCase<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCase<'a> {
+    pub test: Option<Expression<'a>>,
+    pub consequent: Vec<Statement<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LabeledStatement<'a> {
+    pub label: &'a str,
     pub body: Box<Statement<'a>>,
 }
 
@@ -64,8 +103,25 @@ pub struct ClassDeclaration<'a> {
 #[derive(Debug, Clone)]
 pub struct FunctionDeclaration<'a> {
     pub id: Option<&'a str>,
-    pub params: Vec<&'a str>,
+    pub params: Vec<Param<'a>>,
     pub body: BlockStatement<'a>,
+    pub is_generator: bool,
+}
+
+/// A function parameter (simple, rest, or default)
+#[derive(Debug, Clone)]
+pub enum Param<'a> {
+    Simple(&'a str),
+    Rest(&'a str),
+    Default(&'a str, Expression<'a>),
+}
+
+impl<'a> Param<'a> {
+    pub fn name(&self) -> &'a str {
+        match self {
+            Param::Simple(n) | Param::Rest(n) | Param::Default(n, _) => n,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +151,7 @@ pub enum Expression<'a> {
     UnaryExpression(Box<UnaryExpression<'a>>),
     AssignmentExpression(Box<AssignmentExpression<'a>>),
     ArrayExpression(Vec<Option<Expression<'a>>>),
-    ObjectExpression(Vec<(ObjectKey<'a>, Expression<'a>)>),
+    ObjectExpression(Vec<ObjectProperty<'a>>),
     MemberExpression(Box<MemberExpression<'a>>),
     CallExpression(Box<CallExpression<'a>>),
     NewExpression(Box<CallExpression<'a>>),
@@ -110,12 +166,36 @@ pub enum Expression<'a> {
         consequent: Box<Expression<'a>>,
         alternate: Box<Expression<'a>>,
     },
+    SpreadElement(Box<Expression<'a>>),
+    TemplateLiteral(Vec<TemplatePart<'a>>),
+    YieldExpression(Option<Box<Expression<'a>>>),
+    AwaitExpression(Box<Expression<'a>>),
+    TaggedTemplateExpression(Box<Expression<'a>>, Vec<TemplatePart<'a>>),
+}
+
+/// A part of a template literal: either a raw string or an interpolated expression
+#[derive(Debug, Clone)]
+pub enum TemplatePart<'a> {
+    String(&'a str),
+    Expr(Expression<'a>),
+}
+
+/// An object property (key-value, shorthand, method, spread, computed)
+#[derive(Debug, Clone)]
+pub struct ObjectProperty<'a> {
+    pub key: ObjectKey<'a>,
+    pub value: Expression<'a>,
+    pub shorthand: bool,
+    pub computed: bool,
+    pub method: bool,
 }
 
 #[derive(Debug, Clone)]
 pub enum ObjectKey<'a> {
     Identifier(&'a str),
     String(&'a str),
+    Computed(Box<Expression<'a>>),
+    Number(f64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -154,12 +234,14 @@ pub struct MemberExpression<'a> {
     pub object: Expression<'a>,
     pub property: Expression<'a>,
     pub computed: bool,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct CallExpression<'a> {
     pub callee: Expression<'a>,
     pub arguments: Vec<Expression<'a>>,
+    pub optional: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +259,7 @@ pub enum AssignmentOperator {
     MultiplyAssign,
     DivideAssign,
     PercentAssign,
+    PowerAssign,
     LogicAndAssign,
     LogicOrAssign,
     NullishAssign,
@@ -231,4 +314,7 @@ pub enum Literal<'a> {
     String(&'a str),
     Boolean(bool),
     Null,
+    Undefined,
+    BigInt(i64),
+    RegExp(&'a str, &'a str),
 }

@@ -710,3 +710,78 @@ fn interpreter_evaluates_unary_bitnot_on_string_number() {
     let result = eval_with_interpreter("~'5';");
     assert_eq!(result, JsValue::Number(-6.0));
 }
+
+#[test]
+fn interpreter_binds_this_for_member_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        let obj = {
+            value: 41,
+            inc() { return this.value + 1; }
+        };
+        obj.inc();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_constructs_instances_with_new() {
+    let result = eval_with_interpreter(
+        r#"
+        function Foo(value) {
+            this.value = value;
+        }
+        let foo = new Foo(42);
+        foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_new_returns_explicit_object() {
+    let result = eval_with_interpreter(
+        r#"
+        function Foo() {
+            this.value = 1;
+            return { value: 42 };
+        }
+        let foo = new Foo();
+        foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_new_ignores_primitive_return_value() {
+    let result = eval_with_interpreter(
+        r#"
+        function Foo() {
+            this.value = 42;
+            return 1;
+        }
+        let foo = new Foo();
+        foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_evaluates_instanceof_with_constructed_objects() {
+    let result = eval_with_interpreter(
+        r#"
+        function Foo() {}
+        let foo = new Foo();
+        foo instanceof Foo;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
