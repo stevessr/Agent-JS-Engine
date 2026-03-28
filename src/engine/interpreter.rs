@@ -1,6 +1,6 @@
 use crate::engine::env::Environment;
 use crate::engine::value::{
-    get_object_property, has_object_property, object_with_proto, FunctionValue, JsValue,
+    FunctionValue, JsValue, get_object_property, has_object_property, object_with_proto,
 };
 use crate::parser::ast::*;
 use std::cell::RefCell;
@@ -136,7 +136,9 @@ impl Interpreter {
     ) -> Result<JsValue, RuntimeError> {
         match object {
             JsValue::Object(values) => {
-                values.borrow_mut().insert(property_key.to_string(), value.clone());
+                values
+                    .borrow_mut()
+                    .insert(property_key.to_string(), value.clone());
                 Ok(value)
             }
             JsValue::Array(values) => {
@@ -180,14 +182,155 @@ impl Interpreter {
         func: &FunctionDeclaration,
         env: Rc<RefCell<Environment>>,
     ) -> JsValue {
+        self.create_function_value_with_meta(func, env, None, false, false)
+    }
+
+    fn create_function_value_with_meta(
+        &mut self,
+        func: &FunctionDeclaration,
+        env: Rc<RefCell<Environment>>,
+        super_binding: Option<JsValue>,
+        is_class_constructor: bool,
+        is_derived_constructor: bool,
+    ) -> JsValue {
         let id = self.functions.len();
         self.functions.push(clone_function_declaration(func));
         let prototype = object_with_proto(JsValue::Null);
+        let properties = crate::engine::value::new_object_map();
+        properties
+            .borrow_mut()
+            .insert("prototype".to_string(), prototype.clone());
         JsValue::Function(Rc::new(FunctionValue {
             id,
             env,
             prototype,
+            properties,
+            super_binding,
+            is_class_constructor,
+            is_derived_constructor,
         }))
+    }
+
+    fn build_class_value(
+        &mut self,
+        class_decl: &ClassDeclaration,
+        env: Rc<RefCell<Environment>>,
+    ) -> Result<JsValue, RuntimeError> {
+        let super_value = match &class_decl.super_class {
+            Some(expr) => Some(self.eval_expression(expr, Rc::clone(&env))?),
+            None => None,
+        };
+        let super_prototype = match &super_value {
+            Some(JsValue::Function(function)) => function.prototype.clone(),
+            Some(_) => {
+                return Err(RuntimeError::TypeError(
+                    "class extends value is not a constructor".into(),
+                ));
+            }
+            None => JsValue::Null,
+        };
+
+        let constructor_decl = class_decl
+            .body
+            .iter()
+            .find_map(|element| match element {
+                ClassElement::Constructor {
+                    function: func,
+                    is_default: _,
+                } => Some(func.clone()),
+                _ => None,
+            })
+            .unwrap_or(FunctionDeclaration {
+                id: class_decl.id,
+                params: vec![],
+                body: BlockStatement { body: vec![] },
+                is_generator: false,
+            });
+
+        let class_value = self.create_function_value_with_meta(
+            &constructor_decl,
+            Rc::clone(&env),
+            super_value.clone(),
+            true,
+            class_decl.super_class.is_some(),
+        );
+        let JsValue::Function(function) = &class_value else {
+            unreachable!();
+        };
+
+        if let JsValue::Object(proto_map) = &function.prototype {
+            proto_map
+                .borrow_mut()
+                .insert("__proto__".to_string(), super_prototype.clone());
+            proto_map
+                .borrow_mut()
+                .insert("constructor".to_string(), class_value.clone());
+        }
+        function.properties.borrow_mut().insert(
+            "__proto__".to_string(),
+            super_value.clone().unwrap_or(JsValue::Null),
+        );
+
+        for element in &class_decl.body {
+            match element {
+                ClassElement::Method {
+                    key,
+                    value,
+                    is_static,
+                } => {
+                    let method_key = match key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                            (*name).to_string()
+                        }
+                        ObjectKey::Number(n) => n.to_string(),
+                        ObjectKey::Computed(expr) => {
+                            self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                        }
+                    };
+                    let method_value = self.create_function_value_with_meta(
+                        value,
+                        Rc::clone(&env),
+                        Some(super_prototype.clone()),
+                        false,
+                        false,
+                    );
+                    if *is_static {
+                        function
+                            .properties
+                            .borrow_mut()
+                            .insert(method_key, method_value);
+                    } else if let JsValue::Object(proto_map) = &function.prototype {
+                        proto_map.borrow_mut().insert(method_key, method_value);
+                    }
+                }
+                ClassElement::Field {
+                    key,
+                    initializer,
+                    is_static,
+                } if *is_static => {
+                    let field_key = match key {
+                        ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                            (*name).to_string()
+                        }
+                        ObjectKey::Number(n) => n.to_string(),
+                        ObjectKey::Computed(expr) => {
+                            self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                        }
+                    };
+                    let field_value = match initializer {
+                        Some(expr) => self.eval_expression(expr, Rc::clone(&env))?,
+                        None => JsValue::Undefined,
+                    };
+                    function
+                        .properties
+                        .borrow_mut()
+                        .insert(field_key, field_value);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(class_value)
     }
 
     fn call_function_value(
@@ -201,10 +344,25 @@ impl Interpreter {
             .get(function.id)
             .cloned()
             .ok_or_else(|| RuntimeError::TypeError("function body missing".into()))?;
-        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&function.env)))));
+        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(
+            &function.env,
+        )))));
+        let initial_this = if function.is_derived_constructor {
+            JsValue::Undefined
+        } else {
+            this_value.clone()
+        };
         call_env
             .borrow_mut()
-            .define("this".to_string(), this_value);
+            .define("this".to_string(), initial_this);
+        call_env
+            .borrow_mut()
+            .define("__constructor_this__".to_string(), this_value.clone());
+        if let Some(super_binding) = &function.super_binding {
+            call_env
+                .borrow_mut()
+                .define("super".to_string(), super_binding.clone());
+        }
 
         let mut arg_index = 0;
         for param in &declaration.params {
@@ -235,11 +393,27 @@ impl Interpreter {
             }
         }
 
-        match self.eval_statement(&Statement::BlockStatement(declaration.body.clone()), call_env) {
+        let result = match self.eval_statement(
+            &Statement::BlockStatement(declaration.body.clone()),
+            Rc::clone(&call_env),
+        ) {
             Ok(value) => Ok(value),
             Err(RuntimeError::Return(value)) => Ok(value),
             Err(error) => Err(error),
+        }?;
+
+        if function.is_derived_constructor
+            && matches!(
+                call_env.borrow().get("this"),
+                Some(JsValue::Undefined) | None
+            )
+        {
+            return Err(RuntimeError::TypeError(
+                "derived constructor must call super() before accessing this".into(),
+            ));
         }
+
+        Ok(result)
     }
 
     pub fn eval_program(&mut self, program: &Program) -> Result<JsValue, RuntimeError> {
@@ -365,7 +539,9 @@ impl Interpreter {
                     self.check_timeout()?;
                     let iter_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
                     if let Some(name) = &binding_name {
-                        iter_env.borrow_mut().define(name.clone(), JsValue::String(key));
+                        iter_env
+                            .borrow_mut()
+                            .define(name.clone(), JsValue::String(key));
                     }
                     match self.eval_statement(&for_in.body, Rc::clone(&iter_env)) {
                         Ok(val) => last_val = val,
@@ -380,7 +556,9 @@ impl Interpreter {
                 let right = self.eval_expression(&for_of.right, Rc::clone(&env))?;
                 let items: Vec<JsValue> = match &right {
                     JsValue::Array(arr) => arr.borrow().clone(),
-                    JsValue::String(s) => s.chars().map(|c| JsValue::String(c.to_string())).collect(),
+                    JsValue::String(s) => {
+                        s.chars().map(|c| JsValue::String(c.to_string())).collect()
+                    }
                     _ => vec![],
                 };
                 let binding_name = extract_for_binding(&for_of.left);
@@ -464,10 +642,13 @@ impl Interpreter {
             }
             Statement::LabeledStatement(labeled) => {
                 match self.eval_statement(&labeled.body, Rc::clone(&env)) {
-                    Err(RuntimeError::Break(Some(ref l))) if l == labeled.label => Ok(JsValue::Undefined),
+                    Err(RuntimeError::Break(Some(ref l))) if l == labeled.label => {
+                        Ok(JsValue::Undefined)
+                    }
                     other => other,
                 }
-            }            Statement::TryStatement(try_stmt) => {
+            }
+            Statement::TryStatement(try_stmt) => {
                 let res = self.eval_statement(
                     &Statement::BlockStatement(try_stmt.block.clone()),
                     Rc::clone(&env),
@@ -519,6 +700,13 @@ impl Interpreter {
                 }
                 Ok(JsValue::Undefined)
             }
+            Statement::ClassDeclaration(class_decl) => {
+                let class_value = self.build_class_value(class_decl, Rc::clone(&env))?;
+                if let Some(name) = class_decl.id {
+                    env.borrow_mut().define(name.to_string(), class_value);
+                }
+                Ok(JsValue::Undefined)
+            }
             Statement::ReturnStatement(expr) => {
                 let val = if let Some(e) = expr {
                     self.eval_expression(e, env)?
@@ -548,7 +736,9 @@ impl Interpreter {
                 Literal::Null => Ok(JsValue::Null),
                 Literal::Undefined => Ok(JsValue::Undefined),
                 Literal::BigInt(n) => Ok(JsValue::Number(*n as f64)),
-                Literal::RegExp(_, _) => Ok(JsValue::Object(Rc::new(RefCell::new(std::collections::HashMap::new())))),
+                Literal::RegExp(_, _) => Ok(JsValue::Object(Rc::new(RefCell::new(
+                    std::collections::HashMap::new(),
+                )))),
             },
             Expression::Identifier(name) => {
                 match *name {
@@ -560,81 +750,76 @@ impl Interpreter {
                 }
                 Ok(env.borrow().get(name).unwrap_or(JsValue::Undefined))
             }
-            Expression::AssignmentExpression(assign) => {
-                match &assign.left {
-                    Expression::Identifier(name) => {
-                        let current = env.borrow().get(name).unwrap_or(JsValue::Undefined);
-                        let should_assign = match assign.operator {
-                            AssignmentOperator::LogicAndAssign => current.is_truthy(),
-                            AssignmentOperator::LogicOrAssign => !current.is_truthy(),
-                            AssignmentOperator::NullishAssign => {
-                                matches!(current, JsValue::Undefined | JsValue::Null)
-                            }
-                            _ => true,
-                        };
-
-                        if !should_assign {
-                            return Ok(current);
+            Expression::AssignmentExpression(assign) => match &assign.left {
+                Expression::Identifier(name) => {
+                    let current = env.borrow().get(name).unwrap_or(JsValue::Undefined);
+                    let should_assign = match assign.operator {
+                        AssignmentOperator::LogicAndAssign => current.is_truthy(),
+                        AssignmentOperator::LogicOrAssign => !current.is_truthy(),
+                        AssignmentOperator::NullishAssign => {
+                            matches!(current, JsValue::Undefined | JsValue::Null)
                         }
+                        _ => true,
+                    };
 
-                        let right = self.eval_expression(&assign.right, Rc::clone(&env))?;
-                        let value = self.assignment_result(&assign.operator, &current, &right)?;
-                        if env.borrow_mut().set(name, value.clone()).is_err() {
-                            env.borrow_mut().define(name.to_string(), value.clone());
-                        }
-                        Ok(value)
+                    if !should_assign {
+                        return Ok(current);
                     }
-                    Expression::MemberExpression(mem) => {
-                        let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
-                        let property_key = self.member_property_key(mem, Rc::clone(&env))?;
-                        let current = match &object {
-                            JsValue::Object(values) => values
-                                .borrow()
-                                .get(&property_key)
-                                .cloned()
-                                .unwrap_or(JsValue::Undefined),
-                            JsValue::Array(values) => {
-                                let values = values.borrow();
-                                if property_key == "length" {
-                                    JsValue::Number(values.len() as f64)
-                                } else {
-                                    match property_key.parse::<usize>() {
-                                        Ok(index) => values
-                                            .get(index)
-                                            .cloned()
-                                            .unwrap_or(JsValue::Undefined),
-                                        Err(_) => {
-                                            return Err(RuntimeError::TypeError(
-                                                "array assignment requires a non-negative integer index"
-                                                    .into(),
-                                            ))
-                                        }
+
+                    let right = self.eval_expression(&assign.right, Rc::clone(&env))?;
+                    let value = self.assignment_result(&assign.operator, &current, &right)?;
+                    if env.borrow_mut().set(name, value.clone()).is_err() {
+                        env.borrow_mut().define(name.to_string(), value.clone());
+                    }
+                    Ok(value)
+                }
+                Expression::MemberExpression(mem) => {
+                    let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                    let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                    let current = match &object {
+                        JsValue::Object(values) => values
+                            .borrow()
+                            .get(&property_key)
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined),
+                        JsValue::Array(values) => {
+                            let values = values.borrow();
+                            if property_key == "length" {
+                                JsValue::Number(values.len() as f64)
+                            } else {
+                                match property_key.parse::<usize>() {
+                                    Ok(index) => {
+                                        values.get(index).cloned().unwrap_or(JsValue::Undefined)
                                     }
+                                    Err(_) => return Err(RuntimeError::TypeError(
+                                        "array assignment requires a non-negative integer index"
+                                            .into(),
+                                    )),
                                 }
                             }
-                            _ => return Err(RuntimeError::TypeError("value is not an object".into())),
-                        };
-
-                        let should_assign = match assign.operator {
-                            AssignmentOperator::LogicAndAssign => current.is_truthy(),
-                            AssignmentOperator::LogicOrAssign => !current.is_truthy(),
-                            AssignmentOperator::NullishAssign => {
-                                matches!(current, JsValue::Undefined | JsValue::Null)
-                            }
-                            _ => true,
-                        };
-
-                        if !should_assign {
-                            return Ok(current);
                         }
+                        _ => return Err(RuntimeError::TypeError("value is not an object".into())),
+                    };
 
-                        let right = self.eval_expression(&assign.right, env)?;
-                        let value = self.assignment_result(&assign.operator, &current, &right)?;
-                        self.write_member_value(object, &property_key, value)
+                    let should_assign = match assign.operator {
+                        AssignmentOperator::LogicAndAssign => current.is_truthy(),
+                        AssignmentOperator::LogicOrAssign => !current.is_truthy(),
+                        AssignmentOperator::NullishAssign => {
+                            matches!(current, JsValue::Undefined | JsValue::Null)
+                        }
+                        _ => true,
+                    };
+
+                    if !should_assign {
+                        return Ok(current);
                     }
-                    _ => Ok(JsValue::Undefined),
+
+                    let right = self.eval_expression(&assign.right, env)?;
+                    let value = self.assignment_result(&assign.operator, &current, &right)?;
+                    self.write_member_value(object, &property_key, value)
                 }
-            }
+                _ => Ok(JsValue::Undefined),
+            },
             Expression::BinaryExpression(bin) => {
                 let left = self.eval_expression(&bin.left, Rc::clone(&env))?;
                 // Short-circuiting Logic Operators
@@ -698,7 +883,9 @@ impl Interpreter {
                     BinaryOperator::LessEq => left.le(&right),
                     BinaryOperator::Greater => left.gt(&right),
                     BinaryOperator::GreaterEq => left.ge(&right),
-                    BinaryOperator::Power => Ok(JsValue::Number(left.as_number().powf(right.as_number()))),
+                    BinaryOperator::Power => {
+                        Ok(JsValue::Number(left.as_number().powf(right.as_number())))
+                    }
                     BinaryOperator::Instanceof => match (&left, &right) {
                         (JsValue::Object(object), JsValue::Function(function)) => {
                             let prototype = function.prototype.clone();
@@ -708,7 +895,9 @@ impl Interpreter {
                                     return Ok(JsValue::Boolean(true));
                                 }
                                 current = match value {
-                                    JsValue::Object(proto) => proto.borrow().get("__proto__").cloned(),
+                                    JsValue::Object(proto) => {
+                                        proto.borrow().get("__proto__").cloned()
+                                    }
                                     _ => None,
                                 };
                             }
@@ -719,7 +908,9 @@ impl Interpreter {
                     BinaryOperator::In => {
                         let key = left.as_string();
                         match &right {
-                            JsValue::Object(map) => Ok(JsValue::Boolean(has_object_property(map, &key))),
+                            JsValue::Object(map) => {
+                                Ok(JsValue::Boolean(has_object_property(map, &key)))
+                            }
                             JsValue::Array(arr) => {
                                 if let Ok(idx) = key.parse::<usize>() {
                                     Ok(JsValue::Boolean(idx < arr.borrow().len()))
@@ -727,7 +918,9 @@ impl Interpreter {
                                     Ok(JsValue::Boolean(false))
                                 }
                             }
-                            _ => Err(RuntimeError::TypeError("right-hand side of 'in' is not an object".into())),
+                            _ => Err(RuntimeError::TypeError(
+                                "right-hand side of 'in' is not an object".into(),
+                            )),
                         }
                     }
                     _ => Ok(JsValue::Undefined),
@@ -739,9 +932,7 @@ impl Interpreter {
                     UnaryOperator::Minus => Ok(JsValue::Number(-arg.as_number())),
                     UnaryOperator::Plus => Ok(JsValue::Number(arg.as_number())),
                     UnaryOperator::LogicNot => Ok(JsValue::Boolean(!arg.is_truthy())),
-                    UnaryOperator::BitNot => {
-                        Ok(JsValue::Number((!self.to_int32(&arg)) as f64))
-                    }
+                    UnaryOperator::BitNot => Ok(JsValue::Number((!self.to_int32(&arg)) as f64)),
                     UnaryOperator::Typeof => Ok(JsValue::String(arg.type_of())),
                     UnaryOperator::Void => Ok(JsValue::Undefined),
                     UnaryOperator::Delete => Ok(JsValue::Boolean(true)), // Stub for now
@@ -770,9 +961,13 @@ impl Interpreter {
                     if prop.method {
                         // method shorthand: treat as function value
                         let key = match &prop.key {
-                            ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
+                            ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                                (*name).to_string()
+                            }
                             ObjectKey::Number(n) => n.to_string(),
-                            ObjectKey::Computed(expr) => self.eval_expression(expr, Rc::clone(&env))?.as_string(),
+                            ObjectKey::Computed(expr) => {
+                                self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                            }
                         };
                         let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
                         values.insert(key, val);
@@ -786,9 +981,13 @@ impl Interpreter {
                         }
                     } else {
                         let key = match &prop.key {
-                            ObjectKey::Identifier(name) | ObjectKey::String(name) => (*name).to_string(),
+                            ObjectKey::Identifier(name) | ObjectKey::String(name) => {
+                                (*name).to_string()
+                            }
                             ObjectKey::Number(n) => n.to_string(),
-                            ObjectKey::Computed(expr) => self.eval_expression(expr, Rc::clone(&env))?.as_string(),
+                            ObjectKey::Computed(expr) => {
+                                self.eval_expression(expr, Rc::clone(&env))?.as_string()
+                            }
                         };
                         let val = self.eval_expression(&prop.value, Rc::clone(&env))?;
                         values.insert(key, val);
@@ -797,6 +996,20 @@ impl Interpreter {
                 Ok(JsValue::Object(Rc::new(RefCell::new(values))))
             }
             Expression::MemberExpression(mem) => {
+                if matches!(mem.object, Expression::SuperExpression) {
+                    let super_binding = env.borrow().get("super").unwrap_or(JsValue::Undefined);
+                    let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                    return match super_binding {
+                        JsValue::Object(values) => Ok(get_object_property(&values, &property_key)),
+                        JsValue::Function(function) => {
+                            Ok(function.prototype.get_property(&property_key))
+                        }
+                        _ => Err(RuntimeError::TypeError(
+                            "super is not available in this context".into(),
+                        )),
+                    };
+                }
+
                 let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
                 let property_key = self.member_property_key(mem, env)?;
 
@@ -808,33 +1021,48 @@ impl Interpreter {
                             return Ok(JsValue::Number(values.len() as f64));
                         }
                         match property_key.parse::<usize>() {
-                            Ok(index) => Ok(values.get(index).cloned().unwrap_or(JsValue::Undefined)),
+                            Ok(index) => {
+                                Ok(values.get(index).cloned().unwrap_or(JsValue::Undefined))
+                            }
                             Err(_) => Ok(JsValue::Undefined),
                         }
                     }
-                    JsValue::String(s) => {
-                        match property_key.as_str() {
-                            "length" => Ok(JsValue::Number(s.chars().count() as f64)),
-                            _ => {
-                                if let Ok(index) = property_key.parse::<usize>() {
-                                    Ok(s.chars().nth(index)
-                                        .map(|c| JsValue::String(c.to_string()))
-                                        .unwrap_or(JsValue::Undefined))
-                                } else {
-                                    Ok(JsValue::Undefined)
-                                }
+                    JsValue::String(s) => match property_key.as_str() {
+                        "length" => Ok(JsValue::Number(s.chars().count() as f64)),
+                        _ => {
+                            if let Ok(index) = property_key.parse::<usize>() {
+                                Ok(s.chars()
+                                    .nth(index)
+                                    .map(|c| JsValue::String(c.to_string()))
+                                    .unwrap_or(JsValue::Undefined))
+                            } else {
+                                Ok(JsValue::Undefined)
                             }
                         }
+                    },
+                    JsValue::Function(function) => {
+                        Ok(get_object_property(&function.properties, &property_key))
                     }
-                    JsValue::Function(function) => Ok(match property_key.as_str() {
-                        "prototype" => function.prototype.clone(),
-                        _ => JsValue::Undefined,
-                    }),
                     _ => Err(RuntimeError::TypeError("value is not an object".into())),
                 }
             }
             Expression::CallExpression(call) => {
                 let (callee, this_value) = match &call.callee {
+                    Expression::MemberExpression(mem)
+                        if matches!(mem.object, Expression::SuperExpression) =>
+                    {
+                        let this_value = env.borrow().get("this").unwrap_or(JsValue::Undefined);
+                        let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                        let super_binding = env.borrow().get("super").unwrap_or(JsValue::Undefined);
+                        let callee = match &super_binding {
+                            JsValue::Object(values) => get_object_property(values, &property_key),
+                            JsValue::Function(function) => {
+                                function.prototype.get_property(&property_key)
+                            }
+                            _ => JsValue::Undefined,
+                        };
+                        (callee, this_value)
+                    }
                     Expression::MemberExpression(mem) => {
                         let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
                         let property_key = self.member_property_key(mem, Rc::clone(&env))?;
@@ -843,6 +1071,20 @@ impl Interpreter {
                             _ => object.get_property(&property_key),
                         };
                         (callee, object)
+                    }
+                    Expression::SuperExpression => {
+                        let super_binding = env.borrow().get("super").unwrap_or(JsValue::Undefined);
+                        if matches!(super_binding, JsValue::Undefined) {
+                            return Err(RuntimeError::TypeError(
+                                "super is not available in this context".into(),
+                            ));
+                        }
+                        let this_value = env
+                            .borrow()
+                            .get("__constructor_this__")
+                            .or_else(|| env.borrow().get("this"))
+                            .unwrap_or(JsValue::Undefined);
+                        (super_binding, this_value)
                     }
                     _ => (
                         self.eval_expression(&call.callee, Rc::clone(&env))?,
@@ -864,47 +1106,100 @@ impl Interpreter {
                 }
 
                 match callee {
-                    JsValue::Function(function) => self.call_function_value(function, this_value, args),
+                    JsValue::Function(function) => {
+                        let result =
+                            self.call_function_value(function, this_value.clone(), args)?;
+                        if matches!(call.callee, Expression::SuperExpression) {
+                            let initialized_this = match result {
+                                JsValue::Object(_) => result.clone(),
+                                _ => this_value,
+                            };
+                            let _ = env.borrow_mut().set("this", initialized_this);
+                        }
+                        Ok(result)
+                    }
                     _ => Err(RuntimeError::TypeError("value is not callable".into())),
                 }
             }
-            Expression::UpdateExpression(update) => {
-                match &update.argument {
-                    Expression::Identifier(name) => {
-                        let current_val = env.borrow().get(name).unwrap_or(JsValue::Undefined).as_number();
-                        let new_val = if update.operator == UpdateOperator::PlusPlus { current_val + 1.0 } else { current_val - 1.0 };
-                        env.borrow_mut().set(name, JsValue::Number(new_val)).ok();
-                        if update.prefix { Ok(JsValue::Number(new_val)) } else { Ok(JsValue::Number(current_val)) }
+            Expression::UpdateExpression(update) => match &update.argument {
+                Expression::Identifier(name) => {
+                    let current_val = env
+                        .borrow()
+                        .get(name)
+                        .unwrap_or(JsValue::Undefined)
+                        .as_number();
+                    let new_val = if update.operator == UpdateOperator::PlusPlus {
+                        current_val + 1.0
+                    } else {
+                        current_val - 1.0
+                    };
+                    env.borrow_mut().set(name, JsValue::Number(new_val)).ok();
+                    if update.prefix {
+                        Ok(JsValue::Number(new_val))
+                    } else {
+                        Ok(JsValue::Number(current_val))
                     }
-                    Expression::MemberExpression(mem) => {
-                        let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
-                        let property_key = if mem.computed {
-                            self.eval_expression(&mem.property, Rc::clone(&env))?.as_string()
-                        } else if let Expression::Identifier(name) = &mem.property {
-                            name.to_string()
-                        } else {
-                            return Ok(JsValue::Undefined);
-                        };
-                        let current_val = match &object {
-                            JsValue::Object(map) => map.borrow().get(&property_key).cloned().unwrap_or(JsValue::Undefined).as_number(),
-                            JsValue::Array(arr) => arr.borrow().get(property_key.parse::<usize>().unwrap_or(usize::MAX)).cloned().unwrap_or(JsValue::Undefined).as_number(),
-                            _ => f64::NAN,
-                        };
-                        let new_val = if update.operator == UpdateOperator::PlusPlus { current_val + 1.0 } else { current_val - 1.0 };
-                        self.write_member_value(object, &property_key, JsValue::Number(new_val))?;
-                        if update.prefix { Ok(JsValue::Number(new_val)) } else { Ok(JsValue::Number(current_val)) }
-                    }
-                    _ => Ok(JsValue::Undefined),
                 }
-            }
+                Expression::MemberExpression(mem) => {
+                    let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                    let property_key = if mem.computed {
+                        self.eval_expression(&mem.property, Rc::clone(&env))?
+                            .as_string()
+                    } else if let Expression::Identifier(name) = &mem.property {
+                        name.to_string()
+                    } else {
+                        return Ok(JsValue::Undefined);
+                    };
+                    let current_val = match &object {
+                        JsValue::Object(map) => map
+                            .borrow()
+                            .get(&property_key)
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined)
+                            .as_number(),
+                        JsValue::Array(arr) => arr
+                            .borrow()
+                            .get(property_key.parse::<usize>().unwrap_or(usize::MAX))
+                            .cloned()
+                            .unwrap_or(JsValue::Undefined)
+                            .as_number(),
+                        _ => f64::NAN,
+                    };
+                    let new_val = if update.operator == UpdateOperator::PlusPlus {
+                        current_val + 1.0
+                    } else {
+                        current_val - 1.0
+                    };
+                    self.write_member_value(object, &property_key, JsValue::Number(new_val))?;
+                    if update.prefix {
+                        Ok(JsValue::Number(new_val))
+                    } else {
+                        Ok(JsValue::Number(current_val))
+                    }
+                }
+                _ => Ok(JsValue::Undefined),
+            },
             Expression::ArrowFunctionExpression(func) => {
                 Ok(self.create_function_value(func, Rc::clone(&env)))
             }
-            Expression::ClassExpression(_) => Ok(JsValue::Undefined),
+            Expression::ClassExpression(class_decl) => {
+                self.build_class_value(class_decl, Rc::clone(&env))
+            }
+            Expression::SuperExpression => {
+                Ok(env.borrow().get("super").unwrap_or(JsValue::Undefined))
+            }
             Expression::FunctionExpression(func) => {
                 Ok(self.create_function_value(func, Rc::clone(&env)))
             }
-            Expression::ThisExpression => Ok(env.borrow().get("this").unwrap_or(JsValue::Undefined)),
+            Expression::ThisExpression => {
+                let this_value = env.borrow().get("this").unwrap_or(JsValue::Undefined);
+                if matches!(this_value, JsValue::Undefined) && env.borrow().get("super").is_some() {
+                    return Err(RuntimeError::TypeError(
+                        "derived constructor must call super() before accessing this".into(),
+                    ));
+                }
+                Ok(this_value)
+            }
             Expression::SequenceExpression(seq) => {
                 let mut res = JsValue::Undefined;
                 for expr in seq {
@@ -943,7 +1238,8 @@ impl Interpreter {
                 match callee {
                     JsValue::Function(function) => {
                         let instance = object_with_proto(function.prototype.clone());
-                        let result = self.call_function_value(Rc::clone(&function), instance.clone(), args)?;
+                        let result =
+                            self.call_function_value(Rc::clone(&function), instance.clone(), args)?;
                         match result {
                             JsValue::Object(_) => Ok(result),
                             _ => Ok(instance),
@@ -951,7 +1247,7 @@ impl Interpreter {
                     }
                     _ => Err(RuntimeError::TypeError("value is not a constructor".into())),
                 }
-            },
+            }
             Expression::SpreadElement(expr) => self.eval_expression(expr, env),
             Expression::TemplateLiteral(parts) => {
                 let mut result = String::new();
@@ -986,17 +1282,23 @@ impl Interpreter {
                 call_args.extend(values);
                 match tag_val {
                     JsValue::Function(function) => {
-                        let declaration = self
-                            .functions
-                            .get(function.id)
-                            .cloned()
-                            .ok_or_else(|| RuntimeError::TypeError("tag function body missing".into()))?;
-                        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&function.env)))));
+                        let declaration =
+                            self.functions.get(function.id).cloned().ok_or_else(|| {
+                                RuntimeError::TypeError("tag function body missing".into())
+                            })?;
+                        let call_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(
+                            &function.env,
+                        )))));
                         for (i, param) in declaration.params.iter().enumerate() {
                             let value = call_args.get(i).cloned().unwrap_or(JsValue::Undefined);
-                            call_env.borrow_mut().define(param.name().to_string(), value);
+                            call_env
+                                .borrow_mut()
+                                .define(param.name().to_string(), value);
                         }
-                        match self.eval_statement(&Statement::BlockStatement(declaration.body.clone()), call_env) {
+                        match self.eval_statement(
+                            &Statement::BlockStatement(declaration.body.clone()),
+                            call_env,
+                        ) {
                             Ok(v) => Ok(v),
                             Err(RuntimeError::Return(v)) => Ok(v),
                             Err(e) => Err(e),
@@ -1027,7 +1329,9 @@ fn clone_param(param: &Param<'_>) -> Param<'static> {
     match param {
         Param::Simple(name) => Param::Simple(String::leak(name.to_string())),
         Param::Rest(name) => Param::Rest(String::leak(name.to_string())),
-        Param::Default(name, expr) => Param::Default(String::leak(name.to_string()), clone_expression(expr)),
+        Param::Default(name, expr) => {
+            Param::Default(String::leak(name.to_string()), clone_expression(expr))
+        }
     }
 }
 
@@ -1039,19 +1343,27 @@ fn clone_block_statement(block: &BlockStatement<'_>) -> BlockStatement<'static> 
 
 fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
     match stmt {
-        Statement::ExpressionStatement(expr) => Statement::ExpressionStatement(clone_expression(expr)),
+        Statement::ExpressionStatement(expr) => {
+            Statement::ExpressionStatement(clone_expression(expr))
+        }
         Statement::BlockStatement(block) => Statement::BlockStatement(clone_block_statement(block)),
         Statement::IfStatement(stmt) => Statement::IfStatement(IfStatement {
             test: clone_expression(&stmt.test),
             consequent: Box::new(clone_statement(&stmt.consequent)),
-            alternate: stmt.alternate.as_ref().map(|alt| Box::new(clone_statement(alt))),
+            alternate: stmt
+                .alternate
+                .as_ref()
+                .map(|alt| Box::new(clone_statement(alt))),
         }),
         Statement::WhileStatement(stmt) => Statement::WhileStatement(WhileStatement {
             test: clone_expression(&stmt.test),
             body: Box::new(clone_statement(&stmt.body)),
         }),
         Statement::ForStatement(stmt) => Statement::ForStatement(ForStatement {
-            init: stmt.init.as_ref().map(|init| Box::new(clone_statement(init))),
+            init: stmt
+                .init
+                .as_ref()
+                .map(|init| Box::new(clone_statement(init))),
             test: stmt.test.as_ref().map(clone_expression),
             update: stmt.update.as_ref().map(clone_expression),
             body: Box::new(clone_statement(&stmt.body)),
@@ -1071,19 +1383,91 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
             finalizer: stmt.finalizer.as_ref().map(clone_block_statement),
         }),
         Statement::ThrowStatement(expr) => Statement::ThrowStatement(clone_expression(expr)),
-        Statement::VariableDeclaration(decl) => Statement::VariableDeclaration(VariableDeclaration {
-            kind: decl.kind.clone(),
-            declarations: decl
-                .declarations
-                .iter()
-                .map(|decl| VariableDeclarator {
-                    id: String::leak(decl.id.to_string()),
-                    init: decl.init.as_ref().map(clone_expression),
-                })
-                .collect(),
-        }),
+        Statement::VariableDeclaration(decl) => {
+            Statement::VariableDeclaration(VariableDeclaration {
+                kind: decl.kind.clone(),
+                declarations: decl
+                    .declarations
+                    .iter()
+                    .map(|decl| VariableDeclarator {
+                        id: String::leak(decl.id.to_string()),
+                        init: decl.init.as_ref().map(clone_expression),
+                    })
+                    .collect(),
+            })
+        }
         Statement::FunctionDeclaration(func) => {
             Statement::FunctionDeclaration(clone_function_declaration(func))
+        }
+        Statement::ClassDeclaration(class_decl) => {
+            let id = class_decl
+                .id
+                .map(|value| String::leak(value.to_string()) as &'static str);
+            let super_class = class_decl.super_class.as_ref().map(clone_expression);
+            let body = class_decl
+                .body
+                .iter()
+                .map(|element| match element {
+                    ClassElement::Constructor {
+                        function: func,
+                        is_default,
+                    } => ClassElement::Constructor {
+                        function: clone_function_declaration(func),
+                        is_default: *is_default,
+                    },
+                    ClassElement::Method {
+                        key,
+                        value,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Method {
+                            key,
+                            value: clone_function_declaration(value),
+                            is_static: *is_static,
+                        }
+                    }
+                    ClassElement::Field {
+                        key,
+                        initializer,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Field {
+                            key,
+                            initializer: initializer.as_ref().map(clone_expression),
+                            is_static: *is_static,
+                        }
+                    }
+                })
+                .collect();
+            Statement::ClassDeclaration(ClassDeclaration {
+                id,
+                super_class,
+                body,
+            })
         }
         Statement::ReturnStatement(expr) => {
             Statement::ReturnStatement(expr.as_ref().map(clone_expression))
@@ -1105,19 +1489,28 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
         }),
         Statement::SwitchStatement(stmt) => Statement::SwitchStatement(SwitchStatement {
             discriminant: clone_expression(&stmt.discriminant),
-            cases: stmt.cases.iter().map(|case| SwitchCase {
-                test: case.test.as_ref().map(clone_expression),
-                consequent: case.consequent.iter().map(clone_statement).collect(),
-            }).collect(),
+            cases: stmt
+                .cases
+                .iter()
+                .map(|case| SwitchCase {
+                    test: case.test.as_ref().map(clone_expression),
+                    consequent: case.consequent.iter().map(clone_statement).collect(),
+                })
+                .collect(),
         }),
-        Statement::BreakStatement(label) => Statement::BreakStatement(
-            label.map(|s| { let l: &'static mut str = String::leak(s.to_string()); l as &'static str })
-        ),
-        Statement::ContinueStatement(label) => Statement::ContinueStatement(
-            label.map(|s| { let l: &'static mut str = String::leak(s.to_string()); l as &'static str })
-        ),
+        Statement::BreakStatement(label) => Statement::BreakStatement(label.map(|s| {
+            let l: &'static mut str = String::leak(s.to_string());
+            l as &'static str
+        })),
+        Statement::ContinueStatement(label) => Statement::ContinueStatement(label.map(|s| {
+            let l: &'static mut str = String::leak(s.to_string());
+            l as &'static str
+        })),
         Statement::LabeledStatement(stmt) => Statement::LabeledStatement(LabeledStatement {
-            label: { let l: &'static mut str = String::leak(stmt.label.to_string()); l as &'static str },
+            label: {
+                let l: &'static mut str = String::leak(stmt.label.to_string());
+                l as &'static str
+            },
             body: Box::new(clone_statement(&stmt.body)),
         }),
     }
@@ -1133,32 +1526,42 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
         Expression::Literal(Literal::Null) => Expression::Literal(Literal::Null),
         Expression::Literal(Literal::Undefined) => Expression::Literal(Literal::Undefined),
         Expression::Literal(Literal::BigInt(n)) => Expression::Literal(Literal::BigInt(*n)),
-        Expression::Literal(Literal::RegExp(pattern, flags)) => Expression::Literal(Literal::RegExp(
-            String::leak((*pattern).to_string()),
-            String::leak((*flags).to_string()),
-        )),
+        Expression::Literal(Literal::RegExp(pattern, flags)) => {
+            Expression::Literal(Literal::RegExp(
+                String::leak((*pattern).to_string()),
+                String::leak((*flags).to_string()),
+            ))
+        }
         Expression::Identifier(name) => Expression::Identifier(String::leak((*name).to_string())),
-        Expression::BinaryExpression(expr) => Expression::BinaryExpression(Box::new(BinaryExpression {
-            operator: expr.operator.clone(),
-            left: clone_expression(&expr.left),
-            right: clone_expression(&expr.right),
-        })),
-        Expression::UnaryExpression(expr) => Expression::UnaryExpression(Box::new(UnaryExpression {
-            operator: expr.operator.clone(),
-            argument: clone_expression(&expr.argument),
-            prefix: expr.prefix,
-        })),
-        Expression::AssignmentExpression(expr) => Expression::AssignmentExpression(Box::new(AssignmentExpression {
-            operator: expr.operator.clone(),
-            left: clone_expression(&expr.left),
-            right: clone_expression(&expr.right),
-        })),
-        Expression::MemberExpression(expr) => Expression::MemberExpression(Box::new(MemberExpression {
-            object: clone_expression(&expr.object),
-            property: clone_expression(&expr.property),
-            computed: expr.computed,
-            optional: expr.optional,
-        })),
+        Expression::BinaryExpression(expr) => {
+            Expression::BinaryExpression(Box::new(BinaryExpression {
+                operator: expr.operator.clone(),
+                left: clone_expression(&expr.left),
+                right: clone_expression(&expr.right),
+            }))
+        }
+        Expression::UnaryExpression(expr) => {
+            Expression::UnaryExpression(Box::new(UnaryExpression {
+                operator: expr.operator.clone(),
+                argument: clone_expression(&expr.argument),
+                prefix: expr.prefix,
+            }))
+        }
+        Expression::AssignmentExpression(expr) => {
+            Expression::AssignmentExpression(Box::new(AssignmentExpression {
+                operator: expr.operator.clone(),
+                left: clone_expression(&expr.left),
+                right: clone_expression(&expr.right),
+            }))
+        }
+        Expression::MemberExpression(expr) => {
+            Expression::MemberExpression(Box::new(MemberExpression {
+                object: clone_expression(&expr.object),
+                property: clone_expression(&expr.property),
+                computed: expr.computed,
+                optional: expr.optional,
+            }))
+        }
         Expression::CallExpression(expr) => Expression::CallExpression(Box::new(CallExpression {
             callee: clone_expression(&expr.callee),
             arguments: expr.arguments.iter().map(clone_expression).collect(),
@@ -1175,64 +1578,157 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
         Expression::ArrowFunctionExpression(func) => {
             Expression::ArrowFunctionExpression(Box::new(clone_function_declaration(func)))
         }
-        Expression::UpdateExpression(expr) => Expression::UpdateExpression(Box::new(UpdateExpression {
-            operator: expr.operator.clone(),
-            argument: clone_expression(&expr.argument),
-            prefix: expr.prefix,
-        })),
+        Expression::UpdateExpression(expr) => {
+            Expression::UpdateExpression(Box::new(UpdateExpression {
+                operator: expr.operator.clone(),
+                argument: clone_expression(&expr.argument),
+                prefix: expr.prefix,
+            }))
+        }
         Expression::SequenceExpression(seq) => {
             Expression::SequenceExpression(seq.iter().map(clone_expression).collect())
         }
-        Expression::ConditionalExpression { test, consequent, alternate } => {
-            Expression::ConditionalExpression {
-                test: Box::new(clone_expression(test)),
-                consequent: Box::new(clone_expression(consequent)),
-                alternate: Box::new(clone_expression(alternate)),
-            }
-        }
-        Expression::ArrayExpression(values) => {
-            Expression::ArrayExpression(values.iter().map(|value| value.as_ref().map(clone_expression)).collect())
-        }
+        Expression::ConditionalExpression {
+            test,
+            consequent,
+            alternate,
+        } => Expression::ConditionalExpression {
+            test: Box::new(clone_expression(test)),
+            consequent: Box::new(clone_expression(consequent)),
+            alternate: Box::new(clone_expression(alternate)),
+        },
+        Expression::ArrayExpression(values) => Expression::ArrayExpression(
+            values
+                .iter()
+                .map(|value| value.as_ref().map(clone_expression))
+                .collect(),
+        ),
         Expression::ObjectExpression(props) => Expression::ObjectExpression(
-            props.iter().map(|prop| {
-                let key = match &prop.key {
-                    ObjectKey::Identifier(name) => ObjectKey::Identifier(String::leak((*name).to_string())),
-                    ObjectKey::String(name) => ObjectKey::String(String::leak((*name).to_string())),
-                    ObjectKey::Number(n) => ObjectKey::Number(*n),
-                    ObjectKey::Computed(expr) => ObjectKey::Computed(Box::new(clone_expression(expr))),
-                };
-                ObjectProperty {
-                    key,
-                    value: clone_expression(&prop.value),
-                    shorthand: prop.shorthand,
-                    computed: prop.computed,
-                    method: prop.method,
-                }
-            }).collect(),
+            props
+                .iter()
+                .map(|prop| {
+                    let key = match &prop.key {
+                        ObjectKey::Identifier(name) => {
+                            ObjectKey::Identifier(String::leak((*name).to_string()))
+                        }
+                        ObjectKey::String(name) => {
+                            ObjectKey::String(String::leak((*name).to_string()))
+                        }
+                        ObjectKey::Number(n) => ObjectKey::Number(*n),
+                        ObjectKey::Computed(expr) => {
+                            ObjectKey::Computed(Box::new(clone_expression(expr)))
+                        }
+                    };
+                    ObjectProperty {
+                        key,
+                        value: clone_expression(&prop.value),
+                        shorthand: prop.shorthand,
+                        computed: prop.computed,
+                        method: prop.method,
+                    }
+                })
+                .collect(),
         ),
         Expression::ClassExpression(expr) => {
             let id = expr.id.map(|value| {
                 let leaked: &'static mut str = String::leak(value.to_string());
                 leaked as &'static str
             });
-            Expression::ClassExpression(Box::new(ClassDeclaration { id }))
+            let super_class = expr.super_class.as_ref().map(clone_expression);
+            let body = expr
+                .body
+                .iter()
+                .map(|element| match element {
+                    ClassElement::Constructor {
+                        function: func,
+                        is_default,
+                    } => ClassElement::Constructor {
+                        function: clone_function_declaration(func),
+                        is_default: *is_default,
+                    },
+                    ClassElement::Method {
+                        key,
+                        value,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Method {
+                            key,
+                            value: clone_function_declaration(value),
+                            is_static: *is_static,
+                        }
+                    }
+                    ClassElement::Field {
+                        key,
+                        initializer,
+                        is_static,
+                    } => {
+                        let key = match key {
+                            ObjectKey::Identifier(name) => {
+                                ObjectKey::Identifier(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::String(name) => {
+                                ObjectKey::String(String::leak((*name).to_string()))
+                            }
+                            ObjectKey::Number(n) => ObjectKey::Number(*n),
+                            ObjectKey::Computed(expr) => {
+                                ObjectKey::Computed(Box::new(clone_expression(expr)))
+                            }
+                        };
+                        ClassElement::Field {
+                            key,
+                            initializer: initializer.as_ref().map(clone_expression),
+                            is_static: *is_static,
+                        }
+                    }
+                })
+                .collect();
+            Expression::ClassExpression(Box::new(ClassDeclaration {
+                id,
+                super_class,
+                body,
+            }))
         }
         Expression::ThisExpression => Expression::ThisExpression,
-        Expression::SpreadElement(expr) => Expression::SpreadElement(Box::new(clone_expression(expr))),
+        Expression::SuperExpression => Expression::SuperExpression,
+        Expression::SpreadElement(expr) => {
+            Expression::SpreadElement(Box::new(clone_expression(expr)))
+        }
         Expression::TemplateLiteral(parts) => Expression::TemplateLiteral(
-            parts.iter().map(|part| match part {
-                TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
-                TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
-            }).collect()
+            parts
+                .iter()
+                .map(|part| match part {
+                    TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
+                    TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
+                })
+                .collect(),
         ),
-        Expression::YieldExpression(expr) => Expression::YieldExpression(expr.as_ref().map(|e| Box::new(clone_expression(e)))),
-        Expression::AwaitExpression(expr) => Expression::AwaitExpression(Box::new(clone_expression(expr))),
+        Expression::YieldExpression(expr) => {
+            Expression::YieldExpression(expr.as_ref().map(|e| Box::new(clone_expression(e))))
+        }
+        Expression::AwaitExpression(expr) => {
+            Expression::AwaitExpression(Box::new(clone_expression(expr)))
+        }
         Expression::TaggedTemplateExpression(tag, parts) => Expression::TaggedTemplateExpression(
             Box::new(clone_expression(tag)),
-            parts.iter().map(|part| match part {
-                TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
-                TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
-            }).collect()
+            parts
+                .iter()
+                .map(|part| match part {
+                    TemplatePart::String(s) => TemplatePart::String(String::leak(s.to_string())),
+                    TemplatePart::Expr(expr) => TemplatePart::Expr(clone_expression(expr)),
+                })
+                .collect(),
         ),
     }
 }
@@ -1262,17 +1758,19 @@ fn js_abstract_eq(left: &JsValue, right: &JsValue) -> bool {
         (JsValue::Null, JsValue::Undefined) | (JsValue::Undefined, JsValue::Null) => true,
         (JsValue::Number(a), JsValue::String(b)) => *a == b.parse::<f64>().unwrap_or(f64::NAN),
         (JsValue::String(a), JsValue::Number(b)) => a.parse::<f64>().unwrap_or(f64::NAN) == *b,
-        (JsValue::Boolean(a), _) => js_abstract_eq(&JsValue::Number(if *a { 1.0 } else { 0.0 }), right),
-        (_, JsValue::Boolean(b)) => js_abstract_eq(left, &JsValue::Number(if *b { 1.0 } else { 0.0 })),
+        (JsValue::Boolean(a), _) => {
+            js_abstract_eq(&JsValue::Number(if *a { 1.0 } else { 0.0 }), right)
+        }
+        (_, JsValue::Boolean(b)) => {
+            js_abstract_eq(left, &JsValue::Number(if *b { 1.0 } else { 0.0 }))
+        }
         _ => js_strict_eq(left, right),
     }
 }
 
 fn extract_for_binding(stmt: &Statement) -> Option<String> {
     match stmt {
-        Statement::VariableDeclaration(decl) => {
-            decl.declarations.first().map(|d| d.id.to_string())
-        }
+        Statement::VariableDeclaration(decl) => decl.declarations.first().map(|d| d.id.to_string()),
         Statement::ExpressionStatement(Expression::Identifier(name)) => Some(name.to_string()),
         _ => None,
     }

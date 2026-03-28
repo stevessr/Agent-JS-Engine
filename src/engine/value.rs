@@ -9,6 +9,10 @@ pub struct FunctionValue {
     pub id: usize,
     pub env: Rc<RefCell<Environment>>,
     pub prototype: JsValue,
+    pub properties: JsObjectMap,
+    pub super_binding: Option<JsValue>,
+    pub is_class_constructor: bool,
+    pub is_derived_constructor: bool,
 }
 
 /// A native (Rust) built-in function.
@@ -132,7 +136,11 @@ impl JsValue {
                 }
             }
             JsValue::Boolean(b) => {
-                if *b { 1.0 } else { 0.0 }
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
             }
             JsValue::Null => 0.0,
             JsValue::Undefined => f64::NAN,
@@ -289,10 +297,7 @@ impl JsValue {
                     JsValue::Undefined
                 }
             }
-            JsValue::Function(function) => match key {
-                "prototype" => function.prototype.clone(),
-                _ => JsValue::Undefined,
-            },
+            JsValue::Function(function) => get_object_property(&function.properties, key),
             _ => JsValue::Undefined,
         }
     }
@@ -306,6 +311,7 @@ pub fn get_object_property(map: &JsObjectMap, key: &str) -> JsValue {
     let proto = map.borrow().get("__proto__").cloned();
     match proto {
         Some(JsValue::Object(proto_map)) => get_object_property(&proto_map, key),
+        Some(JsValue::Function(function)) => get_object_property(&function.properties, key),
         _ => JsValue::Undefined,
     }
 }
@@ -318,6 +324,7 @@ pub fn has_object_property(map: &JsObjectMap, key: &str) -> bool {
     let proto = map.borrow().get("__proto__").cloned();
     match proto {
         Some(JsValue::Object(proto_map)) => has_object_property(&proto_map, key),
+        Some(JsValue::Function(function)) => has_object_property(&function.properties, key),
         _ => false,
     }
 }

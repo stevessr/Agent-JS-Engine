@@ -1,7 +1,8 @@
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
 use ai_agent::parser::ast::{
-    AssignmentOperator, BinaryOperator, Expression, Literal, ObjectKey, Param, Statement,
+    AssignmentOperator, BinaryOperator, ClassElement, Expression, Literal, ObjectKey, Param,
+    Statement,
 };
 
 #[test]
@@ -37,9 +38,15 @@ fn parser_parses_array_literals_with_holes() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::ArrayExpression(elements)) => {
             assert_eq!(elements.len(), 3);
-            assert!(matches!(elements[0], Some(Expression::Literal(Literal::Number(1.0)))));
+            assert!(matches!(
+                elements[0],
+                Some(Expression::Literal(Literal::Number(1.0)))
+            ));
             assert!(elements[1].is_none());
-            assert!(matches!(elements[2], Some(Expression::Literal(Literal::Number(3.0)))));
+            assert!(matches!(
+                elements[2],
+                Some(Expression::Literal(Literal::Number(3.0)))
+            ));
         }
         other => panic!("expected array expression, got {other:?}"),
     }
@@ -57,9 +64,15 @@ fn parser_parses_object_literals() {
         Statement::ExpressionStatement(Expression::ObjectExpression(properties)) => {
             assert_eq!(properties.len(), 2);
             assert!(matches!(&properties[0].key, ObjectKey::Identifier("foo")));
-            assert!(matches!(&properties[0].value, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                &properties[0].value,
+                Expression::Literal(Literal::Number(1.0))
+            ));
             assert!(matches!(&properties[1].key, ObjectKey::String("bar")));
-            assert!(matches!(&properties[1].value, Expression::Literal(Literal::Number(2.0))));
+            assert!(matches!(
+                &properties[1].value,
+                Expression::Literal(Literal::Number(2.0))
+            ));
         }
         other => panic!("expected object expression, got {other:?}"),
     }
@@ -76,7 +89,10 @@ fn parser_parses_member_expression_chains() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::MemberExpression(outer)) => {
             assert!(outer.computed);
-            assert!(matches!(outer.property, Expression::Literal(Literal::Number(0.0))));
+            assert!(matches!(
+                outer.property,
+                Expression::Literal(Literal::Number(0.0))
+            ));
             match &outer.object {
                 Expression::MemberExpression(inner) => {
                     assert!(!inner.computed);
@@ -101,7 +117,10 @@ fn parser_parses_member_assignment_with_dot_property() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
             assert!(matches!(assign.operator, AssignmentOperator::Assign));
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(!member.computed);
@@ -126,12 +145,18 @@ fn parser_parses_member_assignment_with_computed_property() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
             assert!(matches!(assign.operator, AssignmentOperator::Assign));
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(member.computed);
                     assert!(matches!(member.object, Expression::Identifier("arr")));
-                    assert!(matches!(member.property, Expression::Literal(Literal::Number(0.0))));
+                    assert!(matches!(
+                        member.property,
+                        Expression::Literal(Literal::Number(0.0))
+                    ));
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
@@ -152,7 +177,10 @@ fn parser_preserves_plus_assign_operator() {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
             assert!(matches!(assign.operator, AssignmentOperator::PlusAssign));
             assert!(matches!(assign.left, Expression::Identifier("x")));
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -168,7 +196,10 @@ fn parser_preserves_member_compound_assignment_operator() {
 
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
-            assert!(matches!(assign.operator, AssignmentOperator::MultiplyAssign));
+            assert!(matches!(
+                assign.operator,
+                AssignmentOperator::MultiplyAssign
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(!member.computed);
@@ -177,7 +208,10 @@ fn parser_preserves_member_compound_assignment_operator() {
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(2.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(2.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -208,7 +242,10 @@ fn parser_preserves_logical_or_assign_operator() {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
             assert!(matches!(assign.operator, AssignmentOperator::LogicOrAssign));
             assert!(matches!(assign.left, Expression::Identifier("x")));
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -224,7 +261,10 @@ fn parser_preserves_logical_and_assign_on_member() {
 
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
-            assert!(matches!(assign.operator, AssignmentOperator::LogicAndAssign));
+            assert!(matches!(
+                assign.operator,
+                AssignmentOperator::LogicAndAssign
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(!member.computed);
@@ -233,7 +273,10 @@ fn parser_preserves_logical_and_assign_on_member() {
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(2.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(2.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -254,11 +297,17 @@ fn parser_preserves_nullish_assign_on_computed_member() {
                 Expression::MemberExpression(member) => {
                     assert!(member.computed);
                     assert!(matches!(member.object, Expression::Identifier("arr")));
-                    assert!(matches!(member.property, Expression::Literal(Literal::Number(0.0))));
+                    assert!(matches!(
+                        member.property,
+                        Expression::Literal(Literal::Number(0.0))
+                    ));
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(3.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(3.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -289,7 +338,10 @@ fn parser_preserves_bitand_assign_operator() {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
             assert!(matches!(assign.operator, AssignmentOperator::BitAndAssign));
             assert!(matches!(assign.left, Expression::Identifier("x")));
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -305,7 +357,10 @@ fn parser_preserves_shift_assign_on_member() {
 
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
-            assert!(matches!(assign.operator, AssignmentOperator::ShiftLeftAssign));
+            assert!(matches!(
+                assign.operator,
+                AssignmentOperator::ShiftLeftAssign
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(!member.computed);
@@ -314,7 +369,10 @@ fn parser_preserves_shift_assign_on_member() {
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(2.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(2.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -330,16 +388,25 @@ fn parser_preserves_unsigned_shift_assign_on_computed_member() {
 
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::AssignmentExpression(assign)) => {
-            assert!(matches!(assign.operator, AssignmentOperator::UnsignedShiftRightAssign));
+            assert!(matches!(
+                assign.operator,
+                AssignmentOperator::UnsignedShiftRightAssign
+            ));
             match &assign.left {
                 Expression::MemberExpression(member) => {
                     assert!(member.computed);
                     assert!(matches!(member.object, Expression::Identifier("arr")));
-                    assert!(matches!(member.property, Expression::Literal(Literal::Number(0.0))));
+                    assert!(matches!(
+                        member.property,
+                        Expression::Literal(Literal::Number(0.0))
+                    ));
                 }
                 other => panic!("expected member expression left-hand side, got {other:?}"),
             }
-            assert!(matches!(assign.right, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                assign.right,
+                Expression::Literal(Literal::Number(1.0))
+            ));
         }
         other => panic!("expected assignment expression, got {other:?}"),
     }
@@ -368,7 +435,10 @@ fn parser_parses_unary_bitnot_expression() {
 
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::UnaryExpression(unary)) => {
-            assert!(matches!(unary.operator, ai_agent::parser::ast::UnaryOperator::BitNot));
+            assert!(matches!(
+                unary.operator,
+                ai_agent::parser::ast::UnaryOperator::BitNot
+            ));
             assert!(matches!(unary.argument, Expression::Identifier("x")));
             assert!(unary.prefix);
         }
@@ -385,12 +455,21 @@ fn parser_respects_binary_operator_precedence() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::BinaryExpression(expr)) => {
             assert!(matches!(expr.operator, BinaryOperator::Plus));
-            assert!(matches!(expr.left, Expression::Literal(Literal::Number(1.0))));
+            assert!(matches!(
+                expr.left,
+                Expression::Literal(Literal::Number(1.0))
+            ));
             match &expr.right {
                 Expression::BinaryExpression(right) => {
                     assert!(matches!(right.operator, BinaryOperator::Multiply));
-                    assert!(matches!(right.left, Expression::Literal(Literal::Number(2.0))));
-                    assert!(matches!(right.right, Expression::Literal(Literal::Number(3.0))));
+                    assert!(matches!(
+                        right.left,
+                        Expression::Literal(Literal::Number(2.0))
+                    ));
+                    assert!(matches!(
+                        right.right,
+                        Expression::Literal(Literal::Number(3.0))
+                    ));
                 }
                 other => panic!("expected multiply expression, got {other:?}"),
             }
@@ -408,12 +487,18 @@ fn parser_parses_array_spread_expression() {
     match &program.body[0] {
         Statement::ExpressionStatement(Expression::ArrayExpression(elements)) => {
             assert_eq!(elements.len(), 3);
-            assert!(matches!(elements[0], Some(Expression::Literal(Literal::Number(1.0)))));
+            assert!(matches!(
+                elements[0],
+                Some(Expression::Literal(Literal::Number(1.0)))
+            ));
             assert!(matches!(
                 &elements[1],
                 Some(Expression::SpreadElement(inner)) if matches!(inner.as_ref(), Expression::Identifier("rest"))
             ));
-            assert!(matches!(elements[2], Some(Expression::Literal(Literal::Number(3.0)))));
+            assert!(matches!(
+                elements[2],
+                Some(Expression::Literal(Literal::Number(3.0)))
+            ));
         }
         other => panic!("expected array expression, got {other:?}"),
     }
@@ -468,8 +553,14 @@ fn parser_parses_switch_statement() {
         Statement::SwitchStatement(stmt) => {
             assert!(matches!(stmt.discriminant, Expression::Identifier("x")));
             assert_eq!(stmt.cases.len(), 2);
-            assert!(matches!(stmt.cases[0].test, Some(Expression::Literal(Literal::Number(1.0)))));
-            assert!(matches!(stmt.cases[0].consequent[1], Statement::BreakStatement(None)));
+            assert!(matches!(
+                stmt.cases[0].test,
+                Some(Expression::Literal(Literal::Number(1.0)))
+            ));
+            assert!(matches!(
+                stmt.cases[0].consequent[1],
+                Statement::BreakStatement(None)
+            ));
             assert!(stmt.cases[1].test.is_none());
         }
         other => panic!("expected switch statement, got {other:?}"),
@@ -485,7 +576,10 @@ fn parser_parses_do_while_statement() {
     match &program.body[0] {
         Statement::DoWhileStatement(stmt) => {
             assert!(matches!(stmt.test, Expression::Identifier("y")));
-            assert!(matches!(stmt.body.as_ref(), Statement::ExpressionStatement(Expression::Identifier("x"))));
+            assert!(matches!(
+                stmt.body.as_ref(),
+                Statement::ExpressionStatement(Expression::Identifier("x"))
+            ));
         }
         other => panic!("expected do-while statement, got {other:?}"),
     }
@@ -500,8 +594,232 @@ fn parser_parses_labeled_break_statement() {
     match &program.body[0] {
         Statement::LabeledStatement(stmt) => {
             assert_eq!(stmt.label, "outer");
-            assert!(matches!(stmt.body.as_ref(), Statement::BreakStatement(Some("outer"))));
+            assert!(matches!(
+                stmt.body.as_ref(),
+                Statement::BreakStatement(Some("outer"))
+            ));
         }
         other => panic!("expected labeled statement, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_class_declaration_with_constructor_and_method() {
+    let lexer = Lexer::new("class Foo { constructor() {} bar() {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert_eq!(class_decl.id, Some("Foo"));
+            assert!(class_decl.super_class.is_none());
+            assert_eq!(class_decl.body.len(), 2);
+            assert!(matches!(
+                class_decl.body[0],
+                ClassElement::Constructor {
+                    is_default: false,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                &class_decl.body[1],
+                ClassElement::Method {
+                    key: ObjectKey::Identifier("bar"),
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_class_extends_and_super_call() {
+    let lexer = Lexer::new("class Foo extends Bar { constructor() { super(); } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                class_decl.super_class,
+                Some(Expression::Identifier("Bar"))
+            ));
+            match &class_decl.body[0] {
+                ClassElement::Constructor {
+                    function,
+                    is_default,
+                } => {
+                    assert!(!is_default);
+                    assert!(matches!(
+                        &function.body.body[0],
+                        Statement::ExpressionStatement(Expression::CallExpression(call))
+                            if matches!(call.callee, Expression::SuperExpression)
+                    ));
+                }
+                other => panic!("expected constructor, got {other:?}"),
+            }
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_super_method_call() {
+    let lexer = Lexer::new("class Foo extends Bar { bar() { super.bar(); } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            let method = class_decl
+                .body
+                .iter()
+                .find_map(|element| match element {
+                    ClassElement::Method {
+                        key: ObjectKey::Identifier("bar"),
+                        value,
+                        ..
+                    } => Some(value),
+                    _ => None,
+                })
+                .expect("expected bar method");
+            assert!(matches!(
+                &method.body.body[0],
+                Statement::ExpressionStatement(Expression::CallExpression(call))
+                    if matches!(
+                        call.callee,
+                        Expression::MemberExpression(ref member)
+                            if matches!(member.object, Expression::SuperExpression)
+                                && matches!(member.property, Expression::Identifier("bar"))
+                    )
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_inserts_default_derived_constructor() {
+    let lexer = Lexer::new("class Foo extends Bar {}");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => match &class_decl.body[0] {
+            ClassElement::Constructor {
+                function,
+                is_default,
+            } => {
+                assert!(*is_default);
+                assert!(matches!(function.params.as_slice(), [Param::Rest("args")]));
+                assert!(matches!(
+                    &function.body.body[0],
+                    Statement::ExpressionStatement(Expression::CallExpression(call))
+                        if matches!(call.callee, Expression::SuperExpression)
+                ));
+            }
+            other => panic!("expected default constructor, got {other:?}"),
+        },
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_super_computed_method_call() {
+    let lexer = Lexer::new("class Foo extends Bar { bar() { super[key](); } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            let method = class_decl
+                .body
+                .iter()
+                .find_map(|element| match element {
+                    ClassElement::Method {
+                        key: ObjectKey::Identifier("bar"),
+                        value,
+                        ..
+                    } => Some(value),
+                    _ => None,
+                })
+                .expect("expected bar method");
+            assert!(matches!(
+                &method.body.body[0],
+                Statement::ExpressionStatement(Expression::CallExpression(call))
+                    if matches!(
+                        call.callee,
+                        Expression::MemberExpression(ref member)
+                            if matches!(member.object, Expression::SuperExpression)
+                                && member.computed
+                                && matches!(member.property, Expression::Identifier("key"))
+                    )
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_static_method() {
+    let lexer = Lexer::new("class Foo { static bar() {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                &class_decl.body[0],
+                ClassElement::Method {
+                    key: ObjectKey::Identifier("bar"),
+                    is_static: true,
+                    ..
+                }
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_static_field() {
+    let lexer = Lexer::new("class Foo { static value = 1; }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                &class_decl.body[0],
+                ClassElement::Field {
+                    key: ObjectKey::Identifier("value"),
+                    initializer: Some(Expression::Literal(Literal::Number(1.0))),
+                    is_static: true,
+                }
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_computed_static_method() {
+    let lexer = Lexer::new("class Foo { static [key]() {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                &class_decl.body[0],
+                ClassElement::Method {
+                    key: ObjectKey::Computed(expr),
+                    is_static: true,
+                    ..
+                } if matches!(expr.as_ref(), Expression::Identifier("key"))
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
     }
 }

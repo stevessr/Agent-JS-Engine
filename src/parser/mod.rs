@@ -80,7 +80,9 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => Ok(Statement::BlockStatement(self.parse_block_statement()?)),
             Some(Token::If) => Ok(Statement::IfStatement(self.parse_if_statement()?)),
             Some(Token::While) => Ok(Statement::WhileStatement(self.parse_while_statement()?)),
-            Some(Token::Do) => Ok(Statement::DoWhileStatement(self.parse_do_while_statement()?)),
+            Some(Token::Do) => Ok(Statement::DoWhileStatement(
+                self.parse_do_while_statement()?,
+            )),
             Some(Token::For) => self.parse_for_statement(),
             Some(Token::Switch) => Ok(Statement::SwitchStatement(self.parse_switch_statement()?)),
             Some(Token::Try) => Ok(Statement::TryStatement(self.parse_try_statement()?)),
@@ -92,6 +94,9 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Function) => Ok(Statement::FunctionDeclaration(
                 self.parse_function_declaration()?,
+            )),
+            Some(Token::Class) => Ok(Statement::ClassDeclaration(
+                self.parse_class_declaration(true)?,
             )),
             Some(Token::Return) => Ok(self.parse_return_statement()?),
             Some(Token::Break) => self.parse_break_statement(),
@@ -183,7 +188,9 @@ impl<'a> Parser<'a> {
         let init = if self.consume_opt(Token::Semicolon)? {
             None
         } else {
-            Some(Box::new(self.with_allow_in(false, |parser| parser.parse_for_initializer())?))
+            Some(Box::new(self.with_allow_in(false, |parser| {
+                parser.parse_for_initializer()
+            })?))
         };
 
         if let Some(init) = init {
@@ -192,7 +199,11 @@ impl<'a> Parser<'a> {
                 let right = self.parse_expression()?;
                 self.consume_opt(Token::RParen)?;
                 let body = Box::new(self.parse_statement()?);
-                return Ok(Statement::ForInStatement(ForInStatement { left: init, right, body }));
+                return Ok(Statement::ForInStatement(ForInStatement {
+                    left: init,
+                    right,
+                    body,
+                }));
             }
 
             if matches!(self.current_token, Some(Token::Identifier("of"))) {
@@ -200,7 +211,11 @@ impl<'a> Parser<'a> {
                 let right = self.parse_expression()?;
                 self.consume_opt(Token::RParen)?;
                 let body = Box::new(self.parse_statement()?);
-                return Ok(Statement::ForOfStatement(ForOfStatement { left: init, right, body }));
+                return Ok(Statement::ForOfStatement(ForOfStatement {
+                    left: init,
+                    right,
+                    body,
+                }));
             }
 
             let test = if self.consume_opt(Token::Semicolon)? {
@@ -254,8 +269,13 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_for_initializer(&mut self) -> Result<Statement<'a>, ParseError> {
-        if matches!(self.current_token, Some(Token::Var | Token::Let | Token::Const)) {
-            Ok(Statement::VariableDeclaration(self.parse_variable_declaration()?))
+        if matches!(
+            self.current_token,
+            Some(Token::Var | Token::Let | Token::Const)
+        ) {
+            Ok(Statement::VariableDeclaration(
+                self.parse_variable_declaration()?,
+            ))
         } else {
             Ok(Statement::ExpressionStatement(self.parse_expression()?))
         }
@@ -451,7 +471,12 @@ impl<'a> Parser<'a> {
 
         let body = self.parse_block_statement()?;
 
-        Ok(FunctionDeclaration { id, params, body, is_generator })
+        Ok(FunctionDeclaration {
+            id,
+            params,
+            body,
+            is_generator,
+        })
     }
 
     fn parse_return_statement(&mut self) -> Result<Statement<'a>, ParseError> {
@@ -574,7 +599,12 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 let body = self.parse_arrow_body()?;
                 return Ok(Expression::ArrowFunctionExpression(Box::new(
-                    FunctionDeclaration { id: None, params: vec![Param::Simple(name)], body, is_generator: false },
+                    FunctionDeclaration {
+                        id: None,
+                        params: vec![Param::Simple(name)],
+                        body,
+                        is_generator: false,
+                    },
                 )));
             }
         }
@@ -637,7 +667,8 @@ impl<'a> Parser<'a> {
         let mut left = self.parse_unary_expression()?;
 
         loop {
-            let Some((operator, precedence, right_associative)) = self.current_binary_operator() else {
+            let Some((operator, precedence, right_associative)) = self.current_binary_operator()
+            else {
                 break;
             };
             if precedence < min_precedence {
@@ -873,13 +904,24 @@ impl<'a> Parser<'a> {
                 (ObjectKey::Computed(Box::new(expr)), true)
             } else {
                 let k = match self.current_token.clone() {
-                    Some(Token::Identifier(name)) => { self.advance()?; ObjectKey::Identifier(name) }
-                    Some(Token::String(name)) => { self.advance()?; ObjectKey::String(name) }
-                    Some(Token::Number(n)) => { self.advance()?; ObjectKey::Number(n) }
-                    Some(token) => return Err(ParseError::UnexpectedToken {
-                        expected: "Identifier, String, or Number".to_string(),
-                        found: Some(format!("{:?}", token)),
-                    }),
+                    Some(Token::Identifier(name)) => {
+                        self.advance()?;
+                        ObjectKey::Identifier(name)
+                    }
+                    Some(Token::String(name)) => {
+                        self.advance()?;
+                        ObjectKey::String(name)
+                    }
+                    Some(Token::Number(n)) => {
+                        self.advance()?;
+                        ObjectKey::Number(n)
+                    }
+                    Some(token) => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "Identifier, String, or Number".to_string(),
+                            found: Some(format!("{:?}", token)),
+                        });
+                    }
                     None => return Err(ParseError::UnexpectedEOF),
                 };
                 (k, false)
@@ -897,15 +939,23 @@ impl<'a> Parser<'a> {
                 });
             } else if self.consume_opt(Token::Colon)? {
                 let value = self.parse_assignment_expression()?;
-                properties.push(ObjectProperty { key, value, shorthand: false, computed, method: false });
+                properties.push(ObjectProperty {
+                    key,
+                    value,
+                    shorthand: false,
+                    computed,
+                    method: false,
+                });
             } else {
                 // shorthand: { foo }
                 let name = match &key {
                     ObjectKey::Identifier(name) => *name,
-                    _ => return Err(ParseError::UnexpectedToken {
-                        expected: "Colon after property key".to_string(),
-                        found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
-                    }),
+                    _ => {
+                        return Err(ParseError::UnexpectedToken {
+                            expected: "Colon after property key".to_string(),
+                            found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                        });
+                    }
                 };
                 properties.push(ObjectProperty {
                     key,
@@ -949,11 +999,159 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 params.push(Param::Simple(name));
             }
-            if !self.consume_opt(Token::Comma)? { break; }
+            if !self.consume_opt(Token::Comma)? {
+                break;
+            }
         }
         self.consume_opt(Token::RParen)?;
         let body = self.parse_block_statement()?;
-        Ok(FunctionDeclaration { id: None, params, body, is_generator: false })
+        Ok(FunctionDeclaration {
+            id: None,
+            params,
+            body,
+            is_generator: false,
+        })
+    }
+
+    fn parse_class_declaration(
+        &mut self,
+        require_name: bool,
+    ) -> Result<ClassDeclaration<'a>, ParseError> {
+        self.advance()?; // class
+        let id = match self.current_token {
+            Some(Token::Identifier(name)) => {
+                self.advance()?;
+                Some(name)
+            }
+            _ if require_name => {
+                return Err(ParseError::UnexpectedToken {
+                    expected: "Identifier".to_string(),
+                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                });
+            }
+            _ => None,
+        };
+
+        let super_class = if self.consume_opt(Token::Extends)? {
+            Some(self.parse_member_or_call_expression()?)
+        } else {
+            None
+        };
+
+        if !self.consume_opt(Token::LBrace)? {
+            return Err(ParseError::UnexpectedToken {
+                expected: "LBrace".to_string(),
+                found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+            });
+        }
+
+        let mut body = Vec::new();
+        while self.current_token.is_some() && self.current_token != Some(Token::RBrace) {
+            let mut is_static = false;
+            if matches!(self.current_token, Some(Token::Identifier("static"))) {
+                let next = self.lexer.clone().next_token().ok();
+                if !matches!(
+                    next,
+                    Some(Token::LParen) | Some(Token::Assign) | Some(Token::Semicolon)
+                ) {
+                    is_static = true;
+                    self.advance()?;
+                }
+            }
+
+            let key = match self.current_token.clone() {
+                Some(Token::Identifier(name)) => {
+                    self.advance()?;
+                    ObjectKey::Identifier(name)
+                }
+                Some(Token::String(name)) => {
+                    self.advance()?;
+                    ObjectKey::String(name)
+                }
+                Some(Token::Number(n)) => {
+                    self.advance()?;
+                    ObjectKey::Number(n)
+                }
+                Some(Token::LBracket) => {
+                    self.advance()?;
+                    let expr = self.parse_expression()?;
+                    self.consume_opt(Token::RBracket)?;
+                    ObjectKey::Computed(Box::new(expr))
+                }
+                token => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "class element name".to_string(),
+                        found: token.map(|t| format!("{:?}", t)),
+                    });
+                }
+            };
+
+            if self.current_token == Some(Token::LParen) {
+                let func = self.parse_function_body_from_params()?;
+                let is_constructor =
+                    !is_static && matches!(key, ObjectKey::Identifier("constructor"));
+                if is_constructor {
+                    body.push(ClassElement::Constructor {
+                        function: func,
+                        is_default: false,
+                    });
+                } else {
+                    body.push(ClassElement::Method {
+                        key,
+                        value: func,
+                        is_static,
+                    });
+                }
+            } else {
+                let initializer = if self.consume_opt(Token::Assign)? {
+                    Some(self.parse_assignment_expression()?)
+                } else {
+                    None
+                };
+                self.consume_opt(Token::Semicolon)?;
+                body.push(ClassElement::Field {
+                    key,
+                    initializer,
+                    is_static,
+                });
+            }
+        }
+        self.consume_opt(Token::RBrace)?;
+
+        if super_class.is_some()
+            && !body
+                .iter()
+                .any(|element| matches!(element, ClassElement::Constructor { .. }))
+        {
+            body.insert(
+                0,
+                ClassElement::Constructor {
+                    function: FunctionDeclaration {
+                        id: None,
+                        params: vec![Param::Rest("args")],
+                        body: BlockStatement {
+                            body: vec![Statement::ExpressionStatement(Expression::CallExpression(
+                                Box::new(CallExpression {
+                                    callee: Expression::SuperExpression,
+                                    arguments: vec![Expression::SpreadElement(Box::new(
+                                        Expression::Identifier("args"),
+                                    ))],
+                                    optional: false,
+                                }),
+                            ))],
+                        },
+                        is_generator: false,
+                    },
+                    is_default: true,
+                },
+            );
+        }
+
+        Ok(ClassDeclaration {
+            id,
+            super_class,
+            body,
+        })
     }
 
     fn parse_primary(&mut self) -> Result<Expression<'a>, ParseError> {
@@ -980,34 +1178,13 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Expression::ThisExpression)
             }
-            Some(Token::Class) => {
+            Some(Token::Super) => {
                 self.advance()?;
-                let mut id = None;
-                if let Some(Token::Identifier(name)) = self.current_token {
-                    id = Some(name);
-                    self.advance()?;
-                }
-                // skip everything between { and } for now to just pass the parser
-                while self.current_token != Some(Token::LBrace) && self.current_token != None {
-                    self.advance()?;
-                }
-                if self.current_token == Some(Token::LBrace) {
-                    let mut depth = 1;
-                    self.advance()?;
-                    while depth > 0 && self.current_token != None {
-                        if self.current_token == Some(Token::LBrace) {
-                            depth += 1;
-                        }
-                        if self.current_token == Some(Token::RBrace) {
-                            depth -= 1;
-                        }
-                        self.advance()?;
-                    }
-                }
-                Ok(Expression::ClassExpression(Box::new(ClassDeclaration {
-                    id,
-                })))
+                Ok(Expression::SuperExpression)
             }
+            Some(Token::Class) => Ok(Expression::ClassExpression(Box::new(
+                self.parse_class_declaration(false)?,
+            ))),
             Some(Token::Function) => {
                 let func = self.parse_function_declaration()?;
                 Ok(Expression::FunctionExpression(Box::new(func)))
@@ -1034,7 +1211,12 @@ impl<'a> Parser<'a> {
                         self.advance()?;
                         let body = self.parse_arrow_body()?;
                         return Ok(Expression::ArrowFunctionExpression(Box::new(
-                            FunctionDeclaration { id: None, params: vec![], body, is_generator: false },
+                            FunctionDeclaration {
+                                id: None,
+                                params: vec![],
+                                body,
+                                is_generator: false,
+                            },
                         )));
                     }
                     return Err(ParseError::UnexpectedToken {
@@ -1051,7 +1233,12 @@ impl<'a> Parser<'a> {
                     let params = collect_arrow_params(expr);
                     let body = self.parse_arrow_body()?;
                     return Ok(Expression::ArrowFunctionExpression(Box::new(
-                        FunctionDeclaration { id: None, params, body, is_generator: false },
+                        FunctionDeclaration {
+                            id: None,
+                            params,
+                            body,
+                            is_generator: false,
+                        },
                     )));
                 }
                 Ok(expr)
@@ -1060,18 +1247,65 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => self.parse_object_literal(),
             Some(Token::New) => {
                 self.advance()?; // 'new'
-                let expr = self.parse_member_or_call_expression()?;
-                if let Expression::CallExpression(c) = expr {
-                    Ok(Expression::NewExpression(c))
-                } else {
-                    // new Foo (without parens) -> treat as CallExpr with no args for simplicity
-                    let call = CallExpression {
-                        callee: expr,
-                        arguments: vec![],
-                        optional: false,
-                    };
-                    Ok(Expression::NewExpression(Box::new(call)))
+                let mut callee = self.parse_primary()?;
+
+                loop {
+                    if self.consume_opt(Token::Dot)? {
+                        match self.current_token.clone() {
+                            Some(Token::Identifier(id)) => {
+                                self.advance()?;
+                                callee = Expression::MemberExpression(Box::new(MemberExpression {
+                                    object: callee,
+                                    property: Expression::Identifier(id),
+                                    computed: false,
+                                    optional: false,
+                                }));
+                            }
+                            _ => {
+                                return Err(ParseError::UnexpectedToken {
+                                    expected: "Identifier".to_string(),
+                                    found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                                });
+                            }
+                        }
+                    } else if self.consume_opt(Token::LBracket)? {
+                        let property = self.parse_expression()?;
+                        self.consume_opt(Token::RBracket)?;
+                        callee = Expression::MemberExpression(Box::new(MemberExpression {
+                            object: callee,
+                            property,
+                            computed: true,
+                            optional: false,
+                        }));
+                    } else {
+                        break;
+                    }
                 }
+
+                let mut arguments = Vec::new();
+                if self.consume_opt(Token::LParen)? {
+                    if self.current_token != Some(Token::RParen) {
+                        loop {
+                            if self.current_token == Some(Token::DotDotDot) {
+                                self.advance()?;
+                                let spread = self.parse_assignment_expression()?;
+                                arguments.push(Expression::SpreadElement(Box::new(spread)));
+                            } else {
+                                arguments.push(self.parse_assignment_expression()?);
+                            }
+                            if !self.consume_opt(Token::Comma)? {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume_opt(Token::RParen)?;
+                }
+
+                Ok(Expression::NewExpression(Box::new(CallExpression {
+                    callee,
+                    arguments,
+                    optional: false,
+                })))
             }
             Some(Token::RParen)
             | Some(Token::RBracket)
@@ -1155,7 +1389,7 @@ fn collect_arrow_params<'a>(expr: Expression<'a>) -> Vec<Param<'a>> {
             } else {
                 vec![]
             }
-        },
+        }
         _ => vec![],
     }
 }

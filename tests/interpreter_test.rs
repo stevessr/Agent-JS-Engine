@@ -1,5 +1,5 @@
-use ai_agent::engine::{Interpreter, JsValue};
 use ai_agent::engine::interpreter::RuntimeError;
+use ai_agent::engine::{Interpreter, JsValue};
 use ai_agent::lexer::Lexer;
 use ai_agent::parser::Parser;
 
@@ -170,8 +170,7 @@ fn interpreter_returns_array_length() {
 
 #[test]
 fn interpreter_errors_on_primitive_member_access() {
-    let error = eval_with_interpreter_result("null.foo;")
-        .expect_err("member access should fail");
+    let error = eval_with_interpreter_result("null.foo;").expect_err("member access should fail");
 
     assert!(matches!(error, RuntimeError::TypeError(_)));
 }
@@ -270,8 +269,8 @@ fn interpreter_shares_object_references_between_aliases() {
 
 #[test]
 fn interpreter_errors_on_primitive_member_assignment() {
-    let error = eval_with_interpreter_result("null.foo = 1;")
-        .expect_err("member assignment should fail");
+    let error =
+        eval_with_interpreter_result("null.foo = 1;").expect_err("member assignment should fail");
 
     assert!(matches!(error, RuntimeError::TypeError(_)));
 }
@@ -784,4 +783,200 @@ fn interpreter_evaluates_instanceof_with_constructed_objects() {
     );
 
     assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn interpreter_constructs_class_instances() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            constructor(value) { this.value = value; }
+            bar() { return this.value; }
+        }
+        new Foo(42).bar();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_supports_class_extends_and_super_call() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            constructor(value) { this.value = value; }
+        }
+        class Foo extends Base {
+            constructor() { super(42); }
+        }
+        new Foo().value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_supports_super_method_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            bar() { return 41; }
+        }
+        class Foo extends Base {
+            bar() { return super.bar() + 1; }
+        }
+        new Foo().bar();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_keeps_instanceof_working_for_classes() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {}
+        class Foo extends Base {}
+        let foo = new Foo();
+        foo instanceof Base;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn interpreter_uses_default_derived_constructor() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            constructor(value) { this.value = value; }
+        }
+        class Foo extends Base {}
+        new Foo(42).value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_supports_super_computed_method_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            bar() { return 41; }
+        }
+        class Foo extends Base {
+            baz() { return super["bar"]() + 1; }
+        }
+        new Foo().baz();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_errors_when_accessing_this_before_super() {
+    let error = eval_with_interpreter_result(
+        r#"
+        class Base {}
+        class Foo extends Base {
+            constructor() {
+                this.value = 1;
+                super();
+            }
+        }
+        new Foo();
+        "#,
+    )
+    .expect_err("derived constructor should require super before this");
+
+    assert!(matches!(error, RuntimeError::TypeError(_)));
+}
+
+#[test]
+fn interpreter_errors_when_super_is_used_outside_method_context() {
+    let error =
+        eval_with_interpreter_result("super();").expect_err("top-level super call should fail");
+
+    assert!(matches!(error, RuntimeError::TypeError(_)));
+}
+
+#[test]
+fn interpreter_supports_static_method_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static bar() { return 42; }
+        }
+        Foo.bar();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_supports_static_fields() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static value = 42;
+        }
+        Foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_does_not_expose_static_methods_on_instances() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static bar() { return 42; }
+        }
+        let foo = new Foo();
+        foo.bar;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Undefined);
+}
+
+#[test]
+fn interpreter_inherits_static_methods_through_extends() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            static bar() { return 42; }
+        }
+        class Foo extends Base {}
+        Foo.bar();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_initializes_static_fields_in_order() {
+    let result = eval_with_interpreter(
+        r#"
+        let history = [];
+        class Foo {
+            static a = history[history.length] = 1;
+            static b = history[history.length] = 2;
+        }
+        history[0] + history[1];
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(3.0));
 }

@@ -18,6 +18,7 @@ pub enum Statement<'a> {
     ThrowStatement(Expression<'a>),
     VariableDeclaration(VariableDeclaration<'a>),
     FunctionDeclaration(FunctionDeclaration<'a>),
+    ClassDeclaration(ClassDeclaration<'a>),
     ReturnStatement(Option<Expression<'a>>),
     BreakStatement(Option<&'a str>),
     ContinueStatement(Option<&'a str>),
@@ -99,7 +100,28 @@ pub struct IfStatement<'a> {
 #[derive(Debug, Clone)]
 pub struct ClassDeclaration<'a> {
     pub id: Option<&'a str>,
+    pub super_class: Option<Expression<'a>>,
+    pub body: Vec<ClassElement<'a>>,
 }
+
+#[derive(Debug, Clone)]
+pub enum ClassElement<'a> {
+    Constructor {
+        function: FunctionDeclaration<'a>,
+        is_default: bool,
+    },
+    Method {
+        key: ObjectKey<'a>,
+        value: FunctionDeclaration<'a>,
+        is_static: bool,
+    },
+    Field {
+        key: ObjectKey<'a>,
+        initializer: Option<Expression<'a>>,
+        is_static: bool,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionDeclaration<'a> {
     pub id: Option<&'a str>,
@@ -158,6 +180,7 @@ pub enum Expression<'a> {
     FunctionExpression(Box<FunctionDeclaration<'a>>),
     ClassExpression(Box<ClassDeclaration<'a>>),
     ThisExpression,
+    SuperExpression,
     ArrowFunctionExpression(Box<FunctionDeclaration<'a>>),
     UpdateExpression(Box<UpdateExpression<'a>>),
     SequenceExpression(Vec<Expression<'a>>),
