@@ -413,7 +413,9 @@ fn run_core_profile_once(
                 summary.executed += 1;
                 if summary.samples.len() < SAMPLE_LIMIT {
                     let detail = result.reason.unwrap_or_else(|| "failed".to_string());
-                    summary.samples.push(format!("{} ({detail})", case.path.display()));
+                    summary
+                        .samples
+                        .push(format!("{} ({detail})", case.path.display()));
                 }
             }
             Outcome::Skipped => {
@@ -456,7 +458,9 @@ fn run_core_profile_chunked(
     while offset < total_cases {
         let max_cases = chunk_size.min(total_cases - offset);
         let mut cmd = Command::new(&exe);
-        cmd.arg("--ignored").arg("--exact").arg("test262_core_profile");
+        cmd.arg("--ignored")
+            .arg("--exact")
+            .arg("test262_core_profile");
         cmd.env("TEST262_CHILD", "1");
         cmd.env("TEST262_DIR", suite_root);
         cmd.env("TEST262_OFFSET", offset.to_string());
@@ -464,7 +468,9 @@ fn run_core_profile_chunked(
         if let Some(filter) = filter {
             cmd.env("TEST262_FILTER", filter);
         }
-        let output = cmd.output().expect("failed to run chunked test262 subprocess");
+        let output = cmd
+            .output()
+            .expect("failed to run chunked test262 subprocess");
         if !output.status.success() {
             panic!(
                 "chunked test262 subprocess failed at offset {}: {}{}",

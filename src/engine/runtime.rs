@@ -84,8 +84,10 @@ static MODULE_EXPORT_LIST_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?s)\bexport\s*\{([^}]*)\}"#).expect("module export list regex must compile")
 });
 static MODULE_EXPORT_NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)\bexport\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+(['"])([^'"]+)(['"])"#)
-        .expect("module export namespace regex must compile")
+    Regex::new(
+        r#"(?s)\bexport\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+(['"])([^'"]+)(['"])"#,
+    )
+    .expect("module export namespace regex must compile")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -500,7 +502,8 @@ impl JsEngine {
         }
 
         let canonical_path = normalize_source_path(path);
-        let source = finalize_script_source(source, options.strict, Some(canonical_path.as_path()))?;
+        let source =
+            finalize_script_source(source, options.strict, Some(canonical_path.as_path()))?;
         let result = context
             .eval(Source::from_reader(
                 Cursor::new(source.as_bytes()),
@@ -600,7 +603,10 @@ fn finalize_script_source(
     })
 }
 
-fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> Result<String, EngineError> {
+fn preprocess_compat_source(
+    source: &str,
+    source_path: Option<&Path>,
+) -> Result<String, EngineError> {
     validate_import_call_syntax(source)?;
 
     let source = rewrite_static_import_attributes(source);
@@ -609,16 +615,18 @@ fn preprocess_compat_source(source: &str, source_path: Option<&Path>) -> Result<
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
     let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
-    Ok(if rewrote_dynamic_imports
-        || rewrote_import_defer_calls
-        || rewrote_import_source_calls
-        || rewrote_static_source_imports
-        || rewrote_static_defer_imports
-    {
-        format!("{}\n{source}", build_import_compat_helper(source_path))
-    } else {
-        source
-    })
+    Ok(
+        if rewrote_dynamic_imports
+            || rewrote_import_defer_calls
+            || rewrote_import_source_calls
+            || rewrote_static_source_imports
+            || rewrote_static_defer_imports
+        {
+            format!("{}\n{source}", build_import_compat_helper(source_path))
+        } else {
+            source
+        },
+    )
 }
 
 fn validate_import_call_syntax(source: &str) -> Result<(), EngineError> {
@@ -628,12 +636,8 @@ fn validate_import_call_syntax(source: &str) -> Result<(), EngineError> {
     while i < bytes.len() {
         match bytes[i] {
             b'\'' | b'"' | b'`' => i = skip_js_string(bytes, i),
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
-                i = skip_line_comment(bytes, i)
-            }
-            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
-                i = skip_block_comment(bytes, i)
-            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => i = skip_line_comment(bytes, i),
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => i = skip_block_comment(bytes, i),
             b'i' => {
                 validate_import_keyword_usage(bytes, i)?;
                 i += 1;
@@ -728,7 +732,10 @@ fn validate_single_import_call(
             b'(' | b'[' | b'{' => depth += 1,
             b')' | b']' | b'}' => depth = depth.saturating_sub(1),
             b',' if depth == 0 => comma_positions.push(cursor),
-            b'.' if depth == 0 && cursor + 2 < close_paren && &bytes[cursor..cursor + 3] == b"..." => {
+            b'.' if depth == 0
+                && cursor + 2 < close_paren
+                && &bytes[cursor..cursor + 3] == b"..." =>
+            {
                 return Err(invalid_import_call_syntax_error());
             }
             _ => {}
@@ -1287,13 +1294,12 @@ fn encode_import_resource_kind(specifier: &str, resource_type: &str) -> String {
 }
 
 fn is_async_module_source(source: &str) -> bool {
-    // A simple heuristic for Top-Level Await. 
+    // A simple heuristic for Top-Level Await.
     // In ES modules, 'await' is always a keyword.
     // If it appears outside of a function, it's TLA.
     // This regex is a bit naive but should work for many test262 cases.
     source.contains("await")
 }
-
 
 fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourceKind) {
     let raw = specifier.to_std_string_escaped();
@@ -1460,7 +1466,7 @@ fn ensure_deferred_module_loaded_and_linked(
                 let _ = module.evaluate(context);
                 context.run_jobs()?;
             }
-        },
+        }
         PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
         PromiseState::Pending => {
             return Err(JsNativeError::typ()
@@ -1770,17 +1776,16 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
 
 fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
     let regexp_ctor = context.intrinsics().constructors().regexp().constructor();
-    let receiver_check =
-        "if (this !== RegExp) { throw new TypeError('RegExp legacy static accessor called on incompatible receiver'); }";
+    let receiver_check = "if (this !== RegExp) { throw new TypeError('RegExp legacy static accessor called on incompatible receiver'); }";
 
     for i in 1..=9 {
         let name = format!("${i}");
         let getter = context.eval(Source::from_bytes(&format!(
             "(function() {{ {receiver_check} return ''; }})"
         )))?;
-        let getter = getter
-            .as_object()
-            .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp legacy getter"))?;
+        let getter = getter.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message("failed to create RegExp legacy getter")
+        })?;
         regexp_ctor.define_property_or_throw(
             JsString::from(name.as_str()),
             PropertyDescriptor::builder()
@@ -1800,9 +1805,9 @@ fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
         let getter = context.eval(Source::from_bytes(&format!(
             "(function() {{ {receiver_check} return ''; }})"
         )))?;
-        let getter = getter
-            .as_object()
-            .ok_or_else(|| JsNativeError::typ().with_message("failed to create RegExp legacy getter"))?;
+        let getter = getter.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message("failed to create RegExp legacy getter")
+        })?;
         for name in [full, short] {
             regexp_ctor.define_property_or_throw(
                 js_string!(name),
@@ -3055,7 +3060,9 @@ fn host_get_cached_import(
     };
 
     if kind == ModuleResourceKind::Deferred {
-        return module.namespace(context).get(js_string!("default"), context);
+        return module
+            .namespace(context)
+            .get(js_string!("default"), context);
     }
 
     Ok(module.namespace(context).into())
@@ -3111,7 +3118,9 @@ fn host_dynamic_import_defer(
     )?;
 
     if let Some(module) = loader.get(&path, ModuleResourceKind::Deferred) {
-        let namespace = module.namespace(context).get(js_string!("default"), context)?;
+        let namespace = module
+            .namespace(context)
+            .get(js_string!("default"), context)?;
         return Ok(JsPromise::resolve(namespace, context).into());
     }
 
@@ -3313,7 +3322,11 @@ fn deferred_namespace_target_metadata(target: &JsObject) -> JsResult<DeferredNam
     target
         .downcast_ref::<DeferredNamespaceTarget>()
         .map(|metadata| metadata.clone())
-        .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing").into())
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("deferred namespace target missing")
+                .into()
+        })
 }
 
 fn deferred_namespace_ordinary_get(
@@ -3351,10 +3364,7 @@ fn deferred_namespace_ordinary_get_own_property_descriptor(
     }
 }
 
-fn deferred_namespace_ordinary_has(
-    metadata: &DeferredNamespaceTarget,
-    key: &PropertyKey,
-) -> bool {
+fn deferred_namespace_ordinary_has(metadata: &DeferredNamespaceTarget, key: &PropertyKey) -> bool {
     match key {
         PropertyKey::Symbol(symbol) => symbol == &JsSymbol::to_string_tag(),
         _ => deferred_namespace_exports_include(metadata, key),
@@ -3395,7 +3405,10 @@ fn is_symbol_like_deferred_namespace_key(key: &PropertyKey) -> bool {
     }
 }
 
-fn deferred_namespace_exports_include(metadata: &DeferredNamespaceTarget, key: &PropertyKey) -> bool {
+fn deferred_namespace_exports_include(
+    metadata: &DeferredNamespaceTarget,
+    key: &PropertyKey,
+) -> bool {
     let Some(name) = deferred_namespace_export_name(key) else {
         return false;
     };
@@ -3438,7 +3451,11 @@ fn parse_deferred_module_export_names(path: &Path) -> JsResult<Vec<String>> {
             .get(1)
             .expect("export list capture is required")
             .as_str();
-        for binding in bindings.split(',').map(str::trim).filter(|binding| !binding.is_empty()) {
+        for binding in bindings
+            .split(',')
+            .map(str::trim)
+            .filter(|binding| !binding.is_empty())
+        {
             let Some(name) = binding.split_whitespace().last() else {
                 continue;
             };
