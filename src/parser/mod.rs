@@ -786,6 +786,58 @@ impl<'a> Parser<'a> {
                         });
                     }
                 }
+            } else if self.current_token == Some(Token::OptionalChain) {
+                self.advance()?;
+                if self.consume_opt(Token::LBracket)? {
+                    let property = self.parse_expression()?;
+                    self.consume_opt(Token::RBracket)?;
+                    expr = Expression::MemberExpression(Box::new(MemberExpression {
+                        object: expr,
+                        property,
+                        computed: true,
+                        optional: true,
+                    }));
+                } else if self.consume_opt(Token::LParen)? {
+                    let mut args = Vec::new();
+                    if self.current_token != Some(Token::RParen) {
+                        loop {
+                            if self.current_token == Some(Token::DotDotDot) {
+                                self.advance()?;
+                                let spread = self.parse_assignment_expression()?;
+                                args.push(Expression::SpreadElement(Box::new(spread)));
+                            } else {
+                                args.push(self.parse_assignment_expression()?);
+                            }
+                            if !self.consume_opt(Token::Comma)? {
+                                break;
+                            }
+                        }
+                    }
+                    self.consume_opt(Token::RParen)?;
+                    expr = Expression::CallExpression(Box::new(CallExpression {
+                        callee: expr,
+                        arguments: args,
+                        optional: true,
+                    }));
+                } else {
+                    match self.current_token.clone() {
+                        Some(Token::Identifier(id)) => {
+                            self.advance()?;
+                            expr = Expression::MemberExpression(Box::new(MemberExpression {
+                                object: expr,
+                                property: Expression::Identifier(id),
+                                computed: false,
+                                optional: true,
+                            }));
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "Identifier, LBracket, or LParen".to_string(),
+                                found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                            });
+                        }
+                    }
+                }
             } else if self.consume_opt(Token::LBracket)? {
                 let property = self.parse_expression()?;
                 self.consume_opt(Token::RBracket)?;

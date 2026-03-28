@@ -880,3 +880,53 @@ fn parser_parses_static_getter_and_setter() {
         other => panic!("expected class declaration, got {other:?}"),
     }
 }
+
+#[test]
+fn parser_parses_optional_member_expression() {
+    let lexer = Lexer::new("obj?.foo");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::MemberExpression(member)) => {
+            assert!(member.optional);
+            assert!(!member.computed);
+            assert!(matches!(member.object, Expression::Identifier("obj")));
+            assert!(matches!(member.property, Expression::Identifier("foo")));
+        }
+        other => panic!("expected optional member expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_optional_computed_member_expression() {
+    let lexer = Lexer::new("obj?.[key]");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::MemberExpression(member)) => {
+            assert!(member.optional);
+            assert!(member.computed);
+            assert!(matches!(member.object, Expression::Identifier("obj")));
+            assert!(matches!(member.property, Expression::Identifier("key")));
+        }
+        other => panic!("expected optional computed member expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_optional_call_expression() {
+    let lexer = Lexer::new("fnRef?.()");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ExpressionStatement(Expression::CallExpression(call)) => {
+            assert!(call.optional);
+            assert!(matches!(call.callee, Expression::Identifier("fnRef")));
+            assert!(call.arguments.is_empty());
+        }
+        other => panic!("expected optional call expression, got {other:?}"),
+    }
+}

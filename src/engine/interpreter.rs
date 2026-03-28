@@ -1142,6 +1142,70 @@ impl Interpreter {
                 Ok(JsValue::Object(Rc::new(RefCell::new(values))))
             }
             Expression::MemberExpression(mem) => {
+                if mem.optional {
+                    let object = self.eval_expression(&mem.object, Rc::clone(&env))?;
+                    if matches!(object, JsValue::Undefined | JsValue::Null) {
+                        return Ok(JsValue::Undefined);
+                    }
+                    let property_key = self.member_property_key(mem, Rc::clone(&env))?;
+                    return match object {
+                        JsValue::Object(values) => match get_property_value(&values, &property_key)
+                        {
+                            Some(PropertyValue::Accessor {
+                                getter: Some(JsValue::Function(function)),
+                                ..
+                            }) => self.call_function_value(
+                                function,
+                                JsValue::Object(Rc::clone(&values)),
+                                vec![],
+                            ),
+                            Some(PropertyValue::Data(value)) => Ok(value),
+                            _ => Ok(JsValue::Undefined),
+                        },
+                        JsValue::Array(values) => {
+                            let values = values.borrow();
+                            if property_key == "length" {
+                                Ok(JsValue::Number(values.len() as f64))
+                            } else {
+                                match property_key.parse::<usize>() {
+                                    Ok(index) => {
+                                        Ok(values.get(index).cloned().unwrap_or(JsValue::Undefined))
+                                    }
+                                    Err(_) => Ok(JsValue::Undefined),
+                                }
+                            }
+                        }
+                        JsValue::String(s) => match property_key.as_str() {
+                            "length" => Ok(JsValue::Number(s.chars().count() as f64)),
+                            _ => {
+                                if let Ok(index) = property_key.parse::<usize>() {
+                                    Ok(s.chars()
+                                        .nth(index)
+                                        .map(|c| JsValue::String(c.to_string()))
+                                        .unwrap_or(JsValue::Undefined))
+                                } else {
+                                    Ok(JsValue::Undefined)
+                                }
+                            }
+                        },
+                        JsValue::Function(function) => {
+                            match get_property_value(&function.properties, &property_key) {
+                                Some(PropertyValue::Accessor {
+                                    getter: Some(JsValue::Function(getter)),
+                                    ..
+                                }) => self.call_function_value(
+                                    getter,
+                                    JsValue::Function(Rc::clone(&function)),
+                                    vec![],
+                                ),
+                                Some(PropertyValue::Data(value)) => Ok(value),
+                                _ => Ok(JsValue::Undefined),
+                            }
+                        }
+                        _ => Err(RuntimeError::TypeError("value is not an object".into())),
+                    };
+                }
+
                 if matches!(mem.object, Expression::SuperExpression) {
                     let super_binding = env.borrow().get("super").unwrap_or(JsValue::Undefined);
                     let property_key = self.member_property_key(mem, Rc::clone(&env))?;
@@ -1236,6 +1300,13 @@ impl Interpreter {
                 }
             }
             Expression::CallExpression(call) => {
+                if call.optional {
+                    let callee = self.eval_expression(&call.callee, Rc::clone(&env))?;
+                    if matches!(callee, JsValue::Undefined | JsValue::Null) {
+                        return Ok(JsValue::Undefined);
+                    }
+                }
+
                 let (callee, this_value) = match &call.callee {
                     Expression::MemberExpression(mem)
                         if matches!(mem.object, Expression::SuperExpression) =>

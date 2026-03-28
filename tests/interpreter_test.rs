@@ -1073,3 +1073,46 @@ fn interpreter_writes_static_setter() {
 
     assert_eq!(result, JsValue::Number(42.0));
 }
+
+#[test]
+fn interpreter_short_circuits_optional_member_on_null() {
+    let result = eval_with_interpreter("null?.foo;");
+    assert_eq!(result, JsValue::Undefined);
+}
+
+#[test]
+fn interpreter_short_circuits_optional_computed_member_on_undefined() {
+    let result = eval_with_interpreter("undefined?.[0];");
+    assert_eq!(result, JsValue::Undefined);
+}
+
+#[test]
+fn interpreter_evaluates_optional_member_on_defined_value() {
+    let result = eval_with_interpreter("({ foo: 42 })?.foo;");
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_short_circuits_optional_call_on_undefined() {
+    let result = eval_with_interpreter(
+        r#"
+        let fnRef = undefined;
+        fnRef?.();
+        "#,
+    );
+    assert_eq!(result, JsValue::Undefined);
+}
+
+#[test]
+fn interpreter_preserves_this_for_optional_method_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        let obj = {
+            value: 41,
+            inc() { return this.value + 1; }
+        };
+        obj?.inc();
+        "#,
+    );
+    assert_eq!(result, JsValue::Number(42.0));
+}
