@@ -415,10 +415,11 @@ impl JsValue {
     }
 
     pub fn div(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        if self.bigint_binary_operands(other)?.is_some() {
-            return Err(RuntimeError::TypeError(
-                "BigInt division is not supported yet".into(),
-            ));
+        if let Some((left, right)) = self.bigint_binary_operands(other)? {
+            if right == 0 {
+                return Err(RuntimeError::RangeError("Division by zero".into()));
+            }
+            return Ok(JsValue::BigInt(left / right));
         }
         let left = resolve_indirect_value(self);
         let right = resolve_indirect_value(other);

@@ -33,6 +33,18 @@ fn assert_type_error(result: Result<JsValue, RuntimeError>, expected: &str) {
     }
 }
 
+fn assert_range_error(result: Result<JsValue, RuntimeError>, expected: &str) {
+    match result {
+        Err(RuntimeError::RangeError(message)) => {
+            assert!(
+                message.contains(expected),
+                "expected RangeError containing {expected:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected RangeError containing {expected:?}, got {other:?}"),
+    }
+}
+
 #[test]
 fn interpreter_evaluates_bigint_literal() {
     let result = eval_with_interpreter("123n");
@@ -49,6 +61,36 @@ fn interpreter_evaluates_bigint_hex() {
 fn interpreter_evaluates_bigint_with_numeric_separators() {
     let result = eval_with_interpreter("1_000n");
     assert_eq!(result, JsValue::BigInt(1000));
+}
+
+#[test]
+fn interpreter_divides_bigints() {
+    let result = eval_with_interpreter("8n / 2n");
+    assert_eq!(result, JsValue::BigInt(4));
+}
+
+#[test]
+fn interpreter_divides_bigints_with_truncation() {
+    let result = eval_with_interpreter("7n / 2n");
+    assert_eq!(result, JsValue::BigInt(3));
+}
+
+#[test]
+fn interpreter_rejects_bigint_division_by_zero() {
+    let result = eval_with_interpreter_result("1n / 0n");
+    assert_range_error(result, "Division by zero");
+}
+
+#[test]
+fn interpreter_divides_bigint_assign() {
+    let result = eval_with_interpreter("let x = 8n; x /= 2n; x");
+    assert_eq!(result, JsValue::BigInt(4));
+}
+
+#[test]
+fn interpreter_rejects_bigint_divide_assign_by_zero() {
+    let result = eval_with_interpreter_result("let x = 1n; x /= 0n; x");
+    assert_range_error(result, "Division by zero");
 }
 
 #[test]

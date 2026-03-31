@@ -61,9 +61,10 @@ This document describes the JavaScript syntax features supported by the Agent-JS
 
 #### BigInt Runtime (handwritten interpreter)
 - BigInt literal evaluation returns a dedicated `BigInt` runtime value
-- Supported operations: unary `-`, `+`, `-`, `*`, `<`, `<=`, `>`, `>=`, `==`, `===`
+- Supported operations: unary `-`, `+`, `-`, `*`, `/`, `<`, `<=`, `>`, `>=`, `==`, `===`
 - Mixing `BigInt` with `Number` in arithmetic throws `TypeError`
-- Not yet supported: `/`, `%`, `**` for BigInt
+- BigInt division truncates toward zero and throws `RangeError` on division by zero
+- Not yet supported: `%`, `**` for BigInt
 
 #### Control Flow
 - `for...of` loops

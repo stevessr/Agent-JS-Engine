@@ -37,7 +37,7 @@ cargo run -- --eval "const x = 1_000_000n; print(x)"
 手写 lexer/parser 支持现代 JavaScript 语法特性：
 
 - ✅ **BigInt 字面量**: `123n`, `0xFFn`, `0o77n`, `0b1010n`
-- ✅ 手写解释器已支持基础 BigInt 运行时语义：一元 `-`、`+`、`-`、`*`、比较与相等判断
+- ✅ 手写解释器已支持基础 BigInt 运行时语义：一元 `-`、`+`、`-`、`*`、`/`、比较与相等判断（除零抛 `RangeError`，结果按 zero-truncation 取整）
 - ✅ **数字分隔符**: `1_000_000`, `0xFF_FF`
 - ✅ **异步生成器**: `async function* gen() { yield x; }`
 - ✅ 箭头函数、async/await、生成器

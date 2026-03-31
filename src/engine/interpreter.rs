@@ -20,6 +20,8 @@ pub enum RuntimeError {
     ReferenceError(String),
     #[error("Type Error: {0}")]
     TypeError(String),
+    #[error("Range Error: {0}")]
+    RangeError(String),
     #[error("Syntax Error: {0}")]
     SyntaxError(String),
     #[error("Return: {0:?}")]
