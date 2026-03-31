@@ -4117,8 +4117,7 @@ impl Interpreter {
             | Expression::MetaProperty(_)
             | Expression::FunctionExpression(_)
             | Expression::ArrowFunctionExpression(_)
-            | Expression::ClassExpression(_)
-            | Expression::MetaProperty(_)) => {
+            | Expression::ClassExpression(_)) => {
                 let value = self.eval_expression(&other, env)?;
                 on_complete(self, value)
             }
@@ -5726,37 +5725,7 @@ impl Interpreter {
         }
     }
 
-    fn apply_member_assignment(
-        &mut self,
-        object: JsValue,
-        property_key: &str,
-        operator: &AssignmentOperator,
-        right_value: JsValue,
-    ) -> Result<JsValue, RuntimeError> {
-        let current = self.read_member_value(object.clone(), property_key, None)?;
-        if !self.should_apply_assignment(operator, &current) {
-            return Ok(current);
-        }
-        let value = self.assignment_result(operator, &current, &right_value)?;
-        self.write_member_value(object, property_key, value.clone())?;
-        Ok(value)
-    }
 
-    fn apply_super_member_assignment(
-        &mut self,
-        env: Rc<RefCell<Environment>>,
-        property_key: &str,
-        operator: &AssignmentOperator,
-        right_value: JsValue,
-    ) -> Result<JsValue, RuntimeError> {
-        let current = self.read_super_member_value(Rc::clone(&env), property_key)?;
-        if !self.should_apply_assignment(operator, &current) {
-            return Ok(current);
-        }
-        let value = self.assignment_result(operator, &current, &right_value)?;
-        self.write_super_member_value(env, property_key, value.clone())?;
-        Ok(value)
-    }
 
     fn collect_with_scope_bindings(&self, object: &JsValue) -> Vec<(String, JsValue)> {
         match object {
