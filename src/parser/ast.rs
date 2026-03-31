@@ -224,6 +224,12 @@ pub struct VariableDeclarator<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct MetaProperty<'a> {
+    pub meta: &'a str,
+    pub property: &'a str,
+}
+
+#[derive(Debug, Clone)]
 pub enum Expression<'a> {
     Literal(Literal<'a>),
     Identifier(&'a str),
@@ -236,6 +242,7 @@ pub enum Expression<'a> {
     MemberExpression(Box<MemberExpression<'a>>),
     CallExpression(Box<CallExpression<'a>>),
     NewExpression(Box<CallExpression<'a>>),
+    MetaProperty(Box<MetaProperty<'a>>),
     FunctionExpression(Box<FunctionDeclaration<'a>>),
     ClassExpression(Box<ClassDeclaration<'a>>),
     ThisExpression,

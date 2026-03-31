@@ -754,6 +754,7 @@ impl Interpreter {
             | Expression::Identifier(_)
             | Expression::ThisExpression
             | Expression::SuperExpression
+            | Expression::MetaProperty(_)
             | Expression::FunctionExpression(_)
             | Expression::ArrowFunctionExpression(_)
             | Expression::ClassExpression(_)
@@ -3945,6 +3946,14 @@ impl Interpreter {
                                             this_value.clone(),
                                             args,
                                             is_super_call,
+                                            if is_super_call {
+                                                env_for_this
+                                                    .borrow()
+                                                    .get("__new_target__")
+                                                    .unwrap_or(JsValue::Undefined)
+                                            } else {
+                                                JsValue::Undefined
+                                            },
                                         )?;
                                         if is_super_call {
                                             let initialized_this = if value_is_object_like(&result)
@@ -3999,6 +4008,7 @@ impl Interpreter {
                                                 instance.clone(),
                                                 args,
                                                 true,
+                                                JsValue::Function(Rc::clone(&function)),
                                             )?;
                                             if value_is_object_like(&result) {
                                                 result
@@ -4094,9 +4104,11 @@ impl Interpreter {
             | Expression::PrivateIdentifier(_)
             | Expression::ThisExpression
             | Expression::SuperExpression
+            | Expression::MetaProperty(_)
             | Expression::FunctionExpression(_)
             | Expression::ArrowFunctionExpression(_)
-            | Expression::ClassExpression(_)) => {
+            | Expression::ClassExpression(_)
+            | Expression::MetaProperty(_)) => {
                 let value = self.eval_expression(&other, env)?;
                 on_complete(self, value)
             }
@@ -4111,7 +4123,7 @@ impl Interpreter {
     ) -> Result<JsValue, RuntimeError> {
         match callee {
             JsValue::Function(function) => {
-                self.call_function_value(function, this_value, args, false)
+                self.call_function_value(function, this_value, args, false, JsValue::Undefined)
             }
             JsValue::NativeFunction(function) => (function.func)(self, &this_value, &args),
             JsValue::BuiltinFunction(function) => {
@@ -5053,6 +5065,7 @@ impl Interpreter {
                 }
                 Ok(())
             }
+            Expression::MetaProperty(_) => Ok(()),
             Expression::Literal(_)
             | Expression::Identifier(_)
             | Expression::ThisExpression
@@ -6693,6 +6706,7 @@ impl Interpreter {
         this_value: JsValue,
         args: Vec<JsValue>,
         is_construct_call: bool,
+        new_target: JsValue,
     ) -> Result<JsValue, RuntimeError> {
         if is_construct_call && !function.can_construct {
             return Err(RuntimeError::TypeError("value is not a constructor".into()));
@@ -6721,12 +6735,24 @@ impl Interpreter {
         } else {
             this_value.clone()
         };
+        let resolved_new_target = if function.uses_lexical_this {
+            function
+                .env
+                .borrow()
+                .get("__new_target__")
+                .unwrap_or(JsValue::Undefined)
+        } else {
+            new_target
+        };
         call_env
             .borrow_mut()
             .define("this".to_string(), initial_this);
         call_env
             .borrow_mut()
             .define("__constructor_this__".to_string(), this_value.clone());
+        call_env
+            .borrow_mut()
+            .define("__new_target__".to_string(), resolved_new_target);
         if let Some(super_binding) = &function.super_binding {
             call_env
                 .borrow_mut()
@@ -7911,6 +7937,13 @@ impl Interpreter {
                             this_value.clone(),
                             args,
                             matches!(call.callee, Expression::SuperExpression),
+                            if matches!(call.callee, Expression::SuperExpression) {
+                                env.borrow()
+                                    .get("__new_target__")
+                                    .unwrap_or(JsValue::Undefined)
+                            } else {
+                                JsValue::Undefined
+                            },
                         )?;
                         if matches!(call.callee, Expression::SuperExpression) {
                             let initialized_this = if value_is_object_like(&result) {
@@ -8039,6 +8072,13 @@ impl Interpreter {
             Expression::SuperExpression => {
                 Ok(env.borrow().get("super").unwrap_or(JsValue::Undefined))
             }
+            Expression::MetaProperty(meta) => {
+                if meta.meta == "new" && meta.property == "target" {
+                    Ok(env.borrow().get("__new_target__").unwrap_or(JsValue::Undefined))
+                } else {
+                    Err(RuntimeError::SyntaxError("unsupported meta property".into()))
+                }
+            }
             Expression::FunctionExpression(func) => {
                 Ok(self.create_function_value(func, Rc::clone(&env)))
             }
@@ -8091,6 +8131,7 @@ impl Interpreter {
                             instance.clone(),
                             args,
                             true,
+                            JsValue::Function(Rc::clone(&function)),
                         )?;
                         if value_is_object_like(&result) {
                             Ok(result)
@@ -8742,6 +8783,10 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
             arguments: expr.arguments.iter().map(clone_expression).collect(),
             optional: expr.optional,
         })),
+        Expression::MetaProperty(meta) => Expression::MetaProperty(Box::new(MetaProperty {
+            meta: String::leak(meta.meta.to_string()),
+            property: String::leak(meta.property.to_string()),
+        })),
         Expression::FunctionExpression(func) => {
             Expression::FunctionExpression(Box::new(clone_function_declaration(func)))
         }
@@ -8907,6 +8952,7 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
                 })
                 .collect(),
         ),
+
     }
 }
 

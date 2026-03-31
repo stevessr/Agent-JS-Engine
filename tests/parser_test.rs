@@ -1512,6 +1512,28 @@ fn parser_parses_labeled_break_statement() {
 }
 
 #[test]
+fn parser_parses_new_target_as_meta_property() {
+    let lexer = Lexer::new("function F() { new.target; }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::FunctionDeclaration(function) => {
+            assert!(matches!(
+                &function.body.body[0],
+                Statement::ExpressionStatement(Expression::MetaProperty(meta))
+                    if meta.meta == "new" && meta.property == "target"
+            ));
+            assert!(!matches!(
+                &function.body.body[0],
+                Statement::ExpressionStatement(Expression::NewExpression(_))
+            ));
+        }
+        other => panic!("expected function declaration, got {other:?}"),
+    }
+}
+
+#[test]
 fn parser_parses_class_declaration_with_constructor_and_method() {
     let lexer = Lexer::new("class Foo { constructor() {} bar() {} }");
     let mut parser = Parser::new(lexer).expect("parser should initialize");

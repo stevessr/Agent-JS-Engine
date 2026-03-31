@@ -2798,6 +2798,58 @@ fn interpreter_uses_default_parameter_in_class_method() {
 }
 
 #[test]
+fn interpreter_returns_new_target_for_construct_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        function F() { this.seen = new.target === F; }
+        (new F()).seen;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn interpreter_returns_undefined_new_target_for_plain_calls() {
+    let result = eval_with_interpreter(
+        r#"
+        function F() { return new.target; }
+        F();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Undefined);
+}
+
+#[test]
+fn interpreter_supports_new_target_in_class_constructors() {
+    let result = eval_with_interpreter(
+        r#"
+        class A {
+            constructor() { this.seen = new.target === A; }
+        }
+        (new A()).seen;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
+fn interpreter_lexically_captures_new_target_in_arrow_functions() {
+    let result = eval_with_interpreter(
+        r#"
+        function Outer() {
+            this.seen = (() => new.target === Outer)();
+        }
+        (new Outer()).seen;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Boolean(true));
+}
+
+#[test]
 fn interpreter_supports_class_static_blocks() {
     let result = eval_with_interpreter(
         r#"

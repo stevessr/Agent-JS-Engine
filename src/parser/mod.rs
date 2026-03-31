@@ -244,7 +244,7 @@ impl<'a> Parser<'a> {
     fn token_starts_method_key(token: &Token<'a>) -> bool {
         matches!(
             token,
-            Token::String(_) | Token::Number(_) | Token::LBracket | Token::PrivateIdentifier(_)
+            Token::String(_) | Token::Number(_) | Token::BigInt(_) | Token::LBracket | Token::PrivateIdentifier(_)
         ) || Self::token_as_identifier_name(token).is_some()
     }
 
@@ -2215,6 +2215,21 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Expression::Literal(Literal::Number(v)))
             }
+            Some(Token::BigInt(s)) => {
+                let v = *s;
+                self.advance()?;
+                let num_str = v.replace('_', "");
+                let parsed = if num_str.starts_with("0x") || num_str.starts_with("0X") {
+                    i64::from_str_radix(&num_str[2..], 16).unwrap_or(0)
+                } else if num_str.starts_with("0o") || num_str.starts_with("0O") {
+                    i64::from_str_radix(&num_str[2..], 8).unwrap_or(0)
+                } else if num_str.starts_with("0b") || num_str.starts_with("0B") {
+                    i64::from_str_radix(&num_str[2..], 2).unwrap_or(0)
+                } else {
+                    num_str.parse::<i64>().unwrap_or(0)
+                };
+                Ok(Expression::Literal(Literal::BigInt(parsed)))
+            }
             Some(Token::String(s)) => {
                 let v = *s;
                 self.advance()?;
@@ -2276,6 +2291,23 @@ impl<'a> Parser<'a> {
             Some(Token::LBrace) => self.parse_object_literal(),
             Some(Token::New) => {
                 self.advance()?; // 'new'
+                if self.consume_opt(Token::Dot)? {
+                    match self.current_token.clone() {
+                        Some(token) if Self::token_as_identifier_name(&token) == Some("target") => {
+                            self.advance()?;
+                            return Ok(Expression::MetaProperty(Box::new(MetaProperty {
+                                meta: "new",
+                                property: "target",
+                            })));
+                        }
+                        _ => {
+                            return Err(ParseError::UnexpectedToken {
+                                expected: "target".to_string(),
+                                found: self.current_token.as_ref().map(|t| format!("{:?}", t)),
+                            });
+                        }
+                    }
+                }
                 let mut callee = self.parse_primary()?;
 
                 loop {
