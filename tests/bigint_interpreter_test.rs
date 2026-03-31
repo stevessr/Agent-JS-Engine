@@ -21,6 +21,18 @@ fn eval_with_interpreter_result(source: &str) -> Result<JsValue, RuntimeError> {
     interpreter.eval_program(&program)
 }
 
+fn assert_type_error(result: Result<JsValue, RuntimeError>, expected: &str) {
+    match result {
+        Err(RuntimeError::TypeError(message)) => {
+            assert!(
+                message.contains(expected),
+                "expected TypeError containing {expected:?}, got {message:?}"
+            );
+        }
+        other => panic!("expected TypeError containing {expected:?}, got {other:?}"),
+    }
+}
+
 #[test]
 fn interpreter_evaluates_bigint_literal() {
     let result = eval_with_interpreter("123n");
@@ -72,11 +84,107 @@ fn interpreter_supports_bigint_equality() {
 #[test]
 fn interpreter_rejects_mixed_bigint_arithmetic() {
     let result = eval_with_interpreter_result("1n + 1");
-    assert!(matches!(result, Err(RuntimeError::TypeError(message)) if message.contains("cannot mix BigInt")));
+    assert_type_error(result, "cannot mix BigInt");
 }
 
 #[test]
 fn interpreter_rejects_unary_plus_on_bigint() {
     let result = eval_with_interpreter_result("+1n");
-    assert!(matches!(result, Err(RuntimeError::TypeError(message)) if message.contains("cannot convert BigInt")));
+    assert_type_error(result, "cannot convert BigInt");
+}
+
+#[test]
+fn interpreter_rejects_bigint_remainder() {
+    let result = eval_with_interpreter_result("1n % 1n");
+    assert_type_error(result, "BigInt remainder is not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_exponentiation() {
+    let result = eval_with_interpreter_result("1n ** 1n");
+    assert_type_error(result, "BigInt exponentiation is not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitwise_and() {
+    let result = eval_with_interpreter_result("1n & 1n");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitwise_or() {
+    let result = eval_with_interpreter_result("1n | 1n");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitwise_xor() {
+    let result = eval_with_interpreter_result("1n ^ 1n");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_left_shift() {
+    let result = eval_with_interpreter_result("1n << 1n");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_right_shift() {
+    let result = eval_with_interpreter_result("1n >> 1n");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_unsigned_right_shift() {
+    let result = eval_with_interpreter_result("1n >>> 1n");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_remainder_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x %= 1n; x");
+    assert_type_error(result, "BigInt remainder is not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_power_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x **= 1n; x");
+    assert_type_error(result, "BigInt exponentiation is not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitand_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x &= 1n; x");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitor_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x |= 1n; x");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_bitxor_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x ^= 1n; x");
+    assert_type_error(result, "BigInt bitwise operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_left_shift_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x <<= 1n; x");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_right_shift_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x >>= 1n; x");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
+}
+
+#[test]
+fn interpreter_rejects_bigint_unsigned_right_shift_assign() {
+    let result = eval_with_interpreter_result("let x = 1n; x >>>= 1n; x");
+    assert_type_error(result, "BigInt shift operations are not supported yet");
 }

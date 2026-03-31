@@ -5226,6 +5226,18 @@ impl Interpreter {
         number.trunc().rem_euclid(4294967296.0) as u32
     }
 
+    fn bigint_unsupported_binary_operation(
+        &self,
+        left: &JsValue,
+        right: &JsValue,
+        message: &'static str,
+    ) -> Result<(), RuntimeError> {
+        if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
+            return Err(RuntimeError::TypeError(message.into()));
+        }
+        Ok(())
+    }
+
     fn assignment_result(
         &self,
         operator: &AssignmentOperator,
@@ -5239,42 +5251,78 @@ impl Interpreter {
             AssignmentOperator::MultiplyAssign => left.mul(right),
             AssignmentOperator::DivideAssign => left.div(right),
             AssignmentOperator::PercentAssign => {
-                if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
-                    return Err(RuntimeError::TypeError(
-                        "BigInt remainder is not supported yet".into(),
-                    ));
-                }
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt remainder is not supported yet",
+                )?;
                 Ok(JsValue::Number(left.as_number() % right.as_number()))
             }
             AssignmentOperator::PowerAssign => {
-                if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
-                    return Err(RuntimeError::TypeError(
-                        "BigInt exponentiation is not supported yet".into(),
-                    ));
-                }
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt exponentiation is not supported yet",
+                )?;
                 Ok(JsValue::Number(left.as_number().powf(right.as_number())))
             }
             AssignmentOperator::LogicAndAssign
             | AssignmentOperator::LogicOrAssign
             | AssignmentOperator::NullishAssign => Ok(right.clone()),
-            AssignmentOperator::BitAndAssign => Ok(JsValue::Number(
-                (self.to_int32(left) & self.to_int32(right)) as f64,
-            )),
-            AssignmentOperator::BitOrAssign => Ok(JsValue::Number(
-                (self.to_int32(left) | self.to_int32(right)) as f64,
-            )),
-            AssignmentOperator::BitXorAssign => Ok(JsValue::Number(
-                (self.to_int32(left) ^ self.to_int32(right)) as f64,
-            )),
+            AssignmentOperator::BitAndAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(left) & self.to_int32(right)) as f64,
+                ))
+            }
+            AssignmentOperator::BitOrAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(left) | self.to_int32(right)) as f64,
+                ))
+            }
+            AssignmentOperator::BitXorAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(left) ^ self.to_int32(right)) as f64,
+                ))
+            }
             AssignmentOperator::ShiftLeftAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(right) & 0x1f;
                 Ok(JsValue::Number((self.to_int32(left) << shift) as f64))
             }
             AssignmentOperator::ShiftRightAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(right) & 0x1f;
                 Ok(JsValue::Number((self.to_int32(left) >> shift) as f64))
             }
             AssignmentOperator::UnsignedShiftRightAssign => {
+                self.bigint_unsupported_binary_operation(
+                    left,
+                    right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(right) & 0x1f;
                 Ok(JsValue::Number((self.to_uint32(left) >> shift) as f64))
             }
@@ -5292,25 +5340,68 @@ impl Interpreter {
             BinaryOperator::Minus => left.sub(&right),
             BinaryOperator::Multiply => left.mul(&right),
             BinaryOperator::Divide => left.div(&right),
-            BinaryOperator::Percent => Ok(JsValue::Number(left.as_number() % right.as_number())),
-            BinaryOperator::BitAnd => Ok(JsValue::Number(
-                (self.to_int32(&left) & self.to_int32(&right)) as f64,
-            )),
-            BinaryOperator::BitOr => Ok(JsValue::Number(
-                (self.to_int32(&left) | self.to_int32(&right)) as f64,
-            )),
-            BinaryOperator::BitXor => Ok(JsValue::Number(
-                (self.to_int32(&left) ^ self.to_int32(&right)) as f64,
-            )),
+            BinaryOperator::Percent => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt remainder is not supported yet",
+                )?;
+                Ok(JsValue::Number(left.as_number() % right.as_number()))
+            }
+            BinaryOperator::BitAnd => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(&left) & self.to_int32(&right)) as f64,
+                ))
+            }
+            BinaryOperator::BitOr => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(&left) | self.to_int32(&right)) as f64,
+                ))
+            }
+            BinaryOperator::BitXor => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt bitwise operations are not supported yet",
+                )?;
+                Ok(JsValue::Number(
+                    (self.to_int32(&left) ^ self.to_int32(&right)) as f64,
+                ))
+            }
             BinaryOperator::ShiftLeft => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(&right) & 0x1f;
                 Ok(JsValue::Number((self.to_int32(&left) << shift) as f64))
             }
             BinaryOperator::ShiftRight => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(&right) & 0x1f;
                 Ok(JsValue::Number((self.to_int32(&left) >> shift) as f64))
             }
             BinaryOperator::LogicalShiftRight => {
+                self.bigint_unsupported_binary_operation(
+                    &left,
+                    &right,
+                    "BigInt shift operations are not supported yet",
+                )?;
                 let shift = self.to_uint32(&right) & 0x1f;
                 Ok(JsValue::Number((self.to_uint32(&left) >> shift) as f64))
             }
@@ -7482,31 +7573,67 @@ impl Interpreter {
                     BinaryOperator::Multiply => left.mul(&right),
                     BinaryOperator::Divide => left.div(&right),
                     BinaryOperator::Percent => {
-                        if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
-                            return Err(RuntimeError::TypeError(
-                                "BigInt remainder is not supported yet".into(),
-                            ));
-                        }
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt remainder is not supported yet",
+                        )?;
                         Ok(JsValue::Number(left.as_number() % right.as_number()))
                     }
-                    BinaryOperator::BitAnd => Ok(JsValue::Number(
-                        (self.to_int32(&left) & self.to_int32(&right)) as f64,
-                    )),
-                    BinaryOperator::BitOr => Ok(JsValue::Number(
-                        (self.to_int32(&left) | self.to_int32(&right)) as f64,
-                    )),
-                    BinaryOperator::BitXor => Ok(JsValue::Number(
-                        (self.to_int32(&left) ^ self.to_int32(&right)) as f64,
-                    )),
+                    BinaryOperator::BitAnd => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt bitwise operations are not supported yet",
+                        )?;
+                        Ok(JsValue::Number(
+                            (self.to_int32(&left) & self.to_int32(&right)) as f64,
+                        ))
+                    }
+                    BinaryOperator::BitOr => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt bitwise operations are not supported yet",
+                        )?;
+                        Ok(JsValue::Number(
+                            (self.to_int32(&left) | self.to_int32(&right)) as f64,
+                        ))
+                    }
+                    BinaryOperator::BitXor => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt bitwise operations are not supported yet",
+                        )?;
+                        Ok(JsValue::Number(
+                            (self.to_int32(&left) ^ self.to_int32(&right)) as f64,
+                        ))
+                    }
                     BinaryOperator::ShiftLeft => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt shift operations are not supported yet",
+                        )?;
                         let shift = self.to_uint32(&right) & 0x1f;
                         Ok(JsValue::Number((self.to_int32(&left) << shift) as f64))
                     }
                     BinaryOperator::ShiftRight => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt shift operations are not supported yet",
+                        )?;
                         let shift = self.to_uint32(&right) & 0x1f;
                         Ok(JsValue::Number((self.to_int32(&left) >> shift) as f64))
                     }
                     BinaryOperator::LogicalShiftRight => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt shift operations are not supported yet",
+                        )?;
                         let shift = self.to_uint32(&right) & 0x1f;
                         Ok(JsValue::Number((self.to_uint32(&left) >> shift) as f64))
                     }
@@ -7519,6 +7646,11 @@ impl Interpreter {
                     BinaryOperator::Greater => left.gt(&right),
                     BinaryOperator::GreaterEq => left.ge(&right),
                     BinaryOperator::Power => {
+                        self.bigint_unsupported_binary_operation(
+                            &left,
+                            &right,
+                            "BigInt exponentiation is not supported yet",
+                        )?;
                         Ok(JsValue::Number(left.as_number().powf(right.as_number())))
                     }
                     BinaryOperator::Instanceof => match (&left, &right) {
