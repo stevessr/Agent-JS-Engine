@@ -5079,7 +5079,7 @@ impl Interpreter {
                 ClassElement::Field { key, is_static, .. } => {
                     (key, Some(PrivateDeclarationKind::Field), *is_static)
                 }
-                ClassElement::Constructor { .. } => continue,
+                ClassElement::Constructor { .. } | ClassElement::StaticBlock(_) => continue,
             };
 
             if let (ObjectKey::PrivateIdentifier(name), Some(kind)) = (key, kind) {
@@ -5114,6 +5114,9 @@ impl Interpreter {
                     if let Some(initializer) = initializer {
                         self.validate_private_names_in_expression(initializer, &declared_names)?;
                     }
+                }
+                ClassElement::StaticBlock(block) => {
+                    self.validate_private_names_in_block(block, &declared_names)?;
                 }
             }
         }
@@ -6335,6 +6338,35 @@ impl Interpreter {
 
         let mut instance_fields = Vec::new();
         let mut private_elements = ClassPrivateElements::default();
+        let static_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
+        static_env
+            .borrow_mut()
+            .define("this".to_string(), class_value.clone());
+        static_env
+            .borrow_mut()
+            .define("__constructor_this__".to_string(), class_value.clone());
+        static_env.borrow_mut().define(
+            "__private_brand__".to_string(),
+            JsValue::Number(private_brand as f64),
+        );
+        if let Some(class_name) = class_decl.id {
+            static_env
+                .borrow_mut()
+                .define(class_name.to_string(), class_value.clone());
+        }
+        if let Some(super_binding) = &super_value {
+            static_env
+                .borrow_mut()
+                .define("super".to_string(), super_binding.clone());
+        }
+        static_env.borrow_mut().define(
+            "__home_object__".to_string(),
+            class_value.clone(),
+        );
+        static_env.borrow_mut().define(
+            "__super_property_base__".to_string(),
+            super_value.clone().unwrap_or(JsValue::Null),
+        );
 
         for element in &class_decl.body {
             match element {
@@ -6609,7 +6641,7 @@ impl Interpreter {
                     let field_key = self.class_public_key_to_string(key, Rc::clone(&env))?;
                     if *is_static {
                         let field_value = match initializer {
-                            Some(expr) => self.eval_expression(expr, Rc::clone(&env))?,
+                            Some(expr) => self.eval_expression(expr, Rc::clone(&static_env))?,
                             None => JsValue::Undefined,
                         };
                         function.properties.borrow_mut().insert(
@@ -6622,6 +6654,12 @@ impl Interpreter {
                             initializer: initializer.as_ref().map(clone_expression),
                         });
                     }
+                }
+                ClassElement::StaticBlock(block) => {
+                    self.eval_statement(
+                        &Statement::BlockStatement(block.clone()),
+                        Rc::clone(&static_env),
+                    )?;
                 }
                 _ => {}
             }
@@ -6637,17 +6675,6 @@ impl Interpreter {
             .insert(private_brand, private_elements.clone());
 
         if !private_elements.static_fields.is_empty() {
-            let static_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
-            static_env
-                .borrow_mut()
-                .define("this".to_string(), class_value.clone());
-            static_env
-                .borrow_mut()
-                .define("__constructor_this__".to_string(), class_value.clone());
-            static_env.borrow_mut().define(
-                "__private_brand__".to_string(),
-                JsValue::Number(private_brand as f64),
-            );
             for field in private_elements.static_fields {
                 let value = match &field.initializer {
                     Some(expr) => self.eval_expression(expr, Rc::clone(&static_env))?,
@@ -8462,6 +8489,9 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
                             is_static: *is_static,
                         }
                     }
+                    ClassElement::StaticBlock(block) => {
+                        ClassElement::StaticBlock(clone_block_statement(block))
+                    }
                 })
                 .collect();
             Statement::ClassDeclaration(ClassDeclaration {
@@ -8582,6 +8612,9 @@ fn clone_statement(stmt: &Statement<'_>) -> Statement<'static> {
                                         initializer: initializer.as_ref().map(clone_expression),
                                         is_static: *is_static,
                                     }
+                                }
+                                ClassElement::StaticBlock(block) => {
+                                    ClassElement::StaticBlock(clone_block_statement(block))
                                 }
                             })
                             .collect();
@@ -8831,6 +8864,9 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
                             initializer: initializer.as_ref().map(clone_expression),
                             is_static: *is_static,
                         }
+                    }
+                    ClassElement::StaticBlock(block) => {
+                        ClassElement::StaticBlock(clone_block_statement(block))
                     }
                 })
                 .collect();

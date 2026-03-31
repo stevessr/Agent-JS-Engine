@@ -2798,6 +2798,81 @@ fn interpreter_uses_default_parameter_in_class_method() {
 }
 
 #[test]
+fn interpreter_supports_class_static_blocks() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static { this.value = 42; }
+        }
+        Foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_runs_static_blocks_in_source_order_with_static_fields() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static value = 1;
+            static { this.answer = this.value + 1; }
+        }
+        Foo.answer;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(2.0));
+}
+
+#[test]
+fn interpreter_binds_this_to_class_inside_static_blocks() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static { this.value = Foo === this ? 42 : 0; }
+        }
+        Foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_supports_super_inside_static_blocks() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            static value() { return 41; }
+        }
+        class Foo extends Base {
+            static { this.answer = super.value() + 1; }
+        }
+        Foo.answer;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_runs_multiple_static_blocks_in_order() {
+    let result = eval_with_interpreter(
+        r#"
+        class Foo {
+            static { this.value = 20; }
+            static { this.value += 22; }
+        }
+        Foo.value;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
 fn interpreter_rejects_new_on_class_methods() {
     let error = eval_with_interpreter_result(
         r#"

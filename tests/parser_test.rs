@@ -1542,6 +1542,42 @@ fn parser_parses_class_declaration_with_constructor_and_method() {
 }
 
 #[test]
+fn parser_parses_class_static_block() {
+    let lexer = Lexer::new("class Foo { static { value = 1; } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(
+                &class_decl.body[0],
+                ClassElement::StaticBlock(block)
+                    if matches!(
+                        &block.body[0],
+                        Statement::ExpressionStatement(Expression::AssignmentExpression(_))
+                    )
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_preserves_static_block_order_with_other_class_elements() {
+    let lexer = Lexer::new("class Foo { static value = 1; static { other = 2; } bar() {} }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            assert!(matches!(class_decl.body[0], ClassElement::Field { is_static: true, .. }));
+            assert!(matches!(class_decl.body[1], ClassElement::StaticBlock(_)));
+            assert!(matches!(class_decl.body[2], ClassElement::Method { .. }));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+#[test]
 fn parser_parses_class_extends_and_super_call() {
     let lexer = Lexer::new("class Foo extends Bar { constructor() { super(); } }");
     let mut parser = Parser::new(lexer).expect("parser should initialize");

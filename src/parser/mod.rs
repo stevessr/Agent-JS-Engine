@@ -1998,6 +1998,11 @@ impl<'a> Parser<'a> {
                 ) {
                     is_static = true;
                     self.advance()?;
+                    if self.current_token == Some(Token::LBrace) {
+                        let block = self.parse_block_statement()?;
+                        body.push(ClassElement::StaticBlock(block));
+                        continue;
+                    }
                 }
             }
 

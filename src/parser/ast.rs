@@ -186,6 +186,7 @@ pub enum ClassElement<'a> {
         initializer: Option<Expression<'a>>,
         is_static: bool,
     },
+    StaticBlock(BlockStatement<'a>),
 }
 
 #[derive(Debug, Clone)]
