@@ -2266,8 +2266,137 @@ fn interpreter_errors_on_invalid_assignment_target() {
 }
 
 #[test]
-fn interpreter_evaluates_bitwise_binary_and() {
-    let result = eval_with_interpreter("5 & 3;");
+fn interpreter_evaluates_destructuring_member_target_object_before_key() {
+    let result = eval_with_interpreter(
+        r#"
+        let log = "";
+        function getObject() {
+            log = log + "obj,";
+            return {
+                set value(v) {
+                    log = log + "set:" + v;
+                }
+            };
+        }
+        function getKey() {
+            log = log + "key,";
+            return "value";
+        }
+        [getObject()[getKey()]] = [1];
+        log;
+        "#,
+    );
+
+    assert_eq!(result, JsValue::String("obj,key,set:1".to_string()));
+}
+
+#[test]
+fn interpreter_short_circuits_super_logical_assignment_rhs() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            get value() { return 1; }
+            set value(v) { this.answer = v; }
+        }
+        class Foo extends Base {
+            run() {
+                let side = 0;
+                super.value ||= (side = 1);
+                return side;
+            }
+        }
+        new Foo().run();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(0.0));
+}
+
+#[test]
+fn interpreter_applies_super_nullish_assignment_through_setter() {
+    let result = eval_with_interpreter(
+        r#"
+        class Base {
+            get value() { return undefined; }
+            set value(v) { this.answer = v + 1; }
+        }
+        class Foo extends Base {
+            run() {
+                super.value ??= 41;
+                return this.answer;
+            }
+        }
+        new Foo().run();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(42.0));
+}
+
+#[test]
+fn interpreter_short_circuits_private_logical_assignment_rhs() {
+    let result = eval_with_interpreter(
+        r#"
+        class Box {
+            #value = 1;
+            run() {
+                let side = 0;
+                this.#value ||= (side = 1);
+                return side;
+            }
+        }
+        new Box().run();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(0.0));
+}
+
+#[test]
+fn interpreter_applies_private_accessor_logical_assignment_once() {
+    let result = eval_with_interpreter(
+        r#"
+        class Box {
+            #value = 0;
+            #reads = 0;
+            #writes = 0;
+            get #current() {
+                this.#reads += 1;
+                return this.#value;
+            }
+            set #current(v) {
+                this.#writes += 1;
+                this.#value = v;
+            }
+            run() {
+                this.#current ||= 42;
+                return this.#reads * 100 + this.#writes * 10 + this.#value;
+            }
+        }
+        new Box().run();
+        "#,
+    );
+
+    assert_eq!(result, JsValue::Number(52.0));
+}
+
+#[test]
+fn interpreter_generator_short_circuits_private_nullish_assignment_rhs() {
+    let result = eval_with_interpreter(
+        r#"
+        class Box {
+            #value = 1;
+            *run() {
+                this.#value ??= yield 1;
+                return this.#value;
+            }
+        }
+        let iterator = new Box().run();
+        let first = iterator.next();
+        first.value;
+        "#,
+    );
+
     assert_eq!(result, JsValue::Number(1.0));
 }
 

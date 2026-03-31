@@ -2049,16 +2049,116 @@ fn parser_rejects_optional_private_member_chains() {
     ));
 }
 
+
 #[test]
-fn parser_rejects_delete_private_member_expressions() {
-    let lexer = Lexer::new("delete this.#secret;");
+fn parser_parses_super_assignment_targets() {
+    let lexer = Lexer::new("class Foo extends Bar { write() { super.value = 1; super[key] ??= 2; } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            let method = class_decl
+                .body
+                .iter()
+                .find_map(|element| match element {
+                    ClassElement::Method {
+                        key: ObjectKey::Identifier("write"),
+                        value,
+                        ..
+                    } => Some(value),
+                    _ => None,
+                })
+                .expect("expected write method");
+
+            assert!(matches!(
+                &method.body.body[0],
+                Statement::ExpressionStatement(Expression::AssignmentExpression(assign))
+                    if matches!(assign.operator, AssignmentOperator::Assign)
+                        && matches!(
+                            assign.left,
+                            Expression::MemberExpression(ref member)
+                                if matches!(member.object, Expression::SuperExpression)
+                                    && !member.computed
+                                    && matches!(member.property, Expression::Identifier("value"))
+                        )
+            ));
+
+            assert!(matches!(
+                &method.body.body[1],
+                Statement::ExpressionStatement(Expression::AssignmentExpression(assign))
+                    if matches!(assign.operator, AssignmentOperator::NullishAssign)
+                        && matches!(
+                            assign.left,
+                            Expression::MemberExpression(ref member)
+                                if matches!(member.object, Expression::SuperExpression)
+                                    && member.computed
+                                    && matches!(member.property, Expression::Identifier("key"))
+                        )
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_parses_private_assignment_targets() {
+    let lexer = Lexer::new("class Foo { write() { this.#x = 1; this.#x ||= 2; } }");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    match &program.body[0] {
+        Statement::ClassDeclaration(class_decl) => {
+            let method = class_decl
+                .body
+                .iter()
+                .find_map(|element| match element {
+                    ClassElement::Method {
+                        key: ObjectKey::Identifier("write"),
+                        value,
+                        ..
+                    } => Some(value),
+                    _ => None,
+                })
+                .expect("expected write method");
+
+            assert!(matches!(
+                &method.body.body[0],
+                Statement::ExpressionStatement(Expression::AssignmentExpression(assign))
+                    if matches!(assign.operator, AssignmentOperator::Assign)
+                        && matches!(
+                            assign.left,
+                            Expression::MemberExpression(ref member)
+                                if matches!(member.object, Expression::ThisExpression)
+                                    && !member.computed
+                                    && matches!(member.property, Expression::PrivateIdentifier("x"))
+                        )
+            ));
+
+            assert!(matches!(
+                &method.body.body[1],
+                Statement::ExpressionStatement(Expression::AssignmentExpression(assign))
+                    if matches!(assign.operator, AssignmentOperator::LogicOrAssign)
+                        && matches!(
+                            assign.left,
+                            Expression::MemberExpression(ref member)
+                                if matches!(member.object, Expression::ThisExpression)
+                                    && !member.computed
+                                    && matches!(member.property, Expression::PrivateIdentifier("x"))
+                        )
+            ));
+        }
+        other => panic!("expected class declaration, got {other:?}"),
+    }
+}
+
+#[test]
+fn parser_rejects_super_as_assignment_target() {
+    let lexer = Lexer::new("class Foo extends Bar { write() { super ||= 1; } }");
     let mut parser = Parser::new(lexer).expect("parser should initialize");
     let error = parser
         .parse_program()
-        .expect_err("delete private member should fail");
+        .expect_err("super logical assignment target should fail");
 
-    assert!(matches!(
-        error,
-        ai_agent::parser::ParseError::InvalidPrivateIdentifierUsage(_)
-    ));
+    assert!(matches!(error, ai_agent::parser::ParseError::InvalidAssignmentTarget));
 }

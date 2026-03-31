@@ -5885,14 +5885,13 @@ impl Interpreter {
                 if let Some(name) = self.member_private_name(member) {
                     let object = self.eval_expression(&member.object, Rc::clone(&env))?;
                     self.write_private_member_value(object, name, value, env)?;
-                } else {
+                } else if matches!(member.object, Expression::SuperExpression) {
                     let property_key = self.member_property_key(member, Rc::clone(&env))?;
-                    if matches!(member.object, Expression::SuperExpression) {
-                        self.write_super_member_value(env, &property_key, value)?;
-                    } else {
-                        let object = self.eval_expression(&member.object, Rc::clone(&env))?;
-                        self.write_member_value(object, &property_key, value)?;
-                    }
+                    self.write_super_member_value(env, &property_key, value)?;
+                } else {
+                    let object = self.eval_expression(&member.object, Rc::clone(&env))?;
+                    let property_key = self.member_property_key(member, Rc::clone(&env))?;
+                    self.write_member_value(object, &property_key, value)?;
                 }
                 Ok(())
             }
