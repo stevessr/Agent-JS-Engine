@@ -1484,7 +1484,9 @@ fn ensure_deferred_module_loaded_and_linked(
                     }
                     PromiseState::Pending => {
                         return Err(JsNativeError::typ()
-                            .with_message("deferred namespace module remained pending during evaluation")
+                            .with_message(
+                                "deferred namespace module remained pending during evaluation",
+                            )
                             .into());
                     }
                 }

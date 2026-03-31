@@ -1,5 +1,5 @@
 use crate::engine::env::Environment;
-use crate::engine::interpreter::RuntimeError;
+use crate::engine::interpreter::{GeneratorState, Interpreter, RuntimeError};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -11,12 +11,75 @@ pub struct FunctionValue {
     pub prototype: JsValue,
     pub properties: JsObjectMap,
     pub super_binding: Option<JsValue>,
+    pub super_property_base: Option<JsValue>,
+    pub home_object: Option<JsValue>,
+    pub private_brand: Option<usize>,
+    pub uses_lexical_this: bool,
+    pub can_construct: bool,
     pub is_class_constructor: bool,
     pub is_derived_constructor: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum PromiseState {
+    Pending,
+    Fulfilled(JsValue),
+    Rejected(JsValue),
+}
+
+#[derive(Debug, Clone)]
+pub enum PromiseReactionKind {
+    Then {
+        on_fulfilled: Option<JsValue>,
+        on_rejected: Option<JsValue>,
+    },
+    Finally {
+        on_finally: Option<JsValue>,
+    },
+    FinallyPassThrough {
+        original_state: PromiseState,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PromiseReaction {
+    pub kind: PromiseReactionKind,
+    pub result_promise: Rc<RefCell<PromiseValue>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromiseValue {
+    pub state: PromiseState,
+    pub reactions: Vec<PromiseReaction>,
+}
+
+#[derive(Debug, Clone)]
+pub enum BuiltinFunction {
+    PromiseConstructor,
+    PromiseResolve,
+    PromiseReject,
+    PromiseThen,
+    PromiseCatch,
+    PromiseFinally,
+    ModuleBindingGetter {
+        env: Rc<RefCell<Environment>>,
+        binding: String,
+    },
+    NamespaceBindingGetter {
+        namespace: JsValue,
+        export_name: String,
+    },
+    AsyncGeneratorResultMapper {
+        done: bool,
+    },
+    PromiseResolver {
+        promise: Rc<RefCell<PromiseValue>>,
+        is_resolve: bool,
+    },
+}
+
 /// A native (Rust) built-in function.
-pub type NativeFn = fn(&JsValue, &[JsValue]) -> Result<JsValue, RuntimeError>;
+pub type NativeFn = fn(&mut Interpreter, &JsValue, &[JsValue]) -> Result<JsValue, RuntimeError>;
 
 #[derive(Clone)]
 pub struct NativeFunction {
@@ -50,8 +113,16 @@ pub enum JsValue {
     String(String),
     Array(Rc<RefCell<Vec<JsValue>>>),
     Object(JsObjectMap),
+    EnvironmentObject(Rc<RefCell<Environment>>),
+    Promise(Rc<RefCell<PromiseValue>>),
+    GeneratorState(Rc<RefCell<GeneratorState>>),
+    ImportBinding {
+        namespace: JsObjectMap,
+        export_name: String,
+    },
     Function(Rc<FunctionValue>),
     NativeFunction(Rc<NativeFunction>),
+    BuiltinFunction(Rc<BuiltinFunction>),
 }
 
 impl PartialEq for JsValue {
@@ -64,8 +135,22 @@ impl PartialEq for JsValue {
             (JsValue::String(l), JsValue::String(r)) => l == r,
             (JsValue::Array(l), JsValue::Array(r)) => Rc::ptr_eq(l, r),
             (JsValue::Object(l), JsValue::Object(r)) => Rc::ptr_eq(l, r),
+            (JsValue::EnvironmentObject(l), JsValue::EnvironmentObject(r)) => Rc::ptr_eq(l, r),
+            (JsValue::Promise(l), JsValue::Promise(r)) => Rc::ptr_eq(l, r),
+            (JsValue::GeneratorState(l), JsValue::GeneratorState(r)) => Rc::ptr_eq(l, r),
+            (
+                JsValue::ImportBinding {
+                    namespace: l_namespace,
+                    export_name: l_export_name,
+                },
+                JsValue::ImportBinding {
+                    namespace: r_namespace,
+                    export_name: r_export_name,
+                },
+            ) => Rc::ptr_eq(l_namespace, r_namespace) && l_export_name == r_export_name,
             (JsValue::Function(l), JsValue::Function(r)) => Rc::ptr_eq(l, r),
             (JsValue::NativeFunction(l), JsValue::NativeFunction(r)) => Rc::ptr_eq(l, r),
+            (JsValue::BuiltinFunction(l), JsValue::BuiltinFunction(r)) => Rc::ptr_eq(l, r),
             _ => false,
         }
     }
@@ -122,10 +207,18 @@ impl JsValue {
             JsValue::Boolean(b) => *b,
             JsValue::Number(n) => *n != 0.0 && !n.is_nan(),
             JsValue::String(s) => !s.is_empty(),
+            JsValue::ImportBinding {
+                namespace,
+                export_name,
+            } => resolve_namespace_export(namespace, export_name).is_truthy(),
             JsValue::Array(_)
             | JsValue::Object(_)
+            | JsValue::EnvironmentObject(_)
+            | JsValue::Promise(_)
+            | JsValue::GeneratorState(_)
             | JsValue::Function(_)
-            | JsValue::NativeFunction(_) => true,
+            | JsValue::NativeFunction(_)
+            | JsValue::BuiltinFunction(_) => true,
         }
     }
 
@@ -136,8 +229,18 @@ impl JsValue {
             JsValue::Boolean(_) => "boolean".to_string(),
             JsValue::Number(_) => "number".to_string(),
             JsValue::String(_) => "string".to_string(),
-            JsValue::Array(_) | JsValue::Object(_) => "object".to_string(),
-            JsValue::Function(_) | JsValue::NativeFunction(_) => "function".to_string(),
+            JsValue::ImportBinding {
+                namespace,
+                export_name,
+            } => resolve_namespace_export(namespace, export_name).type_of(),
+            JsValue::Array(_)
+            | JsValue::Object(_)
+            | JsValue::EnvironmentObject(_)
+            | JsValue::Promise(_)
+            | JsValue::GeneratorState(_) => "object".to_string(),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::BuiltinFunction(_) => {
+                "function".to_string()
+            }
         }
     }
 
@@ -161,6 +264,11 @@ impl JsValue {
             }
             JsValue::Null => 0.0,
             JsValue::Undefined => f64::NAN,
+            JsValue::ImportBinding {
+                namespace,
+                export_name,
+            } => resolve_namespace_export(namespace, export_name).as_number(),
+            JsValue::GeneratorState(_) => f64::NAN,
             JsValue::Array(arr) => {
                 let arr = arr.borrow();
                 match arr.len() {
@@ -169,7 +277,12 @@ impl JsValue {
                     _ => f64::NAN,
                 }
             }
-            JsValue::Object(_) | JsValue::Function(_) | JsValue::NativeFunction(_) => f64::NAN,
+            JsValue::Object(_)
+            | JsValue::EnvironmentObject(_)
+            | JsValue::Promise(_)
+            | JsValue::Function(_)
+            | JsValue::NativeFunction(_)
+            | JsValue::BuiltinFunction(_) => f64::NAN,
         }
     }
 
@@ -216,75 +329,103 @@ impl JsValue {
                 }
                 "[object Object]".to_string()
             }
-            JsValue::Function(_) | JsValue::NativeFunction(_) => {
+            JsValue::EnvironmentObject(_) => "[object Object]".to_string(),
+            JsValue::Promise(_) => "[object Promise]".to_string(),
+            JsValue::GeneratorState(_) => "[object Generator]".to_string(),
+            JsValue::ImportBinding {
+                namespace,
+                export_name,
+            } => resolve_namespace_export(namespace, export_name).as_string(),
+            JsValue::Function(_) | JsValue::NativeFunction(_) | JsValue::BuiltinFunction(_) => {
                 "function () { [native code] }".to_string()
             }
         }
     }
 
     pub fn add(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        match (self, other) {
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        match (&left, &right) {
             (JsValue::String(s1), _) => {
-                let s2 = other.as_string();
+                let s2 = right.as_string();
                 if s1.len() + s2.len() > 500_000 {
                     return Err(RuntimeError::ReferenceError("OOM Limit".into()));
                 }
                 Ok(JsValue::String(s1.clone() + &s2))
             }
             (_, JsValue::String(s2)) => {
-                let s1 = self.as_string();
+                let s1 = left.as_string();
                 if s1.len() + s2.len() > 500_000 {
                     return Err(RuntimeError::ReferenceError("OOM Limit".into()));
                 }
                 Ok(JsValue::String(s1 + s2))
             }
             // Objects coerce to string for +
-            (JsValue::Object(_), _) | (_, JsValue::Object(_)) => {
-                let s1 = self.as_string();
-                let s2 = other.as_string();
+            (JsValue::Object(_), _)
+            | (_, JsValue::Object(_))
+            | (JsValue::EnvironmentObject(_), _)
+            | (_, JsValue::EnvironmentObject(_))
+            | (JsValue::Promise(_), _)
+            | (_, JsValue::Promise(_)) => {
+                let s1 = left.as_string();
+                let s2 = right.as_string();
                 Ok(JsValue::String(s1 + &s2))
             }
-            _ => Ok(JsValue::Number(self.as_number() + other.as_number())),
+            _ => Ok(JsValue::Number(left.as_number() + right.as_number())),
         }
     }
 
     pub fn sub(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        Ok(JsValue::Number(self.as_number() - other.as_number()))
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        Ok(JsValue::Number(left.as_number() - right.as_number()))
     }
 
     pub fn mul(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        Ok(JsValue::Number(self.as_number() * other.as_number()))
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        Ok(JsValue::Number(left.as_number() * right.as_number()))
     }
 
     pub fn div(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        Ok(JsValue::Number(self.as_number() / other.as_number()))
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        Ok(JsValue::Number(left.as_number() / right.as_number()))
     }
 
     pub fn lt(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        match (self, other) {
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        match (&left, &right) {
             (JsValue::String(s1), JsValue::String(s2)) => Ok(JsValue::Boolean(s1 < s2)),
-            _ => Ok(JsValue::Boolean(self.as_number() < other.as_number())),
+            _ => Ok(JsValue::Boolean(left.as_number() < right.as_number())),
         }
     }
 
     pub fn le(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        match (self, other) {
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        match (&left, &right) {
             (JsValue::String(s1), JsValue::String(s2)) => Ok(JsValue::Boolean(s1 <= s2)),
-            _ => Ok(JsValue::Boolean(self.as_number() <= other.as_number())),
+            _ => Ok(JsValue::Boolean(left.as_number() <= right.as_number())),
         }
     }
 
     pub fn gt(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        match (self, other) {
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        match (&left, &right) {
             (JsValue::String(s1), JsValue::String(s2)) => Ok(JsValue::Boolean(s1 > s2)),
-            _ => Ok(JsValue::Boolean(self.as_number() > other.as_number())),
+            _ => Ok(JsValue::Boolean(left.as_number() > right.as_number())),
         }
     }
 
     pub fn ge(&self, other: &JsValue) -> Result<JsValue, RuntimeError> {
-        match (self, other) {
+        let left = resolve_indirect_value(self);
+        let right = resolve_indirect_value(other);
+        match (&left, &right) {
             (JsValue::String(s1), JsValue::String(s2)) => Ok(JsValue::Boolean(s1 >= s2)),
-            _ => Ok(JsValue::Boolean(self.as_number() >= other.as_number())),
+            _ => Ok(JsValue::Boolean(left.as_number() >= right.as_number())),
         }
     }
 
@@ -292,6 +433,18 @@ impl JsValue {
     pub fn get_property(&self, key: &str) -> JsValue {
         match self {
             JsValue::Object(map) => get_object_property(map, key),
+            JsValue::EnvironmentObject(env) => env.borrow().get(key).unwrap_or(JsValue::Undefined),
+            JsValue::Promise(_) => match key {
+                "then" => JsValue::BuiltinFunction(Rc::new(BuiltinFunction::PromiseThen)),
+                "catch" => JsValue::BuiltinFunction(Rc::new(BuiltinFunction::PromiseCatch)),
+                "finally" => JsValue::BuiltinFunction(Rc::new(BuiltinFunction::PromiseFinally)),
+                _ => JsValue::Undefined,
+            },
+            JsValue::GeneratorState(_) => JsValue::Undefined,
+            JsValue::ImportBinding {
+                namespace,
+                export_name,
+            } => resolve_namespace_export(namespace, export_name).get_property(key),
             JsValue::Array(arr) => {
                 let arr = arr.borrow();
                 if key == "length" {
@@ -317,8 +470,26 @@ impl JsValue {
                 }
             }
             JsValue::Function(function) => get_object_property(&function.properties, key),
+            JsValue::BuiltinFunction(function) => match function.as_ref() {
+                BuiltinFunction::PromiseConstructor => match key {
+                    "resolve" => JsValue::BuiltinFunction(Rc::new(BuiltinFunction::PromiseResolve)),
+                    "reject" => JsValue::BuiltinFunction(Rc::new(BuiltinFunction::PromiseReject)),
+                    _ => JsValue::Undefined,
+                },
+                _ => JsValue::Undefined,
+            },
             _ => JsValue::Undefined,
         }
+    }
+}
+
+pub fn resolve_indirect_value(value: &JsValue) -> JsValue {
+    match value {
+        JsValue::ImportBinding {
+            namespace,
+            export_name,
+        } => resolve_namespace_export(namespace, export_name),
+        _ => value.clone(),
     }
 }
 
@@ -348,6 +519,77 @@ pub fn get_object_property(map: &JsObjectMap, key: &str) -> JsValue {
         }) => getter,
         Some(PropertyValue::Accessor { getter: None, .. }) => JsValue::Undefined,
         None => JsValue::Undefined,
+    }
+}
+
+fn resolve_namespace_accessor(getter: &JsValue) -> JsValue {
+    match getter {
+        JsValue::BuiltinFunction(function) => match function.as_ref() {
+            BuiltinFunction::ModuleBindingGetter { env, binding } => {
+                env.borrow().get(binding).unwrap_or(JsValue::Undefined)
+            }
+            BuiltinFunction::NamespaceBindingGetter {
+                namespace,
+                export_name,
+            } => resolve_namespace_export_value(namespace, export_name),
+            _ => getter.clone(),
+        },
+        _ => getter.clone(),
+    }
+}
+
+pub fn resolve_namespace_export(namespace: &JsObjectMap, export_name: &str) -> JsValue {
+    match get_property_value(namespace, export_name) {
+        Some(PropertyValue::Data(value)) => value,
+        Some(PropertyValue::Accessor {
+            getter: Some(getter),
+            ..
+        }) => resolve_namespace_accessor(&getter),
+        Some(PropertyValue::Accessor { getter: None, .. }) | None => JsValue::Undefined,
+    }
+}
+
+pub fn resolve_namespace_export_value(namespace: &JsValue, export_name: &str) -> JsValue {
+    match namespace {
+        JsValue::Object(map) => resolve_namespace_export(map, export_name),
+        _ => JsValue::Undefined,
+    }
+}
+
+pub fn set_namespace_export(
+    namespace: &JsObjectMap,
+    export_name: &str,
+    value: JsValue,
+) -> Result<(), String> {
+    match get_property_value(namespace, export_name) {
+        Some(PropertyValue::Data(_)) => {
+            namespace
+                .borrow_mut()
+                .insert(export_name.to_string(), PropertyValue::Data(value));
+            Ok(())
+        }
+        Some(PropertyValue::Accessor {
+            getter: Some(getter),
+            ..
+        }) => match getter {
+            JsValue::BuiltinFunction(function) => match function.as_ref() {
+                BuiltinFunction::ModuleBindingGetter { env, binding } => {
+                    env.borrow_mut().set(binding, value)
+                }
+                BuiltinFunction::NamespaceBindingGetter {
+                    namespace,
+                    export_name,
+                } => match namespace {
+                    JsValue::Object(map) => set_namespace_export(map, export_name, value),
+                    _ => Err("module namespace is not an object".to_string()),
+                },
+                _ => Err("module export is read-only".to_string()),
+            },
+            _ => Err("module export is read-only".to_string()),
+        },
+        Some(PropertyValue::Accessor { getter: None, .. }) | None => {
+            Err(format!("ReferenceError: {} is not defined", export_name))
+        }
     }
 }
 

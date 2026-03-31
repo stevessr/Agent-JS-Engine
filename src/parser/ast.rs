@@ -8,6 +8,7 @@ pub enum Statement<'a> {
     ExpressionStatement(Expression<'a>),
     BlockStatement(BlockStatement<'a>),
     IfStatement(IfStatement<'a>),
+    WithStatement(WithStatement<'a>),
     WhileStatement(WhileStatement<'a>),
     DoWhileStatement(WhileStatement<'a>),
     ForStatement(ForStatement<'a>),
@@ -19,6 +20,10 @@ pub enum Statement<'a> {
     VariableDeclaration(VariableDeclaration<'a>),
     FunctionDeclaration(FunctionDeclaration<'a>),
     ClassDeclaration(ClassDeclaration<'a>),
+    ImportDeclaration(ImportDeclaration<'a>),
+    ExportNamedDeclaration(ExportNamedDeclaration<'a>),
+    ExportDefaultDeclaration(ExportDefaultDeclaration<'a>),
+    ExportAllDeclaration(ExportAllDeclaration<'a>),
     ReturnStatement(Option<Expression<'a>>),
     BreakStatement(Option<&'a str>),
     ContinueStatement(Option<&'a str>),
@@ -52,6 +57,7 @@ pub struct ForOfStatement<'a> {
     pub left: Box<Statement<'a>>,
     pub right: Expression<'a>,
     pub body: Box<Statement<'a>>,
+    pub is_await: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +87,7 @@ pub struct TryStatement<'a> {
 
 #[derive(Debug, Clone)]
 pub struct CatchClause<'a> {
-    pub param: Option<&'a str>,
+    pub param: Option<Expression<'a>>,
     pub body: BlockStatement<'a>,
 }
 
@@ -95,6 +101,56 @@ pub struct IfStatement<'a> {
     pub test: Expression<'a>,
     pub consequent: Box<Statement<'a>>,
     pub alternate: Option<Box<Statement<'a>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WithStatement<'a> {
+    pub object: Expression<'a>,
+    pub body: Box<Statement<'a>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportDeclaration<'a> {
+    pub specifiers: Vec<ImportSpecifier<'a>>,
+    pub source: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportSpecifier<'a> {
+    Default(&'a str),
+    Namespace(&'a str),
+    Named { imported: &'a str, local: &'a str },
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportNamedDeclaration<'a> {
+    pub declaration: Option<Box<Statement<'a>>>,
+    pub specifiers: Vec<ExportSpecifier<'a>>,
+    pub source: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportSpecifier<'a> {
+    pub local: &'a str,
+    pub exported: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportDefaultDeclaration<'a> {
+    pub declaration: ExportDefaultKind<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExportDefaultKind<'a> {
+    Expression(Expression<'a>),
+    FunctionDeclaration(FunctionDeclaration<'a>),
+    ClassDeclaration(ClassDeclaration<'a>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ExportAllDeclaration<'a> {
+    pub exported: Option<&'a str>,
+    pub source: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -138,22 +194,13 @@ pub struct FunctionDeclaration<'a> {
     pub params: Vec<Param<'a>>,
     pub body: BlockStatement<'a>,
     pub is_generator: bool,
+    pub is_async: bool,
 }
 
-/// A function parameter (simple, rest, or default)
 #[derive(Debug, Clone)]
-pub enum Param<'a> {
-    Simple(&'a str),
-    Rest(&'a str),
-    Default(&'a str, Expression<'a>),
-}
-
-impl<'a> Param<'a> {
-    pub fn name(&self) -> &'a str {
-        match self {
-            Param::Simple(n) | Param::Rest(n) | Param::Default(n, _) => n,
-        }
-    }
+pub struct Param<'a> {
+    pub pattern: Expression<'a>,
+    pub is_rest: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -171,7 +218,7 @@ pub enum VariableKind {
 
 #[derive(Debug, Clone)]
 pub struct VariableDeclarator<'a> {
-    pub id: &'a str,
+    pub id: Expression<'a>,
     pub init: Option<Expression<'a>>,
 }
 
@@ -179,6 +226,7 @@ pub struct VariableDeclarator<'a> {
 pub enum Expression<'a> {
     Literal(Literal<'a>),
     Identifier(&'a str),
+    PrivateIdentifier(&'a str),
     BinaryExpression(Box<BinaryExpression<'a>>),
     UnaryExpression(Box<UnaryExpression<'a>>),
     AssignmentExpression(Box<AssignmentExpression<'a>>),
@@ -201,7 +249,10 @@ pub enum Expression<'a> {
     },
     SpreadElement(Box<Expression<'a>>),
     TemplateLiteral(Vec<TemplatePart<'a>>),
-    YieldExpression(Option<Box<Expression<'a>>>),
+    YieldExpression {
+        argument: Option<Box<Expression<'a>>>,
+        delegate: bool,
+    },
     AwaitExpression(Box<Expression<'a>>),
     TaggedTemplateExpression(Box<Expression<'a>>, Vec<TemplatePart<'a>>),
 }
@@ -234,6 +285,7 @@ pub struct ObjectProperty<'a> {
 #[derive(Debug, Clone)]
 pub enum ObjectKey<'a> {
     Identifier(&'a str),
+    PrivateIdentifier(&'a str),
     String(&'a str),
     Computed(Box<Expression<'a>>),
     Number(f64),

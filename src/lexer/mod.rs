@@ -42,6 +42,7 @@ pub enum Token<'a> {
     Undefined,
     Debugger,
     With,
+    PrivateIdentifier(&'a str),
     Identifier(&'a str),
     Number(f64),
     String(&'a str),
@@ -151,6 +152,14 @@ impl<'a> Lexer<'a> {
         self.input[self.pos..].chars().nth(n)
     }
 
+    fn is_identifier_start(c: char) -> bool {
+        c.is_ascii_alphabetic() || c == '_' || c == '$'
+    }
+
+    fn is_identifier_part(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_' || c == '$'
+    }
+
     fn advance(&mut self) -> Option<char> {
         if let Some(c) = self.peek() {
             self.pos += c.len_utf8();
@@ -195,7 +204,10 @@ impl<'a> Lexer<'a> {
     }
 
     pub fn next_token(&mut self) -> Result<Token<'a>, LexerError> {
-        if matches!(self.contexts.last(), Some(LexerContext::TemplateContinuation)) {
+        if matches!(
+            self.contexts.last(),
+            Some(LexerContext::TemplateContinuation)
+        ) {
             if self.pos >= self.input.len() {
                 return Err(LexerError::UnterminatedTemplate);
             }
@@ -212,7 +224,10 @@ impl<'a> Lexer<'a> {
         }
 
         let c = self.peek().unwrap();
-        if matches!(self.contexts.last(), Some(LexerContext::TemplateExpression { .. })) {
+        if matches!(
+            self.contexts.last(),
+            Some(LexerContext::TemplateExpression { .. })
+        ) {
             match c {
                 '{' => {
                     if let Some(LexerContext::TemplateExpression { brace_depth }) =
@@ -261,8 +276,24 @@ impl<'a> Lexer<'a> {
             }
         }
 
-        if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+        if Self::is_identifier_start(c) {
             return Ok(self.lex_identifier());
+        }
+
+        if c == '#' {
+            if matches!(self.peek_n(1), Some(next) if Self::is_identifier_start(next)) {
+                self.advance();
+                let start = self.pos;
+                while let Some(ch) = self.peek() {
+                    if Self::is_identifier_part(ch) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                return Ok(Token::PrivateIdentifier(&self.input[start..self.pos]));
+            }
+            return Err(LexerError::UnexpectedCharacter(c));
         }
 
         if c.is_ascii_digit()
@@ -494,7 +525,7 @@ impl<'a> Lexer<'a> {
     fn lex_identifier(&mut self) -> Token<'a> {
         let start = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '$' {
+            if Self::is_identifier_part(c) {
                 self.advance();
             } else {
                 break;
@@ -624,7 +655,10 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_template_chunk(&mut self) -> Result<Token<'a>, LexerError> {
-        let continuing = matches!(self.contexts.last(), Some(LexerContext::TemplateContinuation));
+        let continuing = matches!(
+            self.contexts.last(),
+            Some(LexerContext::TemplateContinuation)
+        );
         if continuing {
             self.contexts.pop();
         } else if matches!(self.peek(), Some('`')) {
