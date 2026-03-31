@@ -19,15 +19,36 @@
 # 构建
 cargo build
 
-# 执行文件
-cargo run -- examples/demo.js
+# 执行示例文件
+cargo run -- examples/modern-syntax.js
+cargo run -- examples/bigint.js
+cargo run -- examples/async-generators.js
 
 # 直接执行一段 JS
 cargo run -- --eval "1 + 2"
+cargo run -- --eval "const x = 1_000_000n; print(x)"
 
 # 拉取并运行 test262 core profile
 ./run_test262.sh
 ```
+
+## 语法支持
+
+手写 lexer/parser 支持现代 JavaScript 语法特性：
+
+- ✅ **BigInt 字面量**: `123n`, `0xFFn`, `0o77n`, `0b1010n`
+- ✅ 手写解释器已支持基础 BigInt 运行时语义：一元 `-`、`+`、`-`、`*`、比较与相等判断
+- ✅ **数字分隔符**: `1_000_000`, `0xFF_FF`
+- ✅ **异步生成器**: `async function* gen() { yield x; }`
+- ✅ 箭头函数、async/await、生成器
+- ✅ 类（包括私有字段、静态块）
+- ✅ 解构赋值（数组、对象、嵌套）
+- ✅ 模板字符串
+- ✅ 可选链 (`?.`)、空值合并 (`??`)
+- ✅ 扩展运算符、剩余参数
+- ✅ for-of、for-await-of 循环
+
+详细语法支持列表见 [SYNTAX.md](./SYNTAX.md)。
 
 ## CLI
 

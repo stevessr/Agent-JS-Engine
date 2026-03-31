@@ -3441,8 +3441,18 @@ impl Interpreter {
                     env,
                     Rc::new(move |interp, value| {
                         let result = match operator {
-                            UnaryOperator::Minus => JsValue::Number(-value.as_number()),
-                            UnaryOperator::Plus => JsValue::Number(value.as_number()),
+                            UnaryOperator::Minus => match value {
+                                JsValue::BigInt(n) => JsValue::BigInt(-n),
+                                _ => JsValue::Number(-value.as_number()),
+                            },
+                            UnaryOperator::Plus => match value {
+                                JsValue::BigInt(_) => {
+                                    return Err(RuntimeError::TypeError(
+                                        "cannot convert BigInt value to number".into(),
+                                    ))
+                                }
+                                _ => JsValue::Number(value.as_number()),
+                            },
                             UnaryOperator::LogicNot => JsValue::Boolean(!value.is_truthy()),
                             UnaryOperator::BitNot => {
                                 JsValue::Number((!interp.to_int32(&value)) as f64)
@@ -5229,9 +5239,19 @@ impl Interpreter {
             AssignmentOperator::MultiplyAssign => left.mul(right),
             AssignmentOperator::DivideAssign => left.div(right),
             AssignmentOperator::PercentAssign => {
+                if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
+                    return Err(RuntimeError::TypeError(
+                        "BigInt remainder is not supported yet".into(),
+                    ));
+                }
                 Ok(JsValue::Number(left.as_number() % right.as_number()))
             }
             AssignmentOperator::PowerAssign => {
+                if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
+                    return Err(RuntimeError::TypeError(
+                        "BigInt exponentiation is not supported yet".into(),
+                    ));
+                }
                 Ok(JsValue::Number(left.as_number().powf(right.as_number())))
             }
             AssignmentOperator::LogicAndAssign
@@ -5302,7 +5322,15 @@ impl Interpreter {
             BinaryOperator::LessEq => left.le(&right),
             BinaryOperator::Greater => left.gt(&right),
             BinaryOperator::GreaterEq => left.ge(&right),
-            BinaryOperator::Power => Ok(JsValue::Number(left.as_number().powf(right.as_number()))),
+            BinaryOperator::Power => {
+                if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
+                    Err(RuntimeError::TypeError(
+                        "BigInt exponentiation is not supported yet".into(),
+                    ))
+                } else {
+                    Ok(JsValue::Number(left.as_number().powf(right.as_number())))
+                }
+            }
             BinaryOperator::Instanceof => match (&left, &right) {
                 (JsValue::Object(object), JsValue::Function(function)) => {
                     let prototype = function.prototype.clone();
@@ -7328,7 +7356,7 @@ impl Interpreter {
                 Literal::Boolean(b) => Ok(JsValue::Boolean(*b)),
                 Literal::Null => Ok(JsValue::Null),
                 Literal::Undefined => Ok(JsValue::Undefined),
-                Literal::BigInt(n) => Ok(JsValue::Number(*n as f64)),
+                Literal::BigInt(n) => Ok(JsValue::BigInt(*n)),
                 Literal::RegExp(pattern, flags) => Ok(crate::engine::value::make_object([
                     ("source", JsValue::String(pattern.to_string())),
                     ("flags", JsValue::String(flags.to_string())),
@@ -7454,6 +7482,11 @@ impl Interpreter {
                     BinaryOperator::Multiply => left.mul(&right),
                     BinaryOperator::Divide => left.div(&right),
                     BinaryOperator::Percent => {
+                        if matches!(left, JsValue::BigInt(_)) || matches!(right, JsValue::BigInt(_)) {
+                            return Err(RuntimeError::TypeError(
+                                "BigInt remainder is not supported yet".into(),
+                            ));
+                        }
                         Ok(JsValue::Number(left.as_number() % right.as_number()))
                     }
                     BinaryOperator::BitAnd => Ok(JsValue::Number(
@@ -7588,8 +7621,16 @@ impl Interpreter {
                 _ => {
                     let arg = self.eval_expression(&unary.argument, env)?;
                     match unary.operator {
-                        UnaryOperator::Minus => Ok(JsValue::Number(-arg.as_number())),
-                        UnaryOperator::Plus => Ok(JsValue::Number(arg.as_number())),
+                        UnaryOperator::Minus => match arg {
+                            JsValue::BigInt(n) => Ok(JsValue::BigInt(-n)),
+                            _ => Ok(JsValue::Number(-arg.as_number())),
+                        },
+                        UnaryOperator::Plus => match arg {
+                            JsValue::BigInt(_) => Err(RuntimeError::TypeError(
+                                "cannot convert BigInt value to number".into(),
+                            )),
+                            _ => Ok(JsValue::Number(arg.as_number())),
+                        },
                         UnaryOperator::LogicNot => Ok(JsValue::Boolean(!arg.is_truthy())),
                         UnaryOperator::BitNot => Ok(JsValue::Number((!self.to_int32(&arg)) as f64)),
                         UnaryOperator::Typeof => Ok(JsValue::String(arg.type_of())),
@@ -8970,6 +9011,7 @@ fn js_strict_eq(left: &JsValue, right: &JsValue) -> bool {
         (JsValue::Null, JsValue::Null) => true,
         (JsValue::Boolean(a), JsValue::Boolean(b)) => a == b,
         (JsValue::Number(a), JsValue::Number(b)) => a == b,
+        (JsValue::BigInt(a), JsValue::BigInt(b)) => a == b,
         (JsValue::String(a), JsValue::String(b)) => a == b,
         (JsValue::Array(a), JsValue::Array(b)) => Rc::ptr_eq(a, b),
         (JsValue::Object(a), JsValue::Object(b)) => Rc::ptr_eq(a, b),
