@@ -45,6 +45,7 @@ pub enum Token<'a> {
     PrivateIdentifier(&'a str),
     Identifier(&'a str),
     Number(f64),
+    BigInt(&'a str),
     String(&'a str),
     Template(&'a str, bool),
     Regex(&'a str, &'a str),
@@ -587,11 +588,18 @@ impl<'a> Lexer<'a> {
                 while let Some(c) = self.peek() {
                     if c.is_ascii_hexdigit() {
                         self.advance();
+                    } else if c == '_' {
+                        self.advance(); // skip separator
                     } else {
                         break;
                     }
                 }
-                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 16).unwrap_or(0);
+                if self.peek() == Some('n') {
+                    self.advance();
+                    return Token::BigInt(&self.input[start..self.pos - 1]);
+                }
+                let num_str = self.input[start + 2..self.pos].replace('_', "");
+                let val = i64::from_str_radix(&num_str, 16).unwrap_or(0);
                 return Token::Number(val as f64);
             } else if next == Some('o') || next == Some('O') {
                 self.advance();
@@ -599,11 +607,18 @@ impl<'a> Lexer<'a> {
                 while let Some(c) = self.peek() {
                     if c >= '0' && c <= '7' {
                         self.advance();
+                    } else if c == '_' {
+                        self.advance(); // skip separator
                     } else {
                         break;
                     }
                 }
-                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 8).unwrap_or(0);
+                if self.peek() == Some('n') {
+                    self.advance();
+                    return Token::BigInt(&self.input[start..self.pos - 1]);
+                }
+                let num_str = self.input[start + 2..self.pos].replace('_', "");
+                let val = i64::from_str_radix(&num_str, 8).unwrap_or(0);
                 return Token::Number(val as f64);
             } else if next == Some('b') || next == Some('B') {
                 self.advance();
@@ -611,24 +626,38 @@ impl<'a> Lexer<'a> {
                 while let Some(c) = self.peek() {
                     if c == '0' || c == '1' {
                         self.advance();
+                    } else if c == '_' {
+                        self.advance(); // skip separator
                     } else {
                         break;
                     }
                 }
-                let val = i64::from_str_radix(&self.input[start + 2..self.pos], 2).unwrap_or(0);
+                if self.peek() == Some('n') {
+                    self.advance();
+                    return Token::BigInt(&self.input[start..self.pos - 1]);
+                }
+                let num_str = self.input[start + 2..self.pos].replace('_', "");
+                let val = i64::from_str_radix(&num_str, 2).unwrap_or(0);
                 return Token::Number(val as f64);
             }
         }
 
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() || c == '.' || c == 'e' || c == 'E' || (c == '-' || c == '+') {
-                // simple float handling
                 self.advance();
+            } else if c == '_' {
+                self.advance(); // skip separator
             } else {
                 break;
             }
         }
-        let term = &self.input[start..self.pos];
+        
+        if self.peek() == Some('n') {
+            self.advance();
+            return Token::BigInt(&self.input[start..self.pos - 1]);
+        }
+        
+        let term = self.input[start..self.pos].replace('_', "");
         let val = term.parse::<f64>().unwrap_or(f64::NAN);
         Token::Number(val)
     }
