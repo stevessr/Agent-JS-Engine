@@ -2574,7 +2574,8 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
                 ? Reflect.construct(receiver, [length])
                 : Reflect.construct(receiver, []);
             }
-            return { length: lengthArgProvided ? length : 0 };
+            // If receiver is not a constructor, create an intrinsic Array
+            return lengthArgProvided ? new Array(length) : [];
           }
 
           function defineArrayFromAsyncValue(target, index, value) {
@@ -2771,17 +2772,33 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
         r#"
         (() => {
           if (typeof Atomics === 'object' && typeof Atomics.pause !== 'function') {
-            Object.defineProperty(Atomics, 'pause', {
-              value: function pause(iterationNumber) {
-                // This is a hint to the CPU that the thread is in a spin-wait loop.
-                // In JavaScript, we can't actually hint the CPU, so this is a no-op.
-                if (iterationNumber !== undefined) {
-                  const n = Number(iterationNumber);
-                  if (!Number.isFinite(n) || n < 0) {
-                    return;
-                  }
+            // Use arrow function syntax to prevent being a constructor
+            const pauseFn = (iterationNumber) => {
+              // This is a hint to the CPU that the thread is in a spin-wait loop.
+              // In JavaScript, we can't actually hint the CPU, so this is a no-op.
+              if (iterationNumber !== undefined) {
+                // Must be undefined or a non-negative integer
+                if (typeof iterationNumber !== 'number' ||
+                    !Number.isInteger(iterationNumber) ||
+                    iterationNumber < 0) {
+                  throw new TypeError('iterationNumber must be a non-negative integer');
                 }
-              },
+              }
+            };
+            Object.defineProperty(pauseFn, 'length', {
+              value: 0,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(pauseFn, 'name', {
+              value: 'pause',
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(Atomics, 'pause', {
+              value: pauseFn,
               writable: true,
               enumerable: false,
               configurable: true,

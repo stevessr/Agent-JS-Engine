@@ -113,6 +113,13 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case.metadata.has_feature("IsHTMLDDA") {
         return Some("unsupported feature: IsHTMLDDA");
     }
+    if case.metadata.has_feature("Temporal") {
+        return Some("unsupported feature: Temporal");
+    }
+    // Tests that include temporalHelpers.js require Temporal support
+    if case.metadata.includes.iter().any(|s| s == "temporalHelpers.js") {
+        return Some("unsupported feature: temporalHelpers (requires Temporal)");
+    }
 
     None
 }
