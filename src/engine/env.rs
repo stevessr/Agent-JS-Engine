@@ -4,8 +4,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
+pub struct ResourceRecord {
+    pub value: JsValue,
+    pub is_await: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct Environment {
     pub variables: HashMap<String, JsValue>,
+    pub resources: Vec<ResourceRecord>,
     parent: Option<Rc<RefCell<Environment>>>,
 }
 
@@ -13,6 +20,7 @@ impl Environment {
     pub fn new(parent: Option<Rc<RefCell<Environment>>>) -> Self {
         Self {
             variables: HashMap::new(),
+            resources: Vec::new(),
             parent,
         }
     }

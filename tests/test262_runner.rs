@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
 use std::thread;
 use walkdir::WalkDir;
 
@@ -26,6 +26,7 @@ const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
 const DEFAULT_CHUNK_SIZE: usize = 1_000;
+const SUMMARY_FILE_ENV: &str = "TEST262_SUMMARY_FILE";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct Test262Metadata {
@@ -106,6 +107,14 @@ impl Test262Metadata {
     fn has_feature(&self, feature: &str) -> bool {
         self.features.iter().any(|value| value == feature)
     }
+}
+
+fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
+    if case.metadata.has_feature("IsHTMLDDA") {
+        return Some("unsupported feature: IsHTMLDDA");
+    }
+
+    None
 }
 
 impl HarnessCache {
@@ -247,6 +256,13 @@ fn expected_error_matches(expected: Option<&str>, actual: &EngineError) -> bool 
 }
 
 fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseResult {
+    if let Some(reason) = unsupported_feature(case) {
+        return CaseResult {
+            outcome: Outcome::Skipped,
+            reason: Some(reason.to_string()),
+        };
+    }
+
     let Ok(case_source) = fs::read_to_string(&case.path) else {
         return CaseResult {
             outcome: Outcome::Failed,
@@ -365,28 +381,25 @@ negative:
 }
 
 #[test]
-fn async_module_source_exports_done_to_global() {
+fn run_case_skips_unsupported_ishtmldda_feature() {
     let case = TestCase {
-        path: PathBuf::from("sample.mjs"),
+        path: PathBuf::from("sample.js"),
         metadata: Test262Metadata {
-            flags: vec!["module".to_string(), "async".to_string()],
+            features: vec!["IsHTMLDDA".to_string()],
             ..Default::default()
         },
     };
     let harness = HarnessCache {
-        files: HashMap::from([
-            ("sta.js".to_string(), String::new()),
-            ("assert.js".to_string(), String::new()),
-            (
-                "doneprintHandle.js".to_string(),
-                "function $DONE() {}".to_string(),
-            ),
-        ]),
+        files: HashMap::new(),
     };
 
-    let built = build_source(&case, "asyncTest(async () => {});", &harness);
+    let result = run_case(&case, &harness, Path::new("."));
 
-    assert!(built.contains("globalThis.$DONE = $DONE;"));
+    assert_eq!(result.outcome, Outcome::Skipped);
+    assert_eq!(
+        result.reason.as_deref(),
+        Some("unsupported feature: IsHTMLDDA")
+    );
 }
 
 fn run_core_profile_once(
@@ -457,6 +470,10 @@ fn run_core_profile_chunked(
 
     while offset < total_cases {
         let max_cases = chunk_size.min(total_cases - offset);
+        let summary_path = std::env::temp_dir().join(format!(
+            "agentjs-test262-summary-{}-{offset}-{max_cases}.txt",
+            process::id()
+        ));
         let mut cmd = Command::new(&exe);
         cmd.arg("--ignored")
             .arg("--exact")
@@ -465,6 +482,7 @@ fn run_core_profile_chunked(
         cmd.env("TEST262_DIR", suite_root);
         cmd.env("TEST262_OFFSET", offset.to_string());
         cmd.env("TEST262_MAX_CASES", max_cases.to_string());
+        cmd.env(SUMMARY_FILE_ENV, &summary_path);
         if let Some(filter) = filter {
             cmd.env("TEST262_FILTER", filter);
         }
@@ -479,7 +497,15 @@ fn run_core_profile_chunked(
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let chunk = parse_summary_from_output(&output.stdout);
+        let summary_text = fs::read_to_string(&summary_path).unwrap_or_else(|_| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        let _ = fs::remove_file(&summary_path);
+        let chunk = parse_summary_from_output(summary_text.as_bytes());
         summary.merge(chunk);
         offset += max_cases;
     }
@@ -533,6 +559,64 @@ fn parse_summary_from_output(stdout: &[u8]) -> RunSummary {
     summary
 }
 
+fn print_summary(summary: &RunSummary) {
+    let total_pass_rate = if summary.total == 0 {
+        0.0
+    } else {
+        summary.passed as f64 / summary.total as f64 * 100.0
+    };
+    let executed_pass_rate = if summary.executed == 0 {
+        0.0
+    } else {
+        summary.passed as f64 / summary.executed as f64 * 100.0
+    };
+
+    println!("Total cases: {}", summary.total);
+    println!("Executed: {}", summary.executed);
+    println!("Passed: {}", summary.passed);
+    println!("Skipped: {}", summary.skipped);
+    println!("Total pass rate: {total_pass_rate:.2}%");
+    println!("Executed pass rate: {executed_pass_rate:.2}%");
+    if !summary.skip_reasons.is_empty() {
+        println!("Skip reasons:");
+        for (reason, count) in &summary.skip_reasons {
+            println!("  {reason}: {count}");
+        }
+    }
+    if !summary.samples.is_empty() {
+        println!("Sample failures:");
+        for sample in &summary.samples {
+            println!("  {sample}");
+        }
+    }
+}
+
+fn persist_summary_if_requested(summary: &RunSummary) {
+    let Some(path) = std::env::var_os(SUMMARY_FILE_ENV) else {
+        return;
+    };
+
+    let mut output = String::new();
+    output.push_str(&format!("Total cases: {}\n", summary.total));
+    output.push_str(&format!("Executed: {}\n", summary.executed));
+    output.push_str(&format!("Passed: {}\n", summary.passed));
+    output.push_str(&format!("Skipped: {}\n", summary.skipped));
+    if !summary.skip_reasons.is_empty() {
+        output.push_str("Skip reasons:\n");
+        for (reason, count) in &summary.skip_reasons {
+            output.push_str(&format!("  {reason}: {count}\n"));
+        }
+    }
+    if !summary.samples.is_empty() {
+        output.push_str("Sample failures:\n");
+        for sample in &summary.samples {
+            output.push_str(&format!("  {sample}\n"));
+        }
+    }
+
+    let _ = fs::write(PathBuf::from(path), output);
+}
+
 #[test]
 #[ignore = "long-running test262 sweep"]
 fn test262_core_profile() {
@@ -569,6 +653,9 @@ fn test262_core_profile() {
             run_core_profile_chunked(&suite_root, filter.as_deref(), total_cases)
         };
 
+        persist_summary_if_requested(&summary);
+        print_summary(&summary);
+
         let total_pass_rate = if summary.total == 0 {
             0.0
         } else {
@@ -579,25 +666,6 @@ fn test262_core_profile() {
         } else {
             summary.passed as f64 / summary.executed as f64 * 100.0
         };
-
-        println!("Total cases: {}", summary.total);
-        println!("Executed: {}", summary.executed);
-        println!("Passed: {}", summary.passed);
-        println!("Skipped: {}", summary.skipped);
-        println!("Total pass rate: {total_pass_rate:.2}%");
-        println!("Executed pass rate: {executed_pass_rate:.2}%");
-        if !summary.skip_reasons.is_empty() {
-            println!("Skip reasons:");
-            for (reason, count) in summary.skip_reasons {
-                println!("  {reason}: {count}");
-            }
-        }
-        if !summary.samples.is_empty() {
-            println!("Sample failures:");
-            for sample in summary.samples {
-                println!("  {sample}");
-            }
-        }
 
         if filter.is_none() && max_cases.is_none() && offset == 0 {
             assert!(

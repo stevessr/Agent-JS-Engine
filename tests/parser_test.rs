@@ -281,7 +281,10 @@ fn parser_rejects_invalid_assignment_target() {
         .parse_program()
         .expect_err("invalid assignment target should fail");
 
-    assert!(matches!(error, ai_agent::parser::ParseError::InvalidAssignmentTarget));
+    assert!(matches!(
+        error,
+        ai_agent::parser::ParseError::InvalidAssignmentTarget
+    ));
 }
 
 #[test]
@@ -1592,7 +1595,13 @@ fn parser_preserves_static_block_order_with_other_class_elements() {
 
     match &program.body[0] {
         Statement::ClassDeclaration(class_decl) => {
-            assert!(matches!(class_decl.body[0], ClassElement::Field { is_static: true, .. }));
+            assert!(matches!(
+                class_decl.body[0],
+                ClassElement::Field {
+                    is_static: true,
+                    ..
+                }
+            ));
             assert!(matches!(class_decl.body[1], ClassElement::StaticBlock(_)));
             assert!(matches!(class_decl.body[2], ClassElement::Method { .. }));
         }
@@ -2107,10 +2116,20 @@ fn parser_rejects_optional_private_member_chains() {
     ));
 }
 
+#[test]
+fn parser_skips_hashbang_comment() {
+    let lexer = Lexer::new("#!/usr/bin/env node\nlet x = 1;");
+    let mut parser = Parser::new(lexer).expect("parser should initialize");
+    let program = parser.parse_program().expect("program should parse");
+
+    assert_eq!(program.body.len(), 1);
+    assert!(matches!(program.body[0], Statement::VariableDeclaration(_)));
+}
 
 #[test]
 fn parser_parses_super_assignment_targets() {
-    let lexer = Lexer::new("class Foo extends Bar { write() { super.value = 1; super[key] ??= 2; } }");
+    let lexer =
+        Lexer::new("class Foo extends Bar { write() { super.value = 1; super[key] ??= 2; } }");
     let mut parser = Parser::new(lexer).expect("parser should initialize");
     let program = parser.parse_program().expect("program should parse");
 
@@ -2218,5 +2237,8 @@ fn parser_rejects_super_as_assignment_target() {
         .parse_program()
         .expect_err("super logical assignment target should fail");
 
-    assert!(matches!(error, ai_agent::parser::ParseError::InvalidAssignmentTarget));
+    assert!(matches!(
+        error,
+        ai_agent::parser::ParseError::InvalidAssignmentTarget
+    ));
 }

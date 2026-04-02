@@ -1,4 +1,4 @@
-use crate::engine::env::Environment;
+use crate::engine::env::{Environment, ResourceRecord};
 use crate::engine::value::{
     BuiltinFunction, FunctionValue, JsValue, PromiseReaction, PromiseReactionKind, PromiseState,
     PromiseValue, PropertyValue, get_object_property, get_property_value, has_object_property,
@@ -345,6 +345,78 @@ impl Interpreter {
             }
             other => Ok(other),
         }
+    }
+
+    fn get_dispose_method(
+        &mut self,
+        value: &JsValue,
+        property_key: &str,
+    ) -> Result<Option<JsValue>, RuntimeError> {
+        let property = match value {
+            JsValue::Object(map) => get_property_value(map, property_key),
+            JsValue::Function(function) => get_property_value(&function.properties, property_key),
+            _ => None,
+        };
+        match property {
+            Some(PropertyValue::Data(method)) => {
+                if matches!(method, JsValue::Undefined) {
+                    Ok(None)
+                } else {
+                    Ok(Some(method))
+                }
+            }
+            Some(PropertyValue::Accessor { getter, .. }) => match getter {
+                Some(getter) => self
+                    .invoke_callable(getter, value.clone(), vec![])
+                    .map(Some),
+                None => Ok(None),
+            },
+            None => Ok(None),
+        }
+    }
+
+    fn dispose_resource(&mut self, resource: ResourceRecord) -> Result<(), RuntimeError> {
+        let method = if resource.is_await {
+            self.get_dispose_method(&resource.value, "asyncDispose")?
+                .or_else(|| {
+                    self.get_dispose_method(&resource.value, "dispose")
+                        .ok()
+                        .flatten()
+                })
+        } else {
+            self.get_dispose_method(&resource.value, "dispose")?
+        };
+
+        let Some(method) = method else {
+            return Err(RuntimeError::TypeError(
+                "Disposable value must have a callable dispose method".into(),
+            ));
+        };
+
+        let result = self.invoke_callable(method, resource.value, vec![])?;
+        if resource.is_await {
+            self.await_value(result)?;
+        }
+        Ok(())
+    }
+
+    fn dispose_env_resources(
+        &mut self,
+        env: Rc<RefCell<Environment>>,
+        completion: Result<JsValue, RuntimeError>,
+    ) -> Result<JsValue, RuntimeError> {
+        let resources = {
+            let mut env = env.borrow_mut();
+            std::mem::take(&mut env.resources)
+        };
+        let mut completion = completion;
+        for resource in resources.into_iter().rev() {
+            match self.dispose_resource(resource) {
+                Ok(()) => {}
+                Err(error) => completion = Err(error),
+            }
+        }
+        completion
     }
 
     fn attach_promise_reaction(
@@ -3451,7 +3523,7 @@ impl Interpreter {
                                 JsValue::BigInt(_) => {
                                     return Err(RuntimeError::TypeError(
                                         "cannot convert BigInt value to number".into(),
-                                    ))
+                                    ));
                                 }
                                 _ => JsValue::Number(value.as_number()),
                             },
@@ -3631,7 +3703,9 @@ impl Interpreter {
                             }),
                         )
                     }
-                    Expression::MemberExpression(mem) if self.member_private_name(mem).is_some() => {
+                    Expression::MemberExpression(mem)
+                        if self.member_private_name(mem).is_some() =>
+                    {
                         let name = self.member_private_name(mem).unwrap().to_string();
                         let complete_with_object = Rc::new({
                             let on_complete = Rc::clone(&on_complete);
@@ -3687,7 +3761,8 @@ impl Interpreter {
                                 }),
                             )
                         } else {
-                            let object = self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
+                            let object =
+                                self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
                             let current = self.read_private_member_value(
                                 object.clone(),
                                 &name,
@@ -3734,8 +3809,10 @@ impl Interpreter {
                             let right = right.clone();
                             let env_clone = Rc::clone(&env_clone);
                             move |interp: &mut Interpreter, property_key: String| {
-                                let current =
-                                    interp.read_super_member_value(Rc::clone(&env_clone), &property_key)?;
+                                let current = interp.read_super_member_value(
+                                    Rc::clone(&env_clone),
+                                    &property_key,
+                                )?;
                                 if !interp.should_apply_assignment(&operator, &current) {
                                     return on_complete(interp, current);
                                 }
@@ -3775,11 +3852,10 @@ impl Interpreter {
                                 }),
                             )
                         } else {
-                            let property_key = self.member_property_key(mem, Rc::clone(&env_clone))?;
-                            let current = self.read_super_member_value(
-                                Rc::clone(&env_clone),
-                                &property_key,
-                            )?;
+                            let property_key =
+                                self.member_property_key(mem, Rc::clone(&env_clone))?;
+                            let current =
+                                self.read_super_member_value(Rc::clone(&env_clone), &property_key)?;
                             if !self.should_apply_assignment(&operator, &current) {
                                 on_complete(self, current)
                             } else {
@@ -3814,9 +3890,14 @@ impl Interpreter {
                             let operator = operator.clone();
                             let right = right.clone();
                             let env_clone = Rc::clone(&env_clone);
-                            move |interp: &mut Interpreter, object: JsValue, property_key: String| {
-                                let current =
-                                    interp.read_member_value(object.clone(), &property_key, None)?;
+                            move |interp: &mut Interpreter,
+                                  object: JsValue,
+                                  property_key: String| {
+                                let current = interp.read_member_value(
+                                    object.clone(),
+                                    &property_key,
+                                    None,
+                                )?;
                                 if !interp.should_apply_assignment(&operator, &current) {
                                     return on_complete(interp, current);
                                 }
@@ -3873,7 +3954,8 @@ impl Interpreter {
                                 }),
                             )
                         } else if mem.computed && self.expression_contains_yield(&mem.property) {
-                            let object = self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
+                            let object =
+                                self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
                             let complete_with_target_for_yield = Rc::clone(&complete_with_target);
                             self.eval_generator_property_key(
                                 true,
@@ -3888,9 +3970,12 @@ impl Interpreter {
                                 }),
                             )
                         } else {
-                            let object = self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
-                            let property_key = self.member_property_key(mem, Rc::clone(&env_clone))?;
-                            let current = self.read_member_value(object.clone(), &property_key, None)?;
+                            let object =
+                                self.eval_expression(&mem.object, Rc::clone(&env_clone))?;
+                            let property_key =
+                                self.member_property_key(mem, Rc::clone(&env_clone))?;
+                            let current =
+                                self.read_member_value(object.clone(), &property_key, None)?;
                             if !self.should_apply_assignment(&operator, &current) {
                                 on_complete(self, current)
                             } else {
@@ -3918,7 +4003,9 @@ impl Interpreter {
                             }
                         }
                     }
-                    _ => Err(RuntimeError::SyntaxError("invalid assignment target".into())),
+                    _ => Err(RuntimeError::SyntaxError(
+                        "invalid assignment target".into(),
+                    )),
                 }
             }
             Expression::AwaitExpression(argument) => self.eval_generator_expression(
@@ -5727,8 +5814,6 @@ impl Interpreter {
         }
     }
 
-
-
     fn collect_with_scope_bindings(&self, object: &JsValue) -> Vec<(String, JsValue)> {
         match object {
             JsValue::Object(map) => map
@@ -6462,10 +6547,9 @@ impl Interpreter {
                 .borrow_mut()
                 .define("super".to_string(), super_binding.clone());
         }
-        static_env.borrow_mut().define(
-            "__home_object__".to_string(),
-            class_value.clone(),
-        );
+        static_env
+            .borrow_mut()
+            .define("__home_object__".to_string(), class_value.clone());
         static_env.borrow_mut().define(
             "__super_property_base__".to_string(),
             super_value.clone().unwrap_or(JsValue::Null),
@@ -7077,7 +7161,13 @@ impl Interpreter {
                         Some(expr) => self.eval_expression(expr, Rc::clone(&env))?,
                         None => JsValue::Undefined,
                     };
-                    self.assign_pattern(&d.id, val, Rc::clone(&env), true)?;
+                    self.assign_pattern(&d.id, val.clone(), Rc::clone(&env), true)?;
+                    if matches!(decl.kind, VariableKind::Using | VariableKind::AwaitUsing) {
+                        env.borrow_mut().resources.push(ResourceRecord {
+                            value: val,
+                            is_await: matches!(decl.kind, VariableKind::AwaitUsing),
+                        });
+                    }
                 }
                 Ok(JsValue::Undefined)
             }
@@ -7085,11 +7175,14 @@ impl Interpreter {
             Statement::BlockStatement(block) => {
                 let block_env = Rc::new(RefCell::new(Environment::new(Some(Rc::clone(&env)))));
                 let mut last_val = JsValue::Undefined;
-                for s in &block.body {
-                    self.check_timeout()?;
-                    last_val = self.eval_statement(s, Rc::clone(&block_env))?;
-                }
-                Ok(last_val)
+                let result = (|| {
+                    for s in &block.body {
+                        self.check_timeout()?;
+                        last_val = self.eval_statement(s, Rc::clone(&block_env))?;
+                    }
+                    Ok(last_val)
+                })();
+                self.dispose_env_resources(block_env, result)
             }
             Statement::IfStatement(if_stmt) => {
                 let test_val = self.eval_expression(&if_stmt.test, Rc::clone(&env))?;
@@ -7502,7 +7595,9 @@ impl Interpreter {
                         self.write_member_value(object, &property_key, value)
                     }
                 }
-                _ => Err(RuntimeError::SyntaxError("invalid assignment target".into())),
+                _ => Err(RuntimeError::SyntaxError(
+                    "invalid assignment target".into(),
+                )),
             },
             Expression::BinaryExpression(bin) => {
                 if bin.operator == BinaryOperator::In
@@ -8218,9 +8313,14 @@ impl Interpreter {
             }
             Expression::MetaProperty(meta) => {
                 if meta.meta == "new" && meta.property == "target" {
-                    Ok(env.borrow().get("__new_target__").unwrap_or(JsValue::Undefined))
+                    Ok(env
+                        .borrow()
+                        .get("__new_target__")
+                        .unwrap_or(JsValue::Undefined))
                 } else {
-                    Err(RuntimeError::SyntaxError("unsupported meta property".into()))
+                    Err(RuntimeError::SyntaxError(
+                        "unsupported meta property".into(),
+                    ))
                 }
             }
             Expression::FunctionExpression(func) => {
@@ -9096,7 +9196,6 @@ fn clone_expression(expr: &Expression<'_>) -> Expression<'static> {
                 })
                 .collect(),
         ),
-
     }
 }
 

@@ -33,6 +33,7 @@ pub enum Token<'a> {
     Super,
     Yield,
     Await,
+    Using,
     Async,
     Import,
     Export,
@@ -175,6 +176,15 @@ impl<'a> Lexer<'a> {
             match self.peek() {
                 Some(c) if c.is_whitespace() => {
                     self.advance();
+                }
+                Some('#') if self.pos == 0 && self.peek_n(1) == Some('!') => {
+                    self.advance();
+                    self.advance();
+                    while let Some(c) = self.advance() {
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
+                    }
                 }
                 Some('/') => {
                     if self.peek_n(1) == Some('/') {
@@ -565,6 +575,7 @@ impl<'a> Lexer<'a> {
             "super" => Token::Super,
             "yield" => Token::Yield,
             "await" => Token::Await,
+            "using" => Token::Using,
             "async" => Token::Async,
             "import" => Token::Import,
             "export" => Token::Export,
@@ -651,12 +662,12 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        
+
         if self.peek() == Some('n') {
             self.advance();
             return Token::BigInt(&self.input[start..self.pos - 1]);
         }
-        
+
         let term = self.input[start..self.pos].replace('_', "");
         let val = term.parse::<f64>().unwrap_or(f64::NAN);
         Token::Number(val)

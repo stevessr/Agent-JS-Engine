@@ -21,6 +21,8 @@ pub enum ParseError {
     InvalidRestProperty,
     #[error("Missing initializer in const declaration")]
     MissingConstInitializer,
+    #[error("Missing initializer in using declaration")]
+    MissingUsingInitializer,
     #[error("Invalid for-in/of binding")]
     InvalidForBinding,
     #[error("for-in/of declarations cannot have initializers")]
@@ -127,6 +129,7 @@ impl<'a> Parser<'a> {
             Token::Super => Some("super"),
             Token::Yield => Some("yield"),
             Token::Await => Some("await"),
+            Token::Using => Some("using"),
             Token::Async => Some("async"),
             Token::Import => Some("import"),
             Token::Export => Some("export"),
@@ -207,6 +210,18 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn validate_using_declaration(&self, decl: &VariableDeclaration<'a>) -> Result<(), ParseError> {
+        if matches!(decl.kind, VariableKind::Using | VariableKind::AwaitUsing)
+            && decl
+                .declarations
+                .iter()
+                .any(|declarator| declarator.init.is_none())
+        {
+            return Err(ParseError::MissingUsingInitializer);
+        }
+        Ok(())
+    }
+
     fn validate_for_in_of_left(&self, left: &Statement<'a>) -> Result<(), ParseError> {
         match left {
             Statement::VariableDeclaration(decl) => {
@@ -244,7 +259,11 @@ impl<'a> Parser<'a> {
     fn token_starts_method_key(token: &Token<'a>) -> bool {
         matches!(
             token,
-            Token::String(_) | Token::Number(_) | Token::BigInt(_) | Token::LBracket | Token::PrivateIdentifier(_)
+            Token::String(_)
+                | Token::Number(_)
+                | Token::BigInt(_)
+                | Token::LBracket
+                | Token::PrivateIdentifier(_)
         ) || Self::token_as_identifier_name(token).is_some()
     }
 
@@ -345,9 +364,18 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(Statement::EmptyStatement)
             }
-            Some(Token::Let | Token::Var | Token::Const) => {
+            Some(Token::Let | Token::Var | Token::Const | Token::Using) => {
                 let decl = self.parse_variable_declaration()?;
                 self.validate_const_declaration(&decl, false)?;
+                self.validate_using_declaration(&decl)?;
+                Ok(Statement::VariableDeclaration(decl))
+            }
+            Some(Token::Await)
+                if matches!(self.lexer.clone().next_token().ok(), Some(Token::Using)) =>
+            {
+                let decl = self.parse_variable_declaration()?;
+                self.validate_const_declaration(&decl, false)?;
+                self.validate_using_declaration(&decl)?;
                 Ok(Statement::VariableDeclaration(decl))
             }
             Some(Token::Import)
@@ -632,9 +660,18 @@ impl<'a> Parser<'a> {
         }
 
         let declaration = match self.current_token {
-            Some(Token::Var | Token::Let | Token::Const) => {
+            Some(Token::Var | Token::Let | Token::Const | Token::Using) => {
                 let decl = self.parse_variable_declaration()?;
                 self.validate_const_declaration(&decl, false)?;
+                self.validate_using_declaration(&decl)?;
+                Statement::VariableDeclaration(decl)
+            }
+            Some(Token::Await)
+                if matches!(self.lexer.clone().next_token().ok(), Some(Token::Using)) =>
+            {
+                let decl = self.parse_variable_declaration()?;
+                self.validate_const_declaration(&decl, false)?;
+                self.validate_using_declaration(&decl)?;
                 Statement::VariableDeclaration(decl)
             }
             Some(Token::Function) => {
@@ -775,6 +812,9 @@ impl<'a> Parser<'a> {
 
             if matches!(self.current_token, Some(Token::Identifier("of"))) {
                 self.validate_for_in_of_left(&init)?;
+                if let Statement::VariableDeclaration(decl) = init.as_ref() {
+                    self.validate_using_declaration(decl)?;
+                }
                 self.advance()?;
                 let right = self.parse_expression()?;
                 self.consume_opt(Token::RParen)?;
@@ -813,6 +853,7 @@ impl<'a> Parser<'a> {
             let body = Box::new(self.parse_statement()?);
             if let Statement::VariableDeclaration(decl) = init.as_ref() {
                 self.validate_const_declaration(decl, false)?;
+                self.validate_using_declaration(decl)?;
             }
             Ok(Statement::ForStatement(ForStatement {
                 init: Some(init),
@@ -856,7 +897,15 @@ impl<'a> Parser<'a> {
     fn parse_for_initializer(&mut self) -> Result<Statement<'a>, ParseError> {
         if matches!(
             self.current_token,
-            Some(Token::Var | Token::Let | Token::Const)
+            Some(Token::Var | Token::Let | Token::Const | Token::Using)
+        ) {
+            Ok(Statement::VariableDeclaration(
+                self.parse_variable_declaration()?,
+            ))
+        } else if matches!(
+            self.current_token,
+            Some(Token::Await)
+                if matches!(self.lexer.clone().next_token().ok(), Some(Token::Using))
         ) {
             Ok(Statement::VariableDeclaration(
                 self.parse_variable_declaration()?,
@@ -1080,17 +1129,36 @@ impl<'a> Parser<'a> {
 
     fn parse_variable_declaration(&mut self) -> Result<VariableDeclaration<'a>, ParseError> {
         let kind = match self.current_token {
-            Some(Token::Let) => VariableKind::Let,
-            Some(Token::Var) => VariableKind::Var,
-            Some(Token::Const) => VariableKind::Const,
+            Some(Token::Let) => {
+                self.advance()?;
+                VariableKind::Let
+            }
+            Some(Token::Var) => {
+                self.advance()?;
+                VariableKind::Var
+            }
+            Some(Token::Const) => {
+                self.advance()?;
+                VariableKind::Const
+            }
+            Some(Token::Using) => {
+                self.advance()?;
+                VariableKind::Using
+            }
+            Some(Token::Await)
+                if matches!(self.lexer.clone().next_token().ok(), Some(Token::Using)) =>
+            {
+                self.advance()?;
+                self.advance()?;
+                VariableKind::AwaitUsing
+            }
             _ => {
                 return Err(ParseError::UnexpectedToken {
-                    expected: "var, let, or const".to_string(),
+                    expected: "var, let, const, using, or await using".to_string(),
                     found: None,
                 });
             }
         };
-        self.advance()?;
 
         let mut declarations = Vec::new();
 
@@ -1099,7 +1167,7 @@ impl<'a> Parser<'a> {
                 Some(Token::Identifier(_)) | Some(Token::LBracket) | Some(Token::LBrace) => {
                     self.parse_binding_pattern()?
                 }
-                _ => break, // just break if it's not a binding pattern (robustness)
+                _ => break,
             };
 
             let init = if self.current_token == Some(Token::Assign) {

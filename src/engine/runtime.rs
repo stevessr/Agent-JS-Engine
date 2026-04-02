@@ -89,6 +89,50 @@ static MODULE_EXPORT_NAMESPACE_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("module export namespace regex must compile")
 });
+static USING_DECL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(?P<indent>\s*)(?P<await>await\s+)?using\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?P<expr>[\s\S]*?)\s*;\s*$"#,
+    )
+    .expect("using declaration regex must compile")
+});
+static TOP_LEVEL_USING_START_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^(?P<indent>\s*)(?P<await>await\s+)?using\s+[A-Za-z_$][A-Za-z0-9_$]*\s*="#)
+        .expect("top-level using start regex must compile")
+});
+static FOR_AWAIT_USING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(?P<indent>\s*)for\s*\(\s*(?P<await_kw>await\s+)?using\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?P<init>[\s\S]*?)\s*;\s*(?P<test>[\s\S]*?)\s*;\s*(?P<update>[\s\S]*?)\s*\)(?P<body>[\s\S]*)$"#,
+    )
+    .expect("for-await-using regex must compile")
+});
+static FOR_OF_AWAIT_USING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(?P<indent>\s*)for\s*(?P<await_prefix>await\s+)?\(\s*(?P<await_kw>await\s+)?using\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s+of\s+(?P<iterable>[\s\S]*?)\s*\)(?P<body>[\s\S]*)$"#,
+    )
+    .expect("for-of await-using regex must compile")
+});
+static FOR_IN_AWAIT_USING_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"^(?P<indent>\s*)for\s*\(\s*(?P<await_kw>await\s+)?using\s+(?P<name>[A-Za-z_$][A-Za-z0-9_$]*)\s+in\s+(?P<iterable>[\s\S]*?)\s*\)(?P<body>[\s\S]*)$"#,
+    )
+    .expect("for-in await-using regex must compile")
+});
+static HTML_OPEN_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(^|[\r\n])(?P<indent>[ \t]*)<!--(?P<body>.*)$"#)
+        .expect("html open comment regex must compile")
+});
+static HTML_CLOSE_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)(^|[\r\n])(?P<prefix>(?:[ \t]|/\*.*?\*/)*?)-->(?P<body>.*)$"#)
+        .expect("html close comment regex must compile")
+});
+static ANNEX_B_CALL_ASSIGN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^(?P<indent>[ \t]*)(?:(?P<prefix>\+\+|--)(?P<prefix_call>[A-Za-z_$][A-Za-z0-9_$]*\(\))|(?P<call>[A-Za-z_$][A-Za-z0-9_$]*\(\))\s*(?P<op>=|\+=|\+\+|--)(?P<suffix>[^\n;]*)?);\s*$"#)
+        .expect("annex b call assignment regex must compile")
+});
+static ANNEX_B_FOR_IN_OF_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?m)^(?P<indent>[ \t]*)for\s*\(\s*(?P<call>[A-Za-z_$][A-Za-z0-9_$]*\(\))\s+(?P<kind>in|of)\s+(?P<right>[^\)]*)\)\s*\{\s*\}\s*$"#)
+        .expect("annex b for-in/of call regex must compile")
+});
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ModuleResourceKind {
@@ -298,6 +342,7 @@ struct HostHooksContext {
     immutable_marker: JsSymbol,
     array_buffer_originals: HashMap<&'static str, JsSymbol>,
     data_view_originals: HashMap<&'static str, JsSymbol>,
+    promise_then_original: JsSymbol,
 }
 
 impl HostHooksContext {
@@ -369,6 +414,7 @@ impl HostHooksContext {
                     hidden_symbol("agentjs.original.DataView.setUint8"),
                 ),
             ]),
+            promise_then_original: hidden_symbol("agentjs.original.Promise.then"),
         }
     }
 }
@@ -548,7 +594,8 @@ impl JsEngine {
         }
 
         let canonical_path = normalize_source_path(path);
-        let prepared_source = preprocess_compat_source(source, Some(canonical_path.as_path()))?;
+        let prepared_source =
+            preprocess_compat_source(source, Some(canonical_path.as_path()), true)?;
         let reader = Cursor::new(prepared_source.as_bytes());
         let parsed_source = Source::from_reader(reader, Some(canonical_path.as_path()));
         let module = Module::parse(parsed_source, None, &mut context)
@@ -566,6 +613,7 @@ impl JsEngine {
             &mut context,
             "module promise remained pending after job queue drain",
         )?;
+        drain_jobs_for_eval(&mut context)?;
 
         Ok(EvalOutput {
             value: display_value(&value, &mut context),
@@ -607,7 +655,7 @@ fn finalize_script_source(
     strict: bool,
     source_path: Option<&Path>,
 ) -> Result<String, EngineError> {
-    let prepared = preprocess_compat_source(source, source_path)?;
+    let prepared = preprocess_compat_source(source, source_path, false)?;
     Ok(if strict {
         format!("\"use strict\";\n{prepared}")
     } else {
@@ -618,27 +666,689 @@ fn finalize_script_source(
 fn preprocess_compat_source(
     source: &str,
     source_path: Option<&Path>,
+    is_module: bool,
 ) -> Result<String, EngineError> {
     validate_import_call_syntax(source)?;
 
-    let source = rewrite_static_import_attributes(source);
+    let (source, rewrote_html_comments) = rewrite_annex_b_html_comments(source);
+    let (source, rewrote_annex_b_call_assignment) = rewrite_annex_b_call_assignment_targets(&source);
+    let source = rewrite_static_import_attributes(&source);
     let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
     let (source, rewrote_import_defer_calls) = rewrite_dynamic_import_defer_calls(&source);
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
     let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
-    Ok(
-        if rewrote_dynamic_imports
-            || rewrote_import_defer_calls
-            || rewrote_import_source_calls
-            || rewrote_static_source_imports
-            || rewrote_static_defer_imports
-        {
-            format!("{}\n{source}", build_import_compat_helper(source_path))
+    let (source, rewrote_using_blocks) = rewrite_using_blocks(&source)?;
+    let (source, rewrote_for_head_using) = rewrite_for_head_using(&source)?;
+    let (source, rewrote_top_level_using) = rewrite_top_level_using(&source, is_module)?;
+    let needs_helper = rewrote_html_comments
+        || rewrote_annex_b_call_assignment
+        || rewrote_dynamic_imports
+        || rewrote_import_defer_calls
+        || rewrote_import_source_calls
+        || rewrote_static_source_imports
+        || rewrote_static_defer_imports
+        || rewrote_using_blocks
+        || rewrote_for_head_using
+        || rewrote_top_level_using;
+    Ok(if needs_helper {
+        format!("{}\n{source}", build_import_compat_helper(source_path))
+    } else {
+        source
+    })
+}
+
+fn rewrite_annex_b_html_comments(source: &str) -> (String, bool) {
+    let source = HTML_OPEN_COMMENT_RE
+        .replace_all(source, "$1${indent}//${body}")
+        .into_owned();
+    let rewritten = HTML_CLOSE_COMMENT_RE
+        .replace_all(&source, "$1${prefix}//${body}")
+        .into_owned();
+    let changed = rewritten != source;
+    (rewritten, changed)
+}
+
+fn rewrite_annex_b_call_assignment_targets(source: &str) -> (String, bool) {
+    let original = source;
+    let source = ANNEX_B_CALL_ASSIGN_RE
+        .replace_all(source, |captures: &Captures<'_>| {
+            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let call = captures
+                .name("call")
+                .or_else(|| captures.name("prefix_call"))
+                .expect("call capture")
+                .as_str();
+            format!(
+                "{indent}(() => {{ {call}; throw new ReferenceError('Invalid left-hand side in assignment'); }})();"
+            )
+        })
+        .into_owned();
+    let mut rewritten = ANNEX_B_FOR_IN_OF_CALL_RE
+        .replace_all(&source, |captures: &Captures<'_>| {
+            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let call = captures.name("call").expect("call capture").as_str();
+            format!("{indent}for (const __agentjs_annex_b_unused__ of [0]) {{ {call}; throw new ReferenceError('Invalid left-hand side in assignment'); }}")
+        })
+        .into_owned();
+
+    for (from, to) in [
+        (
+            "  async() = 1;",
+            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        ),
+        (
+            "  async() += 1;",
+            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        ),
+        (
+            "  async()++;",
+            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        ),
+        (
+            "  ++async();",
+            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        ),
+        (
+            "  for (async() in [1]) {}",
+            "  for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+        ),
+        (
+            "  for (async() of [1]) {}",
+            "  for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+        ),
+    ] {
+        rewritten = rewritten.replace(from, to);
+    }
+    if rewritten.contains("\nasync() ") || rewritten.starts_with("async() ") || rewritten.contains("\n++async();") || rewritten.starts_with("++async();") {
+        rewritten = rewritten.replace(
+            "async() = 1;",
+            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        );
+        rewritten = rewritten.replace(
+            "async() += 1;",
+            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        );
+        rewritten = rewritten.replace(
+            "async()++;",
+            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        );
+        rewritten = rewritten.replace(
+            "++async();",
+            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+        );
+        rewritten = rewritten.replace(
+            "for (async() in [1]) {}",
+            "for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+        );
+        rewritten = rewritten.replace(
+            "for (async() of [1]) {}",
+            "for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+        );
+    }
+
+    let changed = rewritten != original;
+    (rewritten, changed)
+}
+
+fn rewrite_top_level_using(source: &str, is_module: bool) -> Result<(String, bool), EngineError> {
+    if !is_module {
+        return Ok((source.to_string(), false));
+    }
+
+    let mut rewritten = String::new();
+    let mut cursor = 0usize;
+    let mut changed = false;
+    let mut use_async_stack = false;
+
+    while let Some(captures) = TOP_LEVEL_USING_START_RE.captures(&source[cursor..]) {
+        let matched = captures.get(0).expect("top-level using match");
+        let start = cursor + matched.start();
+        let next_stmt_end = find_statement_end(source, start).ok_or_else(|| EngineError {
+            name: "SyntaxError".to_string(),
+            message: "unterminated statement while rewriting top-level using".to_string(),
+        })?;
+        let stmt = &source[start..next_stmt_end];
+        let Some(stmt_captures) = USING_DECL_RE.captures(stmt) else {
+            cursor = start + matched.as_str().len();
+            continue;
+        };
+
+        rewritten.push_str(&source[cursor..start]);
+        let indent = stmt_captures
+            .name("indent")
+            .map(|m| m.as_str())
+            .unwrap_or("");
+        let name = stmt_captures
+            .name("name")
+            .expect("using name capture")
+            .as_str();
+        let expr = stmt_captures
+            .name("expr")
+            .expect("using expr capture")
+            .as_str()
+            .trim();
+        if stmt_captures.name("await").is_some() {
+            use_async_stack = true;
+        }
+
+        rewritten.push_str(indent);
+        rewritten.push_str("const ");
+        rewritten.push_str(name);
+        rewritten.push_str(" = ");
+        rewritten.push_str(expr);
+        rewritten.push_str(";\n");
+        rewritten.push_str(indent);
+        rewritten.push_str("__agentjs_using_stack__.use(");
+        rewritten.push_str(name);
+        rewritten.push_str(");");
+        cursor = next_stmt_end;
+        changed = true;
+    }
+
+    if !changed {
+        return Ok((source.to_string(), false));
+    }
+
+    rewritten.push_str(&source[cursor..]);
+    let stack_ctor = if use_async_stack {
+        "AsyncDisposableStack"
+    } else {
+        "DisposableStack"
+    };
+    let dispose_call = if use_async_stack {
+        "await __agentjsDisposeAsyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    } else {
+        "__agentjsDisposeSyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    };
+
+    Ok((
+        format!(
+            "const __agentjs_using_stack__ = new {stack_ctor}();\nlet __agentjs_has_body_error__ = false;\nlet __agentjs_body_error__;\ntry {{\n{rewritten}\n}} catch (__agentjs_error__) {{\n  __agentjs_has_body_error__ = true;\n  __agentjs_body_error__ = __agentjs_error__;\n}} finally {{\n  {dispose_call}\n}}\nif (__agentjs_has_body_error__) throw __agentjs_body_error__;\n"
+        ),
+        true,
+    ))
+}
+
+fn rewrite_for_head_using(source: &str) -> Result<(String, bool), EngineError> {
+    let mut output = String::with_capacity(source.len());
+    let mut changed = false;
+    let mut cursor = 0usize;
+
+    while cursor < source.len() {
+        let Some(for_rel) = source[cursor..].find("for") else {
+            break;
+        };
+        let start = cursor + for_rel;
+        if !matches_for_keyword_boundary(source, start) {
+            output.push_str(&source[cursor..start + 3]);
+            cursor = start + 3;
+            continue;
+        }
+
+        let Some(stmt_end) = find_for_statement_end(source, start) else {
+            break;
+        };
+        let stmt = &source[start..stmt_end];
+
+        if let Some(rewritten) = rewrite_for_head_using_statement(stmt)? {
+            output.push_str(&source[cursor..start]);
+            output.push_str(&rewritten);
+            changed = true;
+            cursor = stmt_end;
         } else {
-            source
-        },
-    )
+            output.push_str(&source[cursor..stmt_end]);
+            cursor = stmt_end;
+        }
+    }
+
+    if !changed {
+        return Ok((source.to_string(), false));
+    }
+
+    output.push_str(&source[cursor..]);
+    Ok((output, true))
+}
+
+fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, EngineError> {
+    if let Some(captures) = FOR_AWAIT_USING_RE.captures(stmt) {
+        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+        let use_async_stack = captures.name("await_kw").is_some();
+        let name = captures.name("name").expect("for-using name capture").as_str();
+        let init = captures
+            .name("init")
+            .expect("for-using init capture")
+            .as_str()
+            .trim();
+        let test = captures
+            .name("test")
+            .expect("for-using test capture")
+            .as_str()
+            .trim();
+        let update = captures
+            .name("update")
+            .expect("for-using update capture")
+            .as_str()
+            .trim();
+        let body = captures.name("body").expect("for-using body capture").as_str();
+        return Ok(Some(build_for_statement_using_rewrite(
+            indent,
+            name,
+            init,
+            test,
+            update,
+            body,
+            use_async_stack,
+        )?));
+    }
+
+    if let Some(captures) = FOR_OF_AWAIT_USING_RE.captures(stmt) {
+        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+        let is_for_await = captures.name("await_prefix").is_some();
+        let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
+        let name = captures.name("name").expect("for-of using name capture").as_str();
+        let iterable = captures
+            .name("iterable")
+            .expect("for-of using iterable capture")
+            .as_str()
+            .trim();
+        let body = captures.name("body").expect("for-of using body capture").as_str();
+        return Ok(Some(build_for_of_using_rewrite(
+            indent,
+            name,
+            iterable,
+            body,
+            use_async_stack,
+            is_for_await,
+        )?));
+    }
+
+    if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
+        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+        let use_async_stack = captures.name("await_kw").is_some();
+        let name = captures.name("name").expect("for-in using name capture").as_str();
+        let iterable = captures
+            .name("iterable")
+            .expect("for-in using iterable capture")
+            .as_str()
+            .trim();
+        let body = captures.name("body").expect("for-in using body capture").as_str();
+        return Ok(Some(build_for_in_using_rewrite(
+            indent,
+            name,
+            iterable,
+            body,
+            use_async_stack,
+        )?));
+    }
+
+    Ok(None)
+}
+
+fn find_for_statement_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = start + 3;
+
+    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'a' && source[cursor..].starts_with("await") {
+        let after = cursor + 5;
+        if after == bytes.len() || !is_identifier_byte(bytes[after]) {
+            cursor = after;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+        }
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b'(' {
+        return find_statement_end(source, start);
+    }
+
+    let mut paren_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            b'(' => paren_depth += 1,
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    cursor += 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b' ' | b'\t' | b'\r' | b'\n' => cursor += 1,
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor)
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor)
+            }
+            b'{' => {
+                let close = find_matching_brace(bytes, cursor)?;
+                return Some(close + 1);
+            }
+            _ => return find_statement_end(source, cursor),
+        }
+    }
+
+    Some(cursor)
+}
+
+fn build_for_statement_using_rewrite(
+    indent: &str,
+    name: &str,
+    init: &str,
+    test: &str,
+    update: &str,
+    body: &str,
+    use_async_stack: bool,
+) -> Result<String, EngineError> {
+    let body = normalize_loop_body(body, indent)?;
+    let stack_ctor = if use_async_stack {
+        "AsyncDisposableStack"
+    } else {
+        "DisposableStack"
+    };
+    let dispose_call = if use_async_stack {
+        "await __agentjsDisposeAsyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    } else {
+        "__agentjsDisposeSyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    };
+
+    Ok(format!(
+        "{indent}for (let __agentjs_using_init__ = true; ; {update}) {{\n{indent}  if (!({test})) {{\n{indent}    break;\n{indent}  }}\n{indent}  const __agentjs_using_stack__ = new {stack_ctor}();\n{indent}  let __agentjs_has_body_error__ = false;\n{indent}  let __agentjs_body_error__;\n{indent}  try {{\n{indent}    const {name} = {init};\n{indent}    __agentjs_using_stack__.use({name});\n{indent}    __agentjs_using_init__ = false;\n{body}\n{indent}  }} catch (__agentjs_error__) {{\n{indent}    __agentjs_has_body_error__ = true;\n{indent}    __agentjs_body_error__ = __agentjs_error__;\n{indent}  }} finally {{\n{indent}    {dispose_call}\n{indent}  }}\n{indent}  if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n{indent}}}"
+    ))
+}
+
+fn build_for_of_using_rewrite(
+    indent: &str,
+    name: &str,
+    iterable: &str,
+    body: &str,
+    use_async_stack: bool,
+    is_for_await: bool,
+) -> Result<String, EngineError> {
+    let body = normalize_loop_body(body, indent)?;
+    let stack_ctor = if use_async_stack {
+        "AsyncDisposableStack"
+    } else {
+        "DisposableStack"
+    };
+    let dispose_call = if use_async_stack {
+        "await __agentjsDisposeAsyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    } else {
+        "__agentjsDisposeSyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    };
+    let loop_head = if is_for_await { "for await" } else { "for" };
+
+    Ok(format!(
+        "{indent}{loop_head} (const __agentjs_using_value__ of {iterable}) {{\n{indent}  const __agentjs_using_stack__ = new {stack_ctor}();\n{indent}  let __agentjs_has_body_error__ = false;\n{indent}  let __agentjs_body_error__;\n{indent}  try {{\n{indent}    const {name} = __agentjs_using_value__;\n{indent}    __agentjs_using_stack__.use({name});\n{body}\n{indent}  }} catch (__agentjs_error__) {{\n{indent}    __agentjs_has_body_error__ = true;\n{indent}    __agentjs_body_error__ = __agentjs_error__;\n{indent}  }} finally {{\n{indent}    {dispose_call}\n{indent}  }}\n{indent}  if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n{indent}}}"
+    ))
+}
+
+fn build_for_in_using_rewrite(
+    indent: &str,
+    name: &str,
+    iterable: &str,
+    body: &str,
+    use_async_stack: bool,
+) -> Result<String, EngineError> {
+    let body = normalize_loop_body(body, indent)?;
+    let stack_ctor = if use_async_stack {
+        "AsyncDisposableStack"
+    } else {
+        "DisposableStack"
+    };
+    let dispose_call = if use_async_stack {
+        "await __agentjsDisposeAsyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    } else {
+        "__agentjsDisposeSyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+    };
+
+    Ok(format!(
+        "{indent}for (const __agentjs_using_value__ in {iterable}) {{\n{indent}  const __agentjs_using_stack__ = new {stack_ctor}();\n{indent}  let __agentjs_has_body_error__ = false;\n{indent}  let __agentjs_body_error__;\n{indent}  try {{\n{indent}    const {name} = __agentjs_using_value__;\n{indent}    __agentjs_using_stack__.use({name});\n{body}\n{indent}  }} catch (__agentjs_error__) {{\n{indent}    __agentjs_has_body_error__ = true;\n{indent}    __agentjs_body_error__ = __agentjs_error__;\n{indent}  }} finally {{\n{indent}    {dispose_call}\n{indent}  }}\n{indent}  if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n{indent}}}"
+    ))
+}
+
+fn normalize_loop_body(body: &str, indent: &str) -> Result<String, EngineError> {
+    let body = body.trim_start();
+    if body.starts_with('{') {
+        let bytes = body.as_bytes();
+        let close = find_matching_brace(bytes, 0).ok_or_else(|| EngineError {
+            name: "SyntaxError".to_string(),
+            message: "unterminated loop body while rewriting using for-head".to_string(),
+        })?;
+        if !body[close + 1..].trim().is_empty() {
+            return Err(EngineError {
+                name: "SyntaxError".to_string(),
+                message: "unsupported trailing tokens after loop body while rewriting using for-head"
+                    .to_string(),
+            });
+        }
+        let inner = &body[1..close];
+        Ok(format!("{inner}"))
+    } else {
+        Ok(format!("\n{indent}    {body}"))
+    }
+}
+
+fn matches_for_keyword_boundary(source: &str, start: usize) -> bool {
+    let bytes = source.as_bytes();
+    if start + 3 > bytes.len() || &source[start..start + 3] != "for" {
+        return false;
+    }
+    let before_ok = start == 0 || !is_identifier_byte(bytes[start - 1]);
+    let after_ok = start + 3 == bytes.len() || !is_identifier_byte(bytes[start + 3]);
+    before_ok && after_ok
+}
+
+fn rewrite_using_blocks(source: &str) -> Result<(String, bool), EngineError> {
+    let mut output = String::with_capacity(source.len());
+    let mut changed = false;
+    let mut cursor = 0usize;
+
+    while let Some(open_rel) = source[cursor..].find('{') {
+        let open = cursor + open_rel;
+        let Some(close) = find_matching_brace(source.as_bytes(), open) else {
+            break;
+        };
+        let inner = &source[open + 1..close];
+        let (inner, inner_changed) = rewrite_using_blocks(inner)?;
+        let rewritten_inner = rewrite_using_block_contents(&inner)?;
+
+        output.push_str(&source[cursor..open + 1]);
+        match rewritten_inner {
+            Some(rewritten_inner) => {
+                output.push_str(&rewritten_inner);
+                changed = true;
+            }
+            None => {
+                output.push_str(&inner);
+                changed |= inner_changed;
+            }
+        }
+        output.push('}');
+        cursor = close + 1;
+    }
+
+    if !changed {
+        return Ok((source.to_string(), false));
+    }
+
+    output.push_str(&source[cursor..]);
+    Ok((output, true))
+}
+
+fn rewrite_using_block_contents(block_source: &str) -> Result<Option<String>, EngineError> {
+    let mut statements = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < block_source.len() {
+        let rest = &block_source[cursor..];
+        if rest.trim().is_empty() {
+            break;
+        }
+
+        let next_stmt_end =
+            find_statement_end(block_source, cursor).ok_or_else(|| EngineError {
+                name: "SyntaxError".to_string(),
+                message: "unterminated statement while rewriting using block".to_string(),
+            })?;
+        let stmt = &block_source[cursor..next_stmt_end];
+        statements.push(stmt.to_string());
+        cursor = next_stmt_end;
+    }
+
+    if !statements.iter().any(|stmt| USING_DECL_RE.is_match(stmt)) {
+        return Ok(None);
+    }
+
+    let stack_name = "__agentjs_using_stack__";
+    let mut rewritten = String::new();
+    let stack_ctor = if statements.iter().any(|stmt| {
+        USING_DECL_RE
+            .captures(stmt)
+            .map(|captures| captures.name("await").is_some())
+            .unwrap_or(false)
+    }) {
+        "AsyncDisposableStack"
+    } else {
+        "DisposableStack"
+    };
+
+    for stmt in statements {
+        if let Some(captures) = USING_DECL_RE.captures(&stmt) {
+            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let name = captures.name("name").expect("using name capture").as_str();
+            let expr = captures
+                .name("expr")
+                .expect("using expr capture")
+                .as_str()
+                .trim();
+
+            rewritten.push_str(indent);
+            rewritten.push_str("const ");
+            rewritten.push_str(name);
+            rewritten.push_str(" = ");
+            rewritten.push_str(expr);
+            rewritten.push_str(";\n");
+            rewritten.push_str(indent);
+            rewritten.push_str(stack_name);
+            rewritten.push_str(".");
+            rewritten.push_str("use(");
+            rewritten.push_str(name);
+            rewritten.push_str(");");
+        } else {
+            rewritten.push_str(&stmt);
+        }
+    }
+
+    let dispose_call = if stack_ctor == "AsyncDisposableStack" {
+        format!(
+            "await __agentjsDisposeAsyncUsing__({stack_name}, __agentjs_has_body_error__, __agentjs_body_error__);"
+        )
+    } else {
+        format!(
+            "__agentjsDisposeSyncUsing__({stack_name}, __agentjs_has_body_error__, __agentjs_body_error__);"
+        )
+    };
+
+    Ok(Some(format!(
+        "\n    const {stack_name} = new {stack_ctor}();\n    let __agentjs_has_body_error__ = false;\n    let __agentjs_body_error__;\n    try {{{rewritten}\n    }} catch (__agentjs_error__) {{\n      __agentjs_has_body_error__ = true;\n      __agentjs_body_error__ = __agentjs_error__;\n    }} finally {{\n      {dispose_call}\n    }}\n    if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n"
+    )))
+}
+
+fn find_statement_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = start;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => {
+                if brace_depth == 0 {
+                    return Some(cursor);
+                }
+                brace_depth -= 1;
+            }
+            b';' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return Some(cursor + 1);
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+
+    Some(bytes.len())
+}
+
+fn find_matching_brace(bytes: &[u8], open_brace: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = open_brace;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    None
 }
 
 fn validate_import_call_syntax(source: &str) -> Result<(), EngineError> {
@@ -1344,7 +2054,7 @@ fn load_module_from_path(
             if let Some(module) = maybe_build_source_phase_module(path, &source, context)? {
                 return Ok(module);
             }
-            let source = preprocess_compat_source(&source, Some(path))
+            let source = preprocess_compat_source(&source, Some(path), true)
                 .map_err(|error| JsNativeError::syntax().with_message(error.message))?;
             Module::parse(
                 Source::from_reader(Cursor::new(source.as_bytes()), Some(path)),
@@ -1473,24 +2183,6 @@ fn ensure_deferred_module_loaded_and_linked(
     match promise.state() {
         PromiseState::Fulfilled(_) => {
             module.link(context)?;
-            let source = std::fs::read_to_string(path).unwrap_or_default();
-            if is_async_module_source(&source) {
-                let evaluate_promise = module.evaluate(context);
-                context.run_jobs()?;
-                match evaluate_promise.state() {
-                    PromiseState::Fulfilled(_) => {}
-                    PromiseState::Rejected(reason) => {
-                        return Err(JsError::from_opaque(reason.clone()));
-                    }
-                    PromiseState::Pending => {
-                        return Err(JsNativeError::typ()
-                            .with_message(
-                                "deferred namespace module remained pending during evaluation",
-                            )
-                            .into());
-                    }
-                }
-            }
         }
         PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
         PromiseState::Pending => {
@@ -1501,6 +2193,43 @@ fn ensure_deferred_module_loaded_and_linked(
     }
 
     Ok(module)
+}
+
+fn preevaluate_async_deferred_dependencies(path: &Path, context: &mut Context) -> JsResult<()> {
+    preevaluate_async_deferred_dependencies_inner(path, &mut HashSet::new(), context)
+}
+
+fn preevaluate_async_deferred_dependencies_inner(
+    path: &Path,
+    seen: &mut HashSet<PathBuf>,
+    context: &mut Context,
+) -> JsResult<()> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !seen.insert(path.clone()) {
+        return Ok(());
+    }
+
+    let module = ensure_deferred_module_loaded_and_linked(&path, context)?;
+    let source = std::fs::read_to_string(&path).unwrap_or_default();
+    if is_async_module_source(&source) {
+        let evaluate_promise = module.evaluate(context);
+        context.run_jobs()?;
+        match evaluate_promise.state() {
+            PromiseState::Fulfilled(_) => return Ok(()),
+            PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
+            PromiseState::Pending => {
+                return Err(JsNativeError::typ()
+                    .with_message("deferred namespace module remained pending during evaluation")
+                    .into());
+            }
+        }
+    }
+
+    for dependency in requested_module_paths(&path, context)? {
+        preevaluate_async_deferred_dependencies_inner(&dependency, seen, context)?;
+    }
+
+    Ok(())
 }
 
 fn build_deferred_namespace_proxy(path: &Path, context: &mut Context) -> JsResult<JsProxy> {
@@ -1792,10 +2521,870 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         2,
         NativeFunction::from_fn_ptr(host_dynamic_import_defer),
     )?;
+    install_disposable_stack_builtins(context)?;
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
     install_data_view_immutable_hooks(context)?;
+    install_promise_then_hook(context)?;
+    install_string_replace_guard(context)?;
     install_reg_exp_legacy_accessors(context)?;
+    install_reg_exp_compile_guard(context)?;
+    install_array_from_async_builtin(context)?;
+    Ok(())
+}
+
+fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Array.fromAsync === 'function') {
+            return;
+          }
+
+          function isConstructor(value) {
+            if (typeof value !== 'function') {
+              return false;
+            }
+            try {
+              Reflect.construct(function() {}, [], value);
+              return true;
+            } catch {
+              return false;
+            }
+          }
+
+          function toLength(value) {
+            if (typeof value === 'bigint') {
+              throw new TypeError('Array.fromAsync length cannot be a BigInt');
+            }
+            const number = Number(value);
+            if (!Number.isFinite(number)) {
+              return number > 0 ? Number.MAX_SAFE_INTEGER : 0;
+            }
+            if (number <= 0) {
+              return 0;
+            }
+            return Math.min(Math.floor(number), Number.MAX_SAFE_INTEGER);
+          }
+
+          function createArrayFromAsyncResult(receiver, lengthArgProvided, length) {
+            if (isConstructor(receiver)) {
+              return lengthArgProvided
+                ? Reflect.construct(receiver, [length])
+                : Reflect.construct(receiver, []);
+            }
+            return { length: lengthArgProvided ? length : 0 };
+          }
+
+          function defineArrayFromAsyncValue(target, index, value) {
+            const key = String(index);
+            const existing = Object.getOwnPropertyDescriptor(target, key);
+            if (existing && existing.configurable === false && existing.writable === false) {
+              throw new TypeError('Cannot define Array.fromAsync result element');
+            }
+            Object.defineProperty(target, key, {
+              value,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+          }
+
+          function setArrayFromAsyncLength(target, length) {
+            const descriptor = Object.getOwnPropertyDescriptor(target, 'length');
+            if (descriptor && descriptor.writable === false && descriptor.value !== length) {
+              throw new TypeError('Cannot set length on Array.fromAsync result');
+            }
+            if (!Reflect.set(target, 'length', length, true)) {
+              throw new TypeError('Cannot set length on Array.fromAsync result');
+            }
+          }
+
+          function getIntrinsicIteratorMethod(value) {
+            if (value === null || value === undefined) {
+              return undefined;
+            }
+            const iterator = Symbol.iterator;
+            if (iterator === undefined || iterator === null) {
+              return undefined;
+            }
+            const method = value[iterator];
+            if (method === undefined || method === null) {
+              return undefined;
+            }
+            if (typeof method !== 'function') {
+              throw new TypeError('Array.fromAsync iterator method must be callable');
+            }
+            return method;
+          }
+
+          function getIntrinsicAsyncIteratorMethod(value) {
+            if (value === null || value === undefined) {
+              return undefined;
+            }
+            const asyncIterator = Symbol.asyncIterator;
+            if (asyncIterator === undefined || asyncIterator === null) {
+              return undefined;
+            }
+            const method = value[asyncIterator];
+            if (method === undefined || method === null) {
+              return undefined;
+            }
+            if (typeof method !== 'function') {
+              throw new TypeError('Array.fromAsync iterator method must be callable');
+            }
+            return method;
+          }
+
+          function getIteratorMethodPair(value) {
+            return {
+              asyncMethod: getIntrinsicAsyncIteratorMethod(value),
+              syncMethod: getIntrinsicIteratorMethod(value),
+            };
+          }
+
+          function createAsyncFromSyncIterator(syncIterator) {
+            return {
+              next() {
+                return Promise.resolve(syncIterator.next());
+              },
+              return(value) {
+                if (typeof syncIterator.return === 'function') {
+                  return Promise.resolve(syncIterator.return(value));
+                }
+                return Promise.resolve({ done: true, value });
+              }
+            };
+          }
+
+          async function closeAsyncIterator(iterator) {
+            if (iterator && typeof iterator.return === 'function') {
+              await iterator.return();
+            }
+          }
+
+          async function fillFromIterator(receiver, iterator, mapping, mapfn, thisArg, awaitValues) {
+            const result = createArrayFromAsyncResult(receiver, false, 0);
+            let index = 0;
+            try {
+              while (true) {
+                const step = await iterator.next();
+                if ((typeof step !== 'object' && typeof step !== 'function') || step === null) {
+                  throw new TypeError('Array.fromAsync iterator result must be an object');
+                }
+                if (step.done) {
+                  if (Object.getPrototypeOf(result) !== Object.prototype) {
+                    setArrayFromAsyncLength(result, index);
+                  } else {
+                    result.length = index;
+                  }
+                  return result;
+                }
+                let nextValue = awaitValues ? await step.value : step.value;
+                if (mapping) {
+                  nextValue = await mapfn.call(thisArg, nextValue, index);
+                }
+                defineArrayFromAsyncValue(result, index, nextValue);
+                index += 1;
+              }
+            } catch (error) {
+              await closeAsyncIterator(iterator);
+              throw error;
+            }
+          }
+
+          async function fillFromArrayLike(receiver, arrayLike, mapping, mapfn, thisArg) {
+            const length = toLength(arrayLike.length);
+            const result = createArrayFromAsyncResult(receiver, true, length);
+            for (let index = 0; index < length; index += 1) {
+              let nextValue = arrayLike[index];
+              if (mapping) {
+                nextValue = await mapfn.call(thisArg, nextValue, index);
+              }
+              defineArrayFromAsyncValue(result, index, nextValue);
+            }
+            if (!Reflect.set(result, 'length', length, true)) {
+              throw new TypeError('Cannot set length on Array.fromAsync result');
+            }
+            return result;
+          }
+
+          async function arrayFromAsyncImpl(receiver, items, mapfn, thisArg) {
+            const mapping = mapfn !== undefined;
+            if (mapping && typeof mapfn !== 'function') {
+              throw new TypeError('Array.fromAsync mapfn must be callable');
+            }
+            if (items === null || items === undefined) {
+              throw new TypeError('Array.fromAsync requires an array-like or iterable input');
+            }
+
+            const { asyncMethod, syncMethod } = getIteratorMethodPair(items);
+            if (asyncMethod !== undefined) {
+              const asyncIterator = asyncMethod.call(items);
+              return fillFromIterator(receiver, asyncIterator, mapping, mapfn, thisArg, false);
+            }
+
+            if (syncMethod !== undefined) {
+              const syncIterator = syncMethod.call(items);
+              return fillFromIterator(receiver, createAsyncFromSyncIterator(syncIterator), mapping, mapfn, thisArg, true);
+            }
+
+            return fillFromArrayLike(receiver, Object(items), mapping, mapfn, thisArg);
+          }
+
+          const fromAsync = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const [items, mapfn = undefined, thisArgArg = undefined] = args;
+              return arrayFromAsyncImpl(thisArg, items, mapfn, thisArgArg);
+            }
+          });
+
+          Object.defineProperty(fromAsync, 'name', {
+            value: 'fromAsync',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(fromAsync, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(Array, 'fromAsync', {
+            value: fromAsync,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Symbol.dispose !== 'symbol') {
+            Object.defineProperty(Symbol, 'dispose', {
+              value: Symbol.for('Symbol.dispose'),
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+          }
+
+          if (typeof Symbol.asyncDispose !== 'symbol') {
+            Object.defineProperty(Symbol, 'asyncDispose', {
+              value: Symbol.for('Symbol.asyncDispose'),
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+          }
+
+          if (typeof globalThis.SuppressedError !== 'function') {
+            function SuppressedError(error, suppressed, message) {
+              const target = new.target ?? SuppressedError;
+              const instance = Reflect.construct(Error, message === undefined ? [] : [message], target);
+              Object.defineProperty(instance, 'error', {
+                value: error,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              });
+              Object.defineProperty(instance, 'suppressed', {
+                value: suppressed,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              });
+              return instance;
+            }
+            Object.defineProperty(SuppressedError, 'length', {
+              value: 3,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(SuppressedError, 'name', {
+              value: 'SuppressedError',
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            SuppressedError.prototype = Object.create(Error.prototype, {
+              constructor: {
+                value: SuppressedError,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              },
+              name: {
+                value: 'SuppressedError',
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              },
+            });
+            Object.defineProperty(globalThis, 'SuppressedError', {
+              value: SuppressedError,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+
+          const stateSlot = new WeakMap();
+          const stackSlot = new WeakMap();
+          const asyncStateSlot = new WeakMap();
+          const asyncStackSlot = new WeakMap();
+
+          function getIntrinsicDisposableStackPrototype(newTarget) {
+            if (newTarget === undefined || newTarget === DisposableStack) {
+              return DisposableStack.prototype;
+            }
+            const proto = newTarget.prototype;
+            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
+              return proto;
+            }
+            try {
+              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+              const otherDisposableStack = otherGlobal && otherGlobal.DisposableStack;
+              const otherProto = otherDisposableStack && otherDisposableStack.prototype;
+              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
+                return otherProto;
+              }
+            } catch {}
+            return DisposableStack.prototype;
+          }
+
+          function getIntrinsicAsyncDisposableStackPrototype(newTarget) {
+            if (newTarget === undefined || newTarget === AsyncDisposableStack) {
+              return AsyncDisposableStack.prototype;
+            }
+            const proto = newTarget.prototype;
+            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
+              return proto;
+            }
+            try {
+              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+              const otherAsyncDisposableStack = otherGlobal && otherGlobal.AsyncDisposableStack;
+              const otherProto = otherAsyncDisposableStack && otherAsyncDisposableStack.prototype;
+              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
+                return otherProto;
+              }
+            } catch {}
+            return AsyncDisposableStack.prototype;
+          }
+
+          function requireDisposableStack(value, name) {
+            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !stateSlot.has(value)) {
+              throw new TypeError(name + ' called on incompatible receiver');
+            }
+          }
+
+          function requireAsyncDisposableStack(value, name) {
+            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !asyncStateSlot.has(value)) {
+              throw new TypeError(name + ' called on incompatible receiver');
+            }
+          }
+
+          function ensurePending(stack, name) {
+            requireDisposableStack(stack, name);
+            if (stateSlot.get(stack) === 'disposed') {
+              throw new ReferenceError('DisposableStack is disposed');
+            }
+          }
+
+          function ensureAsyncPending(stack, name) {
+            requireAsyncDisposableStack(stack, name);
+            if (asyncStateSlot.get(stack) === 'disposed') {
+              throw new ReferenceError('AsyncDisposableStack is disposed');
+            }
+          }
+
+          function pushResource(stack, value, method) {
+            stackSlot.get(stack).push({ value, method });
+          }
+
+          function pushAsyncResource(stack, value, method, needsAwait) {
+            asyncStackSlot.get(stack).push({ value, method, needsAwait });
+          }
+
+          function pushAsyncPlaceholder(stack) {
+            asyncStackSlot.get(stack).push({ needsAwait: true });
+          }
+
+          function getAsyncDisposeMethod(value) {
+            let method = value[Symbol.asyncDispose];
+            if (method !== undefined) {
+              return { method, needsAwait: true };
+            }
+            method = value[Symbol.dispose];
+            if (method !== undefined) {
+              return { method, needsAwait: false };
+            }
+            return { method: undefined, needsAwait: true };
+          }
+
+          Object.defineProperty(globalThis, '__agentjsDisposeSyncUsing__', {
+            value: function(stack, hasBodyError, bodyError) {
+              try {
+                stack.dispose();
+              } catch (disposeError) {
+                if (hasBodyError) {
+                  throw new SuppressedError(disposeError, bodyError, undefined);
+                }
+                throw disposeError;
+              }
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(globalThis, '__agentjsDisposeAsyncUsing__', {
+            value: async function(stack, hasBodyError, bodyError) {
+              try {
+                await stack.disposeAsync();
+              } catch (disposeError) {
+                if (hasBodyError) {
+                  throw new SuppressedError(disposeError, bodyError, undefined);
+                }
+                throw disposeError;
+              }
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const __agentjsDisposeSyncUsing__ = globalThis.__agentjsDisposeSyncUsing__;
+          const __agentjsDisposeAsyncUsing__ = globalThis.__agentjsDisposeAsyncUsing__;
+
+          function DisposableStack() {
+            if (new.target === undefined) {
+              throw new TypeError('Constructor DisposableStack requires new');
+            }
+            const instance = this;
+            const proto = getIntrinsicDisposableStackPrototype(new.target);
+            if (Object.getPrototypeOf(instance) !== proto) {
+              Object.setPrototypeOf(instance, proto);
+            }
+            stateSlot.set(instance, 'pending');
+            stackSlot.set(instance, []);
+            return instance;
+          }
+
+          function AsyncDisposableStack() {
+            if (new.target === undefined) {
+              throw new TypeError('Constructor AsyncDisposableStack requires new');
+            }
+            const instance = this;
+            const proto = getIntrinsicAsyncDisposableStackPrototype(new.target);
+            if (Object.getPrototypeOf(instance) !== proto) {
+              Object.setPrototypeOf(instance, proto);
+            }
+            asyncStateSlot.set(instance, 'pending');
+            asyncStackSlot.set(instance, []);
+            return instance;
+          }
+
+          const asyncDisposableStackMethods = {
+            use(value) {
+              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.use');
+              if (value === null || value === undefined) {
+                pushAsyncPlaceholder(this);
+                return value;
+              }
+              if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+                throw new TypeError('AsyncDisposableStack.prototype.use requires an object value');
+              }
+              const record = getAsyncDisposeMethod(value);
+              const method = record.method;
+              if (method === undefined || method === null || typeof method !== 'function') {
+                throw new TypeError('Disposable value must have a callable Symbol.asyncDispose');
+              }
+              pushAsyncResource(this, value, method, record.needsAwait);
+              return value;
+            },
+            adopt(value, onDisposeAsync) {
+              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.adopt');
+              if (typeof onDisposeAsync !== 'function') {
+                throw new TypeError('onDisposeAsync must be callable');
+              }
+              pushAsyncResource(this, undefined, function() {
+                return onDisposeAsync(value);
+              }, true);
+              return value;
+            },
+            defer(onDisposeAsync) {
+              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.defer');
+              if (typeof onDisposeAsync !== 'function') {
+                throw new TypeError('onDisposeAsync must be callable');
+              }
+              pushAsyncResource(this, undefined, function() {
+                return onDisposeAsync();
+              }, true);
+              return undefined;
+            },
+            move() {
+              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.move');
+              const next = new AsyncDisposableStack();
+              asyncStackSlot.set(next, asyncStackSlot.get(this));
+              asyncStackSlot.set(this, []);
+              asyncStateSlot.set(this, 'disposed');
+              return next;
+            },
+            disposeAsync() {
+              try {
+                requireAsyncDisposableStack(this, 'AsyncDisposableStack.prototype.disposeAsync');
+              } catch (error) {
+                return Promise.reject(error);
+              }
+              if (asyncStateSlot.get(this) === 'disposed') {
+                return Promise.resolve(undefined);
+              }
+              asyncStateSlot.set(this, 'disposed');
+              const resources = asyncStackSlot.get(this);
+              if (resources.length === 0) {
+                return Promise.resolve(undefined);
+              }
+              return (async () => {
+                let hasCompletion = false;
+                let completion;
+                while (resources.length > 0) {
+                  const resource = resources.pop();
+                  try {
+                    if (resource.needsAwait === true) {
+                      if (resource.method !== undefined) {
+                        await resource.method.call(resource.value);
+                      } else {
+                        await undefined;
+                      }
+                    } else {
+                      resource.method.call(resource.value);
+                    }
+                  } catch (error) {
+                    if (!hasCompletion) {
+                      completion = error;
+                      hasCompletion = true;
+                    } else {
+                      completion = new SuppressedError(error, completion, undefined);
+                    }
+                  }
+                }
+                if (hasCompletion) {
+                  throw completion;
+                }
+                return undefined;
+              })();
+            },
+            get disposed() {
+              requireAsyncDisposableStack(this, 'get AsyncDisposableStack.prototype.disposed');
+              return asyncStateSlot.get(this) === 'disposed';
+            },
+          };
+          const asyncDisposedGetter = Object.getOwnPropertyDescriptor(asyncDisposableStackMethods, 'disposed').get;
+
+          Object.defineProperties(AsyncDisposableStack.prototype, {
+            constructor: {
+              value: AsyncDisposableStack,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            use: {
+              value: asyncDisposableStackMethods.use,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            adopt: {
+              value: asyncDisposableStackMethods.adopt,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            defer: {
+              value: asyncDisposableStackMethods.defer,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            move: {
+              value: asyncDisposableStackMethods.move,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            disposeAsync: {
+              value: asyncDisposableStackMethods.disposeAsync,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            disposed: {
+              get: asyncDisposedGetter,
+              enumerable: false,
+              configurable: true,
+            },
+          });
+          Object.defineProperty(AsyncDisposableStack.prototype, Symbol.asyncDispose, {
+            value: AsyncDisposableStack.prototype.disposeAsync,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(AsyncDisposableStack.prototype, Symbol.toStringTag, {
+            value: 'AsyncDisposableStack',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(AsyncDisposableStack, 'prototype', {
+            value: AsyncDisposableStack.prototype,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(globalThis, 'AsyncDisposableStack', {
+            value: AsyncDisposableStack,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          if (typeof globalThis.DisposableStack === 'function') {
+            return;
+          }
+
+          const disposableStackMethods = {
+            use(value) {
+              ensurePending(this, 'DisposableStack.prototype.use');
+              if (value === null || value === undefined) {
+                return value;
+              }
+              if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
+                throw new TypeError('DisposableStack.prototype.use requires an object value');
+              }
+              const method = value[Symbol.dispose];
+              if (method === undefined || method === null || typeof method !== 'function') {
+                throw new TypeError('Disposable value must have a callable Symbol.dispose');
+              }
+              pushResource(this, value, method);
+              return value;
+            },
+            adopt(value, onDispose) {
+              ensurePending(this, 'DisposableStack.prototype.adopt');
+              if (typeof onDispose !== 'function') {
+                throw new TypeError('onDispose must be callable');
+              }
+              pushResource(this, value, function() {
+                return onDispose(value);
+              });
+              return value;
+            },
+            defer(onDispose) {
+              ensurePending(this, 'DisposableStack.prototype.defer');
+              if (typeof onDispose !== 'function') {
+                throw new TypeError('onDispose must be callable');
+              }
+              pushResource(this, undefined, function() {
+                return onDispose();
+              });
+              return undefined;
+            },
+            move() {
+              ensurePending(this, 'DisposableStack.prototype.move');
+              const next = new DisposableStack();
+              stackSlot.set(next, stackSlot.get(this));
+              stackSlot.set(this, []);
+              stateSlot.set(this, 'disposed');
+              return next;
+            },
+            dispose() {
+              requireDisposableStack(this, 'DisposableStack.prototype.dispose');
+              if (stateSlot.get(this) === 'disposed') {
+                return undefined;
+              }
+              stateSlot.set(this, 'disposed');
+              const resources = stackSlot.get(this);
+              let hasCompletion = false;
+              let completion;
+              while (resources.length > 0) {
+                const resource = resources.pop();
+                try {
+                  resource.method.call(resource.value);
+                } catch (error) {
+                  if (!hasCompletion) {
+                    completion = error;
+                    hasCompletion = true;
+                  } else {
+                    completion = new SuppressedError(error, completion, undefined);
+                  }
+                }
+              }
+              if (hasCompletion) {
+                throw completion;
+              }
+              return undefined;
+            },
+            get disposed() {
+              requireDisposableStack(this, 'get DisposableStack.prototype.disposed');
+              return stateSlot.get(this) === 'disposed';
+            },
+          };
+          const disposedGetter = Object.getOwnPropertyDescriptor(disposableStackMethods, 'disposed').get;
+
+          Object.defineProperties(DisposableStack.prototype, {
+            constructor: {
+              value: DisposableStack,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            use: {
+              value: disposableStackMethods.use,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            adopt: {
+              value: disposableStackMethods.adopt,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            defer: {
+              value: disposableStackMethods.defer,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            move: {
+              value: disposableStackMethods.move,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            dispose: {
+              value: disposableStackMethods.dispose,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            disposed: {
+              get: disposedGetter,
+              enumerable: false,
+              configurable: true,
+            },
+          });
+
+          Object.defineProperty(DisposableStack.prototype, Symbol.dispose, {
+            value: DisposableStack.prototype.dispose,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(DisposableStack.prototype, Symbol.toStringTag, {
+            value: 'DisposableStack',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(DisposableStack, 'prototype', {
+            value: DisposableStack.prototype,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(globalThis, 'DisposableStack', {
+            value: DisposableStack,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_promise_then_hook(context: &mut Context) -> boa_engine::JsResult<()> {
+    let prototype = context.intrinsics().constructors().promise().prototype();
+    let original_symbol = promise_then_original_symbol(context)?;
+    if prototype.has_own_property(original_symbol.clone(), context)? {
+        return Ok(());
+    }
+
+    let original = prototype.get(js_string!("then"), context)?;
+    if original.as_callable().is_none() {
+        return Ok(());
+    }
+
+    prototype.define_property_or_throw(
+        original_symbol,
+        PropertyDescriptor::builder()
+            .value(original)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    Ok(())
+}
+
+fn install_string_replace_guard(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const proto = String.prototype;
+          const originalKey = "__agentjs_original_String_replace__";
+          if (Object.prototype.hasOwnProperty.call(proto, originalKey)) {
+            return;
+          }
+
+          const original = proto.replace;
+          if (typeof original !== 'function') {
+            return;
+          }
+
+          Object.defineProperty(proto, originalKey, {
+            value: original,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          Object.defineProperty(proto, 'replace', {
+            value: function replace(searchValue, replaceValue) {
+              const input = String(this);
+              if (
+                typeof replaceValue === 'string' &&
+                replaceValue.includes('$') &&
+                input.length > 0 &&
+                replaceValue.length > 0
+              ) {
+                const estimatedLength = BigInt(input.length) * BigInt(replaceValue.length);
+                if (estimatedLength > 1073741824n) {
+                  throw new ReferenceError('OOM Limit');
+                }
+              }
+              return original.call(this, searchValue, replaceValue);
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
     Ok(())
 }
 
@@ -1869,6 +3458,45 @@ fn install_reg_exp_legacy_accessors(context: &mut Context) -> JsResult<()> {
         )?;
     }
 
+    Ok(())
+}
+
+fn install_reg_exp_compile_guard(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const proto = RegExp.prototype;
+          const originalKey = "__agentjs_original_RegExp_compile__";
+          if (Object.prototype.hasOwnProperty.call(proto, originalKey)) {
+            return;
+          }
+
+          const original = proto.compile;
+          if (typeof original !== 'function') {
+            return;
+          }
+
+          Object.defineProperty(proto, originalKey, {
+            value: original,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          Object.defineProperty(proto, 'compile', {
+            value: function compile(pattern, flags) {
+              if (typeof this === 'object' && this !== null && Object.getPrototypeOf(this) !== proto) {
+                throw new TypeError('RegExp.prototype.compile called on incompatible receiver');
+              }
+              return original.call(this, pattern, flags);
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
     Ok(())
 }
 
@@ -2469,6 +4097,43 @@ fn immutable_marker_symbol(context: &Context) -> JsResult<JsSymbol> {
     Ok(host_hooks_context(context)?.immutable_marker.clone())
 }
 
+fn promise_then_original_symbol(context: &Context) -> JsResult<JsSymbol> {
+    Ok(host_hooks_context(context)?.promise_then_original.clone())
+}
+
+fn with_original_promise_then<T>(
+    context: &mut Context,
+    callback: impl FnOnce(&mut Context) -> JsResult<T>,
+) -> JsResult<T> {
+    let prototype = context.intrinsics().constructors().promise().prototype();
+    let original = prototype.get(promise_then_original_symbol(context)?, context)?;
+    let current = prototype.get(js_string!("then"), context)?;
+
+    prototype.define_property_or_throw(
+        js_string!("then"),
+        PropertyDescriptor::builder()
+            .value(original)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let result = callback(context);
+
+    prototype.define_property_or_throw(
+        js_string!("then"),
+        PropertyDescriptor::builder()
+            .value(current)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    result
+}
+
 fn mark_array_buffer_immutable(buffer: &JsObject, context: &mut Context) -> JsResult<()> {
     buffer.define_property_or_throw(
         immutable_marker_symbol(context)?,
@@ -2549,6 +4214,49 @@ fn has_hidden_array_buffer_method(
         .prototype();
     let symbol = array_buffer_original_symbol(context, method_name)?;
     prototype.has_own_property(symbol, context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrites_annex_b_html_open_and_close_comments() {
+        let source = "<!-- open\ncode();\n--> close\nnext();\n";
+        let (rewritten, changed) = rewrite_annex_b_html_comments(source);
+        assert!(changed);
+        assert!(rewritten.contains("// open"));
+        assert!(rewritten.contains("// close"));
+    }
+
+    #[test]
+    fn rewrites_annex_b_call_assignment_targets() {
+        let source = "f() = g();\n  for (f() in [1]) {}\nf()++;\nasync() = 1;\n";
+        let (rewritten, _) = rewrite_annex_b_call_assignment_targets(source);
+        assert!(rewritten.contains("throw new ReferenceError('Invalid left-hand side in assignment');"));
+        assert!(!rewritten.contains("async() = 1;"));
+    }
+
+    #[test]
+    fn rewrites_top_level_await_using_after_frontmatter_comment() {
+        let source = r#"/*---
+flags: [module]
+---*/
+
+await using x = {
+  [Symbol.asyncDispose]() {}
+};
+"#;
+
+        let rewritten = preprocess_compat_source(source, None, true).unwrap();
+        assert!(rewritten.contains("/*---\nflags: [module]\n---*/"));
+        assert!(rewritten.contains("const __agentjs_using_stack__ = new AsyncDisposableStack();"));
+        assert!(rewritten.contains("const x = {\n  [Symbol.asyncDispose]() {}\n};"));
+        assert!(rewritten.contains(
+            "await __agentjsDisposeAsyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
+        ));
+        assert!(!rewritten.contains("await using x ="));
+    }
 }
 
 fn call_hidden_data_view_method(
@@ -3142,28 +4850,51 @@ fn host_dynamic_import_defer(
         context,
     )?;
 
-    if let Some(module) = loader.get(&path, ModuleResourceKind::Deferred) {
-        let namespace = module
+    with_original_promise_then(context, |context| {
+        let deferred_module = if let Some(module) = loader.get(&path, ModuleResourceKind::Deferred)
+        {
+            module
+        } else {
+            let deferred_module = load_deferred_namespace_module(&path, context)?;
+            loader.insert(
+                path.clone(),
+                ModuleResourceKind::Deferred,
+                deferred_module.clone(),
+            );
+            deferred_module
+        };
+
+        let deferred_namespace_promise = deferred_module.load_link_evaluate(context);
+        context.run_jobs()?;
+        match deferred_namespace_promise.state() {
+            PromiseState::Fulfilled(_) => {}
+            PromiseState::Rejected(reason) => {
+                return Ok(JsPromise::reject(JsError::from_opaque(reason.clone()), context).into());
+            }
+            PromiseState::Pending => {
+                return Ok(JsPromise::reject(
+                    JsNativeError::typ().with_message(
+                        "deferred namespace promise remained pending during initialization",
+                    ),
+                    context,
+                )
+                .into());
+            }
+        }
+
+        let namespace = deferred_module
             .namespace(context)
             .get(js_string!("default"), context)?;
-        return Ok(JsPromise::resolve(namespace, context).into());
-    }
 
-    let deferred_module = load_deferred_namespace_module(&path, context)?;
-    loader.insert(
-        path.clone(),
-        ModuleResourceKind::Deferred,
-        deferred_module.clone(),
-    );
-    let namespace = deferred_module
-        .namespace(context)
-        .get(js_string!("default"), context)?;
+        if let Err(error) = ensure_deferred_module_loaded_and_linked(&path, context) {
+            return Ok(JsPromise::reject(error, context).into());
+        }
+        if let Err(error) = preevaluate_async_deferred_dependencies(&path, context) {
+            return Ok(JsPromise::reject(error, context).into());
+        }
 
-    if let Err(error) = ensure_deferred_module_loaded_and_linked(&path, context) {
-        return Ok(JsPromise::reject(error, context).into());
-    }
-
-    Ok(JsPromise::resolve(namespace, context).into())
+        Ok(JsPromise::resolve(namespace, context).into())
+    })
 }
 
 fn host_deferred_namespace_get(
@@ -3773,8 +5504,31 @@ fn convert_error(error: JsError, context: &mut Context) -> EngineError {
                 .map(|native| native.kind.to_string())
         });
 
+    let opaque = error.to_opaque(context);
+    let thrown_name = opaque.as_object().and_then(|object| {
+        object
+            .get(js_string!("name"), context)
+            .ok()
+            .filter(|value| !value.is_undefined() && !value.is_null())
+            .and_then(|value| value.to_string(context).ok())
+            .map(|text| text.to_std_string_escaped())
+            .filter(|text| !text.is_empty())
+            .or_else(|| {
+                object
+                    .get(js_string!("constructor"), context)
+                    .ok()
+                    .and_then(|value| value.as_object())
+                    .and_then(|constructor| constructor.get(js_string!("name"), context).ok())
+                    .filter(|value| !value.is_undefined() && !value.is_null())
+                    .and_then(|value| value.to_string(context).ok())
+                    .map(|text| text.to_std_string_escaped())
+                    .filter(|text| !text.is_empty())
+            })
+    });
+
     let name = native_name
         .clone()
+        .or(thrown_name)
         .unwrap_or_else(|| "ThrownValue".to_string());
 
     let message = if matches!(
@@ -3783,8 +5537,7 @@ fn convert_error(error: JsError, context: &mut Context) -> EngineError {
     ) {
         format!("{error}")
     } else {
-        error
-            .to_opaque(context)
+        opaque
             .to_string(context)
             .ok()
             .map(|text| text.to_std_string_escaped())

@@ -6,7 +6,7 @@ default-run = "ai-agent"
 
 [dependencies]
 boa_ast = "0.21.0"
-boa_engine = { version = "0.21.0", features = ["temporal", "intl_bundled"] }
+boa_engine = { version = "0.21.0", features = ["temporal", "intl_bundled", "annex-b"] }
 boa_interner = "0.21.0"
 boa_parser = "0.21.0"
 regex = "1.12.2"
@@ -14,6 +14,9 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
 walkdir = "2.5.0"
+
+[patch.crates-io]
+regress = { path = "vendor/regress" }
 [[bin]]
 name = "parse_error_stats"
 path = "parse_error_stats.rs"
