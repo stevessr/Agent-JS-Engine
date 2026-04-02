@@ -2595,7 +2595,7 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
             if (descriptor && descriptor.writable === false && descriptor.value !== length) {
               throw new TypeError('Cannot set length on Array.fromAsync result');
             }
-            if (!Reflect.set(target, 'length', length, true)) {
+            if (!Reflect.set(target, 'length', length, target)) {
               throw new TypeError('Cannot set length on Array.fromAsync result');
             }
           }
@@ -2703,7 +2703,7 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
               }
               defineArrayFromAsyncValue(result, index, nextValue);
             }
-            if (!Reflect.set(result, 'length', length, true)) {
+            if (!Reflect.set(result, 'length', length, result)) {
               throw new TypeError('Cannot set length on Array.fromAsync result');
             }
             return result;
