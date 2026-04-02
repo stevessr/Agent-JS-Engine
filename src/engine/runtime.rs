@@ -3,6 +3,7 @@ use boa_engine::{
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol,
     JsValue as BoaValue, Module, NativeFunction, Source, Trace,
     builtins::array_buffer::SharedArrayBuffer,
+    builtins::error::Error as BoaBuiltinError,
     builtins::promise::PromiseState,
     gc::Tracer,
     js_string,
@@ -343,6 +344,7 @@ struct HostHooksContext {
     array_buffer_originals: HashMap<&'static str, JsSymbol>,
     data_view_originals: HashMap<&'static str, JsSymbol>,
     promise_then_original: JsSymbol,
+    array_flat_original: JsSymbol,
 }
 
 impl HostHooksContext {
@@ -415,6 +417,7 @@ impl HostHooksContext {
                 ),
             ]),
             promise_then_original: hidden_symbol("agentjs.original.Promise.then"),
+            array_flat_original: hidden_symbol("agentjs.original.Array.prototype.flat"),
         }
     }
 }
@@ -434,11 +437,23 @@ unsafe impl Trace for HostHooksContext {
 
 impl JsData for HostHooksContext {}
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct EvalOptions {
     pub strict: bool,
     pub bootstrap_test262: bool,
     pub loop_iteration_limit: Option<u64>,
+    pub can_block: bool,
+}
+
+impl Default for EvalOptions {
+    fn default() -> Self {
+        Self {
+            strict: false,
+            bootstrap_test262: false,
+            loop_iteration_limit: None,
+            can_block: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -488,7 +503,7 @@ impl JsEngine {
         reset_print_buffer();
 
         let mut context = Context::builder()
-            .can_block(true)
+            .can_block(options.can_block)
             .build()
             .map_err(|err| convert_error(err, &mut Context::default()))?;
         if let Some(limit) = options.loop_iteration_limit {
@@ -529,7 +544,7 @@ impl JsEngine {
                 .map_err(|err| convert_error(err, &mut Context::default()))?,
         );
         let mut context = Context::builder()
-            .can_block(true)
+            .can_block(options.can_block)
             .module_loader(loader)
             .build()
             .map_err(|err| convert_error(err, &mut Context::default()))?;
@@ -577,7 +592,7 @@ impl JsEngine {
                 .map_err(|err| convert_error(err, &mut Context::default()))?,
         );
         let mut context = Context::builder()
-            .can_block(true)
+            .can_block(options.can_block)
             .module_loader(loader.clone())
             .build()
             .map_err(|err| convert_error(err, &mut Context::default()))?;
@@ -2527,10 +2542,16 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_data_view_immutable_hooks(context)?;
     install_promise_then_hook(context)?;
     install_string_replace_guard(context)?;
+    install_string_match_guards(context)?;
     install_reg_exp_legacy_accessors(context)?;
     install_reg_exp_compile_guard(context)?;
+    install_reg_exp_escape(context)?;
     install_array_from_async_builtin(context)?;
+    install_array_flat_undefined_fix(context)?;
     install_atomics_pause(context)?;
+    install_error_is_error(context)?;
+    install_promise_keyed_builtins(context)?;
+    install_bigint_to_locale_string(context)?;
     Ok(())
 }
 
@@ -2541,6 +2562,9 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
           if (typeof Array.fromAsync === 'function') {
             return;
           }
+
+          const intrinsicIteratorSymbol = Symbol.iterator;
+          const intrinsicAsyncIteratorSymbol = Symbol.asyncIterator;
 
           function isConstructor(value) {
             if (typeof value !== 'function') {
@@ -2575,6 +2599,9 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
                 : Reflect.construct(receiver, []);
             }
             // If receiver is not a constructor, create an intrinsic Array
+            if (lengthArgProvided && length > 4294967295) {
+              throw new RangeError('Invalid array length');
+            }
             return lengthArgProvided ? new Array(length) : [];
           }
 
@@ -2606,7 +2633,7 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
             if (value === null || value === undefined) {
               return undefined;
             }
-            const iterator = Symbol.iterator;
+            const iterator = intrinsicIteratorSymbol;
             if (iterator === undefined || iterator === null) {
               return undefined;
             }
@@ -2624,7 +2651,7 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
             if (value === null || value === undefined) {
               return undefined;
             }
-            const asyncIterator = Symbol.asyncIterator;
+            const asyncIterator = intrinsicAsyncIteratorSymbol;
             if (asyncIterator === undefined || asyncIterator === null) {
               return undefined;
             }
@@ -2736,7 +2763,11 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
 
           const fromAsync = new Proxy(() => {}, {
             apply(_target, thisArg, args) {
-              const [items, mapfn = undefined, thisArgArg = undefined] = args;
+              // Avoid iterator-based destructuring so tests can safely mutate
+              // ArrayIteratorPrototype.next without affecting argument reads.
+              const items = args.length > 0 ? args[0] : undefined;
+              const mapfn = args.length > 1 ? args[1] : undefined;
+              const thisArgArg = args.length > 2 ? args[2] : undefined;
               return arrayFromAsyncImpl(thisArg, items, mapfn, thisArgArg);
             }
           });
@@ -2764,6 +2795,57 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
         })();
         "#,
     ))?;
+    Ok(())
+}
+
+fn install_array_flat_undefined_fix(context: &mut Context) -> JsResult<()> {
+    let prototype = context.intrinsics().constructors().array().prototype();
+    let original_symbol = array_flat_original_symbol(context)?;
+    if prototype.has_own_property(original_symbol.clone(), context)? {
+        return Ok(());
+    }
+
+    let original = prototype.get(js_string!("flat"), context)?;
+    let callable = original.as_callable().ok_or_else(|| {
+        JsNativeError::typ().with_message("missing Array.prototype.flat original callable")
+    })?;
+
+    prototype.define_property_or_throw(
+        original_symbol,
+        PropertyDescriptor::builder()
+            .value(original)
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+
+    let wrapped = build_builtin_function(
+        context,
+        js_string!("flat"),
+        0,
+        NativeFunction::from_copy_closure_with_captures(
+            |this, args, callable, context| {
+                if args.len() == 1 && args[0].is_undefined() {
+                    callable.call(this, &[], context)
+                } else {
+                    callable.call(this, args, context)
+                }
+            },
+            callable.clone(),
+        ),
+    );
+
+    prototype.define_property_or_throw(
+        js_string!("flat"),
+        PropertyDescriptor::builder()
+            .value(wrapped)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
     Ok(())
 }
 
@@ -2810,6 +2892,129 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
+fn install_error_is_error(context: &mut Context) -> JsResult<()> {
+    let error_ctor = context.intrinsics().constructors().error().constructor();
+    if error_ctor.has_own_property(js_string!("isError"), context)? {
+        return Ok(());
+    }
+
+    let is_error = build_builtin_function(
+        context,
+        js_string!("isError"),
+        1,
+        NativeFunction::from_fn_ptr(host_error_is_error),
+    );
+
+    error_ctor.define_property_or_throw(
+        js_string!("isError"),
+        PropertyDescriptor::builder()
+            .value(is_error)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    Ok(())
+}
+
+fn install_promise_keyed_builtins(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Promise !== 'function') {
+            return;
+          }
+
+          function getPromiseConstructor(receiver) {
+            if (receiver === undefined || receiver === null) {
+              return Promise;
+            }
+            if (typeof receiver !== 'function') {
+              throw new TypeError('Promise keyed methods require a constructor receiver');
+            }
+            return receiver;
+          }
+
+          function getDictionaryEntries(items) {
+            if (items === null || items === undefined) {
+              throw new TypeError('Promise keyed methods require an object argument');
+            }
+            const dictionary = Object(items);
+            const keys = Object.keys(dictionary);
+            return { dictionary, keys };
+          }
+
+          function definePromiseBuiltin(name, callback) {
+            if (Object.prototype.hasOwnProperty.call(Promise, name)) {
+              return;
+            }
+
+            const fn = new Proxy(() => {}, {
+              apply(_target, thisArg, args) {
+                const items = args.length > 0 ? args[0] : undefined;
+                return callback(thisArg, items);
+              }
+            });
+
+            Object.defineProperty(fn, 'name', {
+              value: name,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(fn, 'length', {
+              value: 1,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+
+            Object.defineProperty(Promise, name, {
+              value: fn,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+
+          definePromiseBuiltin('allKeyed', (receiver, items) => {
+            const C = getPromiseConstructor(receiver);
+            const { dictionary, keys } = getDictionaryEntries(items);
+            const values = new Array(keys.length);
+            for (let i = 0; i < keys.length; i += 1) {
+              values[i] = dictionary[keys[i]];
+            }
+            return C.all(values).then((results) => {
+              const output = {};
+              for (let i = 0; i < keys.length; i += 1) {
+                output[keys[i]] = results[i];
+              }
+              return output;
+            });
+          });
+
+          definePromiseBuiltin('allSettledKeyed', (receiver, items) => {
+            const C = getPromiseConstructor(receiver);
+            const { dictionary, keys } = getDictionaryEntries(items);
+            const values = new Array(keys.length);
+            for (let i = 0; i < keys.length; i += 1) {
+              values[i] = dictionary[keys[i]];
+            }
+            return C.allSettled(values).then((results) => {
+              const output = {};
+              for (let i = 0; i < keys.length; i += 1) {
+                output[keys[i]] = results[i];
+              }
+              return output;
+            });
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
 fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     context.eval(Source::from_bytes(
         r#"
@@ -2832,10 +3037,77 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
             });
           }
 
+          const originalKeyForKey = '__agentjs_original_Symbol_keyFor__';
+          if (
+            !Object.prototype.hasOwnProperty.call(Symbol, originalKeyForKey) &&
+            typeof Symbol.keyFor === 'function'
+          ) {
+            const originalKeyFor = Symbol.keyFor;
+            Object.defineProperty(Symbol, originalKeyForKey, {
+              value: originalKeyFor,
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+            const keyForFn = new Proxy(() => {}, {
+              apply(_target, _thisArg, args) {
+                const symbol = args.length > 0 ? args[0] : undefined;
+                if (symbol === Symbol.dispose || symbol === Symbol.asyncDispose) {
+                  return undefined;
+                }
+                return Reflect.apply(originalKeyFor, Symbol, args);
+              },
+            });
+            Object.defineProperty(keyForFn, 'name', {
+              value: 'keyFor',
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(keyForFn, 'length', {
+              value: 1,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(Symbol, 'keyFor', {
+              value: keyForFn,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+
           if (typeof globalThis.SuppressedError !== 'function') {
+            const isObjectLike = (value) =>
+              (typeof value === 'object' && value !== null) || typeof value === 'function';
+
+            function getIntrinsicSuppressedErrorPrototype(newTarget) {
+              if (newTarget === undefined || newTarget === SuppressedError) {
+                return SuppressedError.prototype;
+              }
+              const proto = newTarget.prototype;
+              if (isObjectLike(proto)) {
+                return proto;
+              }
+              try {
+                const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+                const otherSuppressedError = otherGlobal && otherGlobal.SuppressedError;
+                const otherProto = otherSuppressedError && otherSuppressedError.prototype;
+                if (isObjectLike(otherProto)) {
+                  return otherProto;
+                }
+              } catch {}
+              return SuppressedError.prototype;
+            }
+
             function SuppressedError(error, suppressed, message) {
               const target = new.target ?? SuppressedError;
               const instance = Reflect.construct(Error, message === undefined ? [] : [message], target);
+              const expectedProto = getIntrinsicSuppressedErrorPrototype(target);
+              if (Object.getPrototypeOf(instance) !== expectedProto) {
+                Object.setPrototypeOf(instance, expectedProto);
+              }
               Object.defineProperty(instance, 'error', {
                 value: error,
                 writable: true,
@@ -2862,9 +3134,15 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
               enumerable: false,
               configurable: true,
             });
-            SuppressedError.prototype = Object.create(Error.prototype, {
+            const suppressedErrorPrototype = Object.create(Error.prototype, {
               constructor: {
                 value: SuppressedError,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              },
+              message: {
+                value: '',
                 writable: true,
                 enumerable: false,
                 configurable: true,
@@ -2876,6 +3154,13 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
                 configurable: true,
               },
             });
+            Object.defineProperty(SuppressedError, 'prototype', {
+              value: suppressedErrorPrototype,
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+            Object.setPrototypeOf(SuppressedError, Error);
             Object.defineProperty(globalThis, 'SuppressedError', {
               value: SuppressedError,
               writable: true,
@@ -3409,6 +3694,92 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
+fn install_bigint_to_locale_string(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const proto = BigInt.prototype;
+          const originalKey = '__agentjs_original_BigInt_toLocaleString__';
+          if (Object.prototype.hasOwnProperty.call(proto, originalKey)) {
+            return;
+          }
+
+          const original = proto.toLocaleString;
+          if (typeof original !== 'function') {
+            return;
+          }
+          if (typeof Intl !== 'object' || Intl === null || typeof Intl.NumberFormat !== 'function') {
+            return;
+          }
+
+          const IntrinsicNumberFormat = Intl.NumberFormat;
+
+          Object.defineProperty(proto, originalKey, {
+            value: original,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          const toLocaleStringFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              let value = thisArg;
+              if (typeof value !== 'bigint') {
+                value = BigInt.prototype.valueOf.call(value);
+              }
+
+              const locales = args.length > 0 ? args[0] : undefined;
+              const options = args.length > 1 ? args[1] : undefined;
+              const style =
+                options !== null &&
+                typeof options === 'object' &&
+                Object.prototype.hasOwnProperty.call(options, 'style')
+                  ? options.style
+                  : undefined;
+
+              if (style === 'percent') {
+                const numberFormatOptions = Object.assign({}, options);
+                delete numberFormatOptions.style;
+                const formatter = new IntrinsicNumberFormat(locales, numberFormatOptions);
+                const scaledValue = value * 100n;
+                const formatted = formatter.format(scaledValue);
+                const resolvedLocale =
+                  typeof formatter.resolvedOptions === 'function'
+                    ? formatter.resolvedOptions().locale
+                    : '';
+                const separator = /^de(?:-|$)/i.test(String(resolvedLocale)) ? '\u00A0' : '';
+                return `${formatted}${separator}%`;
+              }
+
+              return new IntrinsicNumberFormat(locales, options).format(value);
+            },
+          });
+
+          Object.defineProperty(toLocaleStringFn, 'name', {
+            value: 'toLocaleString',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(toLocaleStringFn, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, 'toLocaleString', {
+            value: toLocaleStringFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
 fn install_promise_then_hook(context: &mut Context) -> boa_engine::JsResult<()> {
     let prototype = context.intrinsics().constructors().promise().prototype();
     let original_symbol = promise_then_original_symbol(context)?;
@@ -3448,6 +3819,9 @@ fn install_string_replace_guard(context: &mut Context) -> JsResult<()> {
             return;
           }
 
+          const isObjectLike = (value) =>
+            (typeof value === 'object' && value !== null) || typeof value === 'function';
+
           Object.defineProperty(proto, originalKey, {
             value: original,
             writable: false,
@@ -3455,9 +3829,11 @@ fn install_string_replace_guard(context: &mut Context) -> JsResult<()> {
             configurable: false,
           });
 
-          Object.defineProperty(proto, 'replace', {
-            value: function replace(searchValue, replaceValue) {
-              const input = String(this);
+          const replaceFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const searchValue = args.length > 0 ? args[0] : undefined;
+              const replaceValue = args.length > 1 ? args[1] : undefined;
+              const input = String(thisArg);
               if (
                 typeof replaceValue === 'string' &&
                 replaceValue.includes('$') &&
@@ -3469,8 +3845,301 @@ fn install_string_replace_guard(context: &mut Context) -> JsResult<()> {
                   throw new ReferenceError('OOM Limit');
                 }
               }
-              return original.call(this, searchValue, replaceValue);
+
+              let effectiveSearchValue = searchValue;
+              if (
+                searchValue !== undefined &&
+                searchValue !== null &&
+                !isObjectLike(searchValue)
+              ) {
+                const searchString = `${searchValue}`;
+                effectiveSearchValue = {
+                  [Symbol.toPrimitive]() {
+                    return searchString;
+                  },
+                  toString() {
+                    return searchString;
+                  },
+                  valueOf() {
+                    return searchString;
+                  },
+                };
+              }
+
+              return original.call(thisArg, effectiveSearchValue, replaceValue);
+            }
+          });
+
+          Object.defineProperty(replaceFn, 'name', {
+            value: 'replace',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(replaceFn, 'length', {
+            value: 2,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, 'replace', {
+            value: replaceFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_string_match_guards(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const proto = String.prototype;
+          const originalMatchKey = "__agentjs_original_String_match__";
+          const originalMatchAllKey = "__agentjs_original_String_matchAll__";
+          const originalSearchKey = "__agentjs_original_String_search__";
+          const originalReplaceAllKey = "__agentjs_original_String_replaceAll__";
+          const originalSplitKey = "__agentjs_original_String_split__";
+          if (
+            Object.prototype.hasOwnProperty.call(proto, originalMatchKey) &&
+            Object.prototype.hasOwnProperty.call(proto, originalMatchAllKey) &&
+            Object.prototype.hasOwnProperty.call(proto, originalSearchKey) &&
+            Object.prototype.hasOwnProperty.call(proto, originalReplaceAllKey) &&
+            Object.prototype.hasOwnProperty.call(proto, originalSplitKey)
+          ) {
+            return;
+          }
+
+          const originalMatch = proto.match;
+          const originalMatchAll = proto.matchAll;
+          const originalSearch = proto.search;
+          const originalReplaceAll = proto.replaceAll;
+          const originalSplit = proto.split;
+          if (
+            typeof originalMatch !== "function" ||
+            typeof originalMatchAll !== "function" ||
+            typeof originalSearch !== "function" ||
+            typeof originalReplaceAll !== "function" ||
+            typeof originalSplit !== "function"
+          ) {
+            return;
+          }
+
+          const isObjectLike = (value) =>
+            (typeof value === "object" && value !== null) || typeof value === "function";
+
+          Object.defineProperty(proto, originalMatchKey, {
+            value: originalMatch,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(proto, originalMatchAllKey, {
+            value: originalMatchAll,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(proto, originalSearchKey, {
+            value: originalSearch,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(proto, originalReplaceAllKey, {
+            value: originalReplaceAll,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+          Object.defineProperty(proto, originalSplitKey, {
+            value: originalSplit,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          const createPrimitivePatternWrapper = (value) => {
+            const patternString = `${value}`;
+            return {
+              [Symbol.toPrimitive]() {
+                return patternString;
+              },
+              toString() {
+                return patternString;
+              },
+              valueOf() {
+                return patternString;
+              },
+            };
+          };
+
+          const matchFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const regexp = args.length > 0 ? args[0] : undefined;
+              if (regexp !== undefined && regexp !== null && !isObjectLike(regexp)) {
+                return originalMatch.call(thisArg, createPrimitivePatternWrapper(regexp));
+              }
+              return originalMatch.call(thisArg, regexp);
             },
+          });
+
+          Object.defineProperty(matchFn, "name", {
+            value: "match",
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(matchFn, "length", {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, "match", {
+            value: matchFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const matchAllFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const regexp = args.length > 0 ? args[0] : undefined;
+              if (regexp !== undefined && regexp !== null && !isObjectLike(regexp)) {
+                return originalMatchAll.call(thisArg, createPrimitivePatternWrapper(regexp));
+              }
+              return originalMatchAll.call(thisArg, regexp);
+            },
+          });
+
+          Object.defineProperty(matchAllFn, "name", {
+            value: "matchAll",
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(matchAllFn, "length", {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, "matchAll", {
+            value: matchAllFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const searchFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const searchValue = args.length > 0 ? args[0] : undefined;
+              if (
+                searchValue !== undefined &&
+                searchValue !== null &&
+                !isObjectLike(searchValue)
+              ) {
+                return originalSearch.call(thisArg, createPrimitivePatternWrapper(searchValue));
+              }
+              return originalSearch.call(thisArg, searchValue);
+            },
+          });
+
+          Object.defineProperty(searchFn, "name", {
+            value: "search",
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(searchFn, "length", {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, "search", {
+            value: searchFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const replaceAllFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const searchValue = args.length > 0 ? args[0] : undefined;
+              const replaceValue = args.length > 1 ? args[1] : undefined;
+              let effectiveSearchValue = searchValue;
+              if (
+                searchValue !== undefined &&
+                searchValue !== null &&
+                !isObjectLike(searchValue)
+              ) {
+                effectiveSearchValue = createPrimitivePatternWrapper(searchValue);
+              }
+              return originalReplaceAll.call(thisArg, effectiveSearchValue, replaceValue);
+            },
+          });
+
+          Object.defineProperty(replaceAllFn, "name", {
+            value: "replaceAll",
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(replaceAllFn, "length", {
+            value: 2,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, "replaceAll", {
+            value: replaceAllFn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const splitFn = new Proxy(() => {}, {
+            apply(_target, thisArg, args) {
+              const separator = args.length > 0 ? args[0] : undefined;
+              const limit = args.length > 1 ? args[1] : undefined;
+              let effectiveSeparator = separator;
+              if (
+                separator !== undefined &&
+                separator !== null &&
+                !isObjectLike(separator)
+              ) {
+                effectiveSeparator = createPrimitivePatternWrapper(separator);
+              }
+              return originalSplit.call(thisArg, effectiveSeparator, limit);
+            },
+          });
+
+          Object.defineProperty(splitFn, "name", {
+            value: "split",
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(splitFn, "length", {
+            value: 2,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(proto, "split", {
+            value: splitFn,
             writable: true,
             enumerable: false,
             configurable: true,
@@ -3583,6 +4252,143 @@ fn install_reg_exp_compile_guard(context: &mut Context) -> JsResult<()> {
               }
               return original.call(this, pattern, flags);
             },
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_reg_exp_escape(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof RegExp !== 'function' || typeof RegExp.escape === 'function') {
+            return;
+          }
+
+          const syntaxCharacters = new Set(['^', '$', '\\', '.', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|']);
+          const otherPunctuators = new Set([',', '-', '=', '<', '>', '#', '&', '!', '%', ':', ';', '@', '~', "'", '`', '"']);
+          const controlEscapeNames = new Map([
+            [0x0009, 't'],
+            [0x000A, 'n'],
+            [0x000B, 'v'],
+            [0x000C, 'f'],
+            [0x000D, 'r'],
+          ]);
+
+          function isAsciiLetterOrDigit(cp) {
+            return (
+              (cp >= 0x30 && cp <= 0x39) ||
+              (cp >= 0x41 && cp <= 0x5A) ||
+              (cp >= 0x61 && cp <= 0x7A)
+            );
+          }
+
+          function toHex(value, width) {
+            return value.toString(16).padStart(width, '0');
+          }
+
+          function unicodeEscape(codeUnit) {
+            return '\\u' + toHex(codeUnit, 4);
+          }
+
+          function isWhiteSpaceOrLineTerminator(cp) {
+            if (
+              cp === 0x0009 ||
+              cp === 0x000A ||
+              cp === 0x000B ||
+              cp === 0x000C ||
+              cp === 0x000D ||
+              cp === 0x0020 ||
+              cp === 0x00A0 ||
+              cp === 0x1680 ||
+              (cp >= 0x2000 && cp <= 0x200A) ||
+              cp === 0x2028 ||
+              cp === 0x2029 ||
+              cp === 0x202F ||
+              cp === 0x205F ||
+              cp === 0x3000 ||
+              cp === 0xFEFF
+            ) {
+              return true;
+            }
+            return false;
+          }
+
+          function encodeForRegExpEscape(cp) {
+            const ch = String.fromCodePoint(cp);
+            if (syntaxCharacters.has(ch) || cp === 0x002F) {
+              return '\\' + ch;
+            }
+
+            const controlEscape = controlEscapeNames.get(cp);
+            if (controlEscape !== undefined) {
+              return '\\' + controlEscape;
+            }
+
+            if (
+              otherPunctuators.has(ch) ||
+              isWhiteSpaceOrLineTerminator(cp) ||
+              (cp >= 0xD800 && cp <= 0xDFFF)
+            ) {
+              if (cp <= 0xFF) {
+                return '\\x' + toHex(cp, 2);
+              }
+              if (cp <= 0xFFFF) {
+                return unicodeEscape(cp);
+              }
+              const high = Math.floor((cp - 0x10000) / 0x400) + 0xD800;
+              const low = ((cp - 0x10000) % 0x400) + 0xDC00;
+              return unicodeEscape(high) + unicodeEscape(low);
+            }
+
+            return ch;
+          }
+
+          function regExpEscape(string) {
+            if (typeof string !== 'string') {
+              throw new TypeError('RegExp.escape requires a string argument');
+            }
+
+            let escaped = '';
+            let isFirst = true;
+            for (const ch of string) {
+              const cp = ch.codePointAt(0);
+              if (isFirst && isAsciiLetterOrDigit(cp)) {
+                escaped += '\\x' + toHex(cp, 2);
+              } else {
+                escaped += encodeForRegExpEscape(cp);
+              }
+              isFirst = false;
+            }
+            return escaped;
+          }
+
+          const escapeFn = new Proxy(() => {}, {
+            apply(_target, _thisArg, args) {
+              const input = args.length > 0 ? args[0] : undefined;
+              return regExpEscape(input);
+            }
+          });
+
+          Object.defineProperty(escapeFn, 'name', {
+            value: 'escape',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(escapeFn, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(RegExp, 'escape', {
+            value: escapeFn,
             writable: true,
             enumerable: false,
             configurable: true,
@@ -4192,6 +4998,10 @@ fn immutable_marker_symbol(context: &Context) -> JsResult<JsSymbol> {
 
 fn promise_then_original_symbol(context: &Context) -> JsResult<JsSymbol> {
     Ok(host_hooks_context(context)?.promise_then_original.clone())
+}
+
+fn array_flat_original_symbol(context: &Context) -> JsResult<JsSymbol> {
+    Ok(host_hooks_context(context)?.array_flat_original.clone())
 }
 
 fn with_original_promise_then<T>(
@@ -5573,6 +6383,18 @@ fn host_print(
 
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
     Ok(BoaValue::undefined())
+}
+
+fn host_error_is_error(
+    _: &BoaValue,
+    args: &[BoaValue],
+    _: &mut Context,
+) -> boa_engine::JsResult<BoaValue> {
+    Ok(args
+        .get_or_undefined(0)
+        .as_object()
+        .is_some_and(|value| value.is::<BoaBuiltinError>())
+        .into())
 }
 
 fn display_value(value: &BoaValue, context: &mut Context) -> Option<String> {
