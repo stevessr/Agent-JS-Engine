@@ -2530,6 +2530,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_reg_exp_legacy_accessors(context)?;
     install_reg_exp_compile_guard(context)?;
     install_array_from_async_builtin(context)?;
+    install_atomics_pause(context)?;
     Ok(())
 }
 
@@ -2697,7 +2698,7 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
             const length = toLength(arrayLike.length);
             const result = createArrayFromAsyncResult(receiver, true, length);
             for (let index = 0; index < length; index += 1) {
-              let nextValue = arrayLike[index];
+              let nextValue = await arrayLike[index];
               if (mapping) {
                 nextValue = await mapfn.call(thisArg, nextValue, index);
               }
@@ -2759,6 +2760,33 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
             configurable: true,
           });
 
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Atomics === 'object' && typeof Atomics.pause !== 'function') {
+            Object.defineProperty(Atomics, 'pause', {
+              value: function pause(iterationNumber) {
+                // This is a hint to the CPU that the thread is in a spin-wait loop.
+                // In JavaScript, we can't actually hint the CPU, so this is a no-op.
+                if (iterationNumber !== undefined) {
+                  const n = Number(iterationNumber);
+                  if (!Number.isFinite(n) || n < 0) {
+                    return;
+                  }
+                }
+              },
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
         })();
         "#,
     ))?;
@@ -3310,6 +3338,54 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
             enumerable: false,
             configurable: true,
           });
+
+          // Add Symbol.asyncDispose to AsyncIteratorPrototype
+          (function() {
+            async function* asyncGen() {}
+            const asyncGenProto = Object.getPrototypeOf(asyncGen.prototype);
+            const AsyncIteratorPrototype = Object.getPrototypeOf(asyncGenProto);
+            if (AsyncIteratorPrototype && !AsyncIteratorPrototype[Symbol.asyncDispose]) {
+              const asyncDisposeFn = async function() {
+                return this.return?.();
+              };
+              Object.defineProperty(asyncDisposeFn, 'name', {
+                value: '[Symbol.asyncDispose]',
+                writable: false,
+                enumerable: false,
+                configurable: true,
+              });
+              Object.defineProperty(AsyncIteratorPrototype, Symbol.asyncDispose, {
+                value: asyncDisposeFn,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              });
+            }
+          })();
+
+          // Add Symbol.dispose to IteratorPrototype
+          (function() {
+            function* gen() {}
+            const genProto = Object.getPrototypeOf(gen.prototype);
+            const IteratorPrototype = Object.getPrototypeOf(genProto);
+            if (IteratorPrototype && !IteratorPrototype[Symbol.dispose]) {
+              const disposeFn = function() {
+                this.return?.();
+              };
+              Object.defineProperty(disposeFn, 'name', {
+                value: '[Symbol.dispose]',
+                writable: false,
+                enumerable: false,
+                configurable: true,
+              });
+              Object.defineProperty(IteratorPrototype, Symbol.dispose, {
+                value: disposeFn,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              });
+            }
+          })();
         })();
         "#,
     ))?;
