@@ -4678,6 +4678,14 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const { full } = basicFormatDate(this);
               return full;
             };
+            // Set length to 0 and remove prototype property to match built-in behavior
+            Object.defineProperty(toLocaleStringFn, 'length', {
+              value: 0,
+              writable: false,
+              enumerable: false,
+              configurable: true
+            });
+            delete toLocaleStringFn.prototype;
             Object.defineProperty(DateProto, 'toLocaleString', {
               value: toLocaleStringFn,
               writable: true,
@@ -4702,6 +4710,14 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const { datePart } = basicFormatDate(this);
               return datePart;
             };
+            // Set length to 0 and remove prototype property to match built-in behavior
+            Object.defineProperty(toLocaleDateStringFn, 'length', {
+              value: 0,
+              writable: false,
+              enumerable: false,
+              configurable: true
+            });
+            delete toLocaleDateStringFn.prototype;
             Object.defineProperty(DateProto, 'toLocaleDateString', {
               value: toLocaleDateStringFn,
               writable: true,
@@ -4726,6 +4742,14 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const { timePart } = basicFormatDate(this);
               return timePart;
             };
+            // Set length to 0 and remove prototype property to match built-in behavior
+            Object.defineProperty(toLocaleTimeStringFn, 'length', {
+              value: 0,
+              writable: false,
+              enumerable: false,
+              configurable: true
+            });
+            delete toLocaleTimeStringFn.prototype;
             Object.defineProperty(DateProto, 'toLocaleTimeString', {
               value: toLocaleTimeStringFn,
               writable: true,
