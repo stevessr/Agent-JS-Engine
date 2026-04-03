@@ -4176,17 +4176,61 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           function canonicalizeTimeZone(tz) {
             if (typeof tz !== 'string') return undefined;
+            // Preserve Etc/GMT, Etc/UTC, GMT without canonicalizing to UTC
             const upper = tz.toUpperCase();
-            if (upper === 'UTC' || upper === 'GMT' || upper === 'ETC/UTC' || upper === 'ETC/GMT') {
-              return 'UTC';
-            }
-            // Simple offset validation
-            if (/^[+-]\d{1,2}(:\d{2})?$/.test(tz)) {
+            if (upper === 'ETC/GMT') return 'Etc/GMT';
+            if (upper === 'ETC/UTC') return 'Etc/UTC';
+            if (upper === 'GMT') return 'GMT';
+            if (upper === 'UTC') return 'UTC';
+            
+            // Reject Unicode minus sign (U+2212) - must use ASCII minus (U+002D)
+            if (tz.includes('\u2212')) {
               throw new RangeError('Invalid time zone: ' + tz);
             }
-            if (/^[+-]\d{4,}$/.test(tz)) {
+            
+            // Check if it looks like an offset timezone
+            if (/^[+-]/.test(tz)) {
+              // Valid offset formats:
+              // +HH:MM or -HH:MM
+              // +HHMM or -HHMM  
+              // Hours must be 00-23, minutes must be 00-59
+              
+              // Pattern: +/-HH:MM
+              const colonMatch = tz.match(/^([+-])(\d{2}):(\d{2})$/);
+              if (colonMatch) {
+                const hours = parseInt(colonMatch[2], 10);
+                const minutes = parseInt(colonMatch[3], 10);
+                if (hours <= 23 && minutes <= 59) {
+                  return tz;
+                }
+                throw new RangeError('Invalid time zone: ' + tz);
+              }
+              
+              // Pattern: +/-HHMM
+              const noColonMatch = tz.match(/^([+-])(\d{2})(\d{2})$/);
+              if (noColonMatch) {
+                const hours = parseInt(noColonMatch[2], 10);
+                const minutes = parseInt(noColonMatch[3], 10);
+                if (hours <= 23 && minutes <= 59) {
+                  return tz;
+                }
+                throw new RangeError('Invalid time zone: ' + tz);
+              }
+              
+              // Pattern: +/-HH (2 digit hours with no minutes)
+              const shortMatch = tz.match(/^([+-])(\d{2})$/);
+              if (shortMatch) {
+                const hours = parseInt(shortMatch[2], 10);
+                if (hours <= 23) {
+                  return tz;
+                }
+                throw new RangeError('Invalid time zone: ' + tz);
+              }
+              
+              // Any other format starting with +/- is invalid
               throw new RangeError('Invalid time zone: ' + tz);
             }
+            
             return tz;
           }
 
@@ -4225,47 +4269,62 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               return new WrappedDTF(locales, options);
             }
 
-            // Normalize options
-            let opts = Object.create(null);
-            if (options !== undefined) {
-              if (typeof options !== 'object' && typeof options !== 'function') {
-                throw new TypeError('Options must be an object');
-              }
-              // Copy options
-              for (const key of Object.keys(Object(options))) {
-                opts[key] = options[key];
-              }
+            // Convert options to object (ToObject) - primitives like numbers should work
+            // null must throw TypeError
+            let opts;
+            if (options === undefined) {
+              opts = Object.create(null);
+            } else if (options === null) {
+              throw new TypeError('Cannot convert null to object');
+            } else {
+              opts = Object(options);
             }
 
-            // Validate and canonicalize options
+            // Validate and canonicalize options - read in spec-defined order
+            // Order per spec: localeMatcher, calendar, numberingSystem, hour12, hourCycle, timeZone, 
+            //                 weekday, era, year, month, day, dayPeriod, hour, minute, second, fractionalSecondDigits, 
+            //                 timeZoneName, formatMatcher, dateStyle, timeStyle
             const localeMatcher = getOption(opts, 'localeMatcher', 'string', VALID_LOCALE_MATCHERS, 'best fit');
+            
+            // Calendar validation - must be valid Unicode locale identifier type
+            // Valid calendars are 3-8 alphanum chars, possibly with subtags separated by hyphens
             let calendar = opts.calendar;
             if (calendar !== undefined) {
               calendar = String(calendar);
-              if (calendar === '' || !/^[a-zA-Z0-9\-]+$/.test(calendar)) {
+              // Calendar must be 3-8 alphanum chars per Unicode locale identifier type
+              // With possible subtag of 3-8 alphanum chars separated by hyphen
+              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(calendar)) {
                 throw new RangeError('Invalid calendar');
               }
               calendar = canonicalizeCalendar(calendar);
             }
-            const numberingSystem = opts.numberingSystem;
+            
+            // numberingSystem validation - must be valid Unicode locale identifier type
+            let numberingSystem = opts.numberingSystem;
             if (numberingSystem !== undefined) {
               const ns = String(numberingSystem);
-              if (ns === '' || !/^[a-zA-Z0-9]+$/.test(ns)) {
+              // numberingSystem must be 3-8 alphanum chars
+              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(ns)) {
                 throw new RangeError('Invalid numberingSystem');
               }
+              numberingSystem = ns;
             }
-            const hour12 = opts.hour12;
+            
+            // hour12 special handling - read once, convert to boolean if defined
+            const hour12Raw = opts.hour12;
+            const hour12 = hour12Raw !== undefined ? Boolean(hour12Raw) : undefined;
             const hourCycle = getOption(opts, 'hourCycle', 'string', VALID_HOUR_CYCLES, undefined);
             let timeZone = opts.timeZone;
             if (timeZone !== undefined) {
               timeZone = canonicalizeTimeZone(String(timeZone));
             }
-
+            
             const weekday = getOption(opts, 'weekday', 'string', VALID_WEEKDAYS, undefined);
             const era = getOption(opts, 'era', 'string', VALID_ERAS, undefined);
             const year = getOption(opts, 'year', 'string', VALID_YEARS, undefined);
             const month = getOption(opts, 'month', 'string', VALID_MONTHS, undefined);
             const day = getOption(opts, 'day', 'string', VALID_DAYS, undefined);
+            // dayPeriod is read before hour per spec
             const dayPeriod = getOption(opts, 'dayPeriod', 'string', VALID_DAY_PERIODS, undefined);
             const hour = getOption(opts, 'hour', 'string', VALID_HOURS, undefined);
             const minute = getOption(opts, 'minute', 'string', VALID_MINUTES, undefined);
