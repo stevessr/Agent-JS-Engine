@@ -2556,6 +2556,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_intl_date_time_format_polyfill(context)?;
     install_date_locale_methods(context)?;
     install_intl_relative_time_format_polyfill(context)?;
+    install_intl_duration_format_polyfill(context)?;
     Ok(())
 }
 
@@ -5320,6 +5321,362 @@ fn install_intl_relative_time_format_polyfill(context: &mut Context) -> JsResult
           // Install on Intl object
           Object.defineProperty(Intl, 'RelativeTimeFormat', {
             value: RelativeTimeFormat,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          // Check if DurationFormat already exists
+          if (typeof Intl.DurationFormat === 'function') {
+            return;
+          }
+          
+          const VALID_LOCALE_MATCHERS = ['lookup', 'best fit'];
+          const VALID_STYLES = ['long', 'short', 'narrow', 'digital'];
+          const VALID_DISPLAYS = ['auto', 'always'];
+          const VALID_UNIT_STYLES = ['long', 'short', 'narrow', '2-digit', 'numeric'];
+          
+          // Unit component names
+          const DURATION_UNITS = ['years', 'months', 'weeks', 'days', 'hours', 'minutes', 'seconds', 'milliseconds', 'microseconds', 'nanoseconds'];
+          
+          // WeakMap to store internal slots
+          const dfSlots = new WeakMap();
+          
+          function getOption(options, property, type, values, fallback) {
+            let value = options[property];
+            if (value === undefined) return fallback;
+            if (type === 'string') {
+              value = String(value);
+            } else if (type === 'number') {
+              value = Number(value);
+              if (!Number.isFinite(value)) {
+                throw new RangeError('Invalid ' + property);
+              }
+            }
+            if (values !== undefined && !values.includes(value)) {
+              throw new RangeError('Invalid value ' + value + ' for option ' + property);
+            }
+            return value;
+          }
+          
+          function getNumberOption(options, property, minimum, maximum, fallback) {
+            let value = options[property];
+            if (value === undefined) return fallback;
+            value = Number(value);
+            if (!Number.isFinite(value) || value < minimum || value > maximum) {
+              throw new RangeError('Invalid ' + property);
+            }
+            return Math.floor(value);
+          }
+          
+          function DurationFormat(locales, options) {
+            if (!(this instanceof DurationFormat) && new.target === undefined) {
+              throw new TypeError('Constructor Intl.DurationFormat requires "new"');
+            }
+            
+            // Process locales
+            let locale;
+            if (locales === undefined) {
+              locale = new Intl.NumberFormat().resolvedOptions().locale || 'en';
+            } else if (typeof locales === 'string') {
+              locale = Intl.getCanonicalLocales(locales)[0] || 'en';
+            } else if (Array.isArray(locales)) {
+              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : 'en';
+            } else {
+              locale = 'en';
+            }
+            
+            // Process options
+            let opts;
+            if (options === undefined) {
+              opts = Object.create(null);
+            } else if (options === null) {
+              throw new TypeError('Cannot convert null to object');
+            } else {
+              opts = Object(options);
+            }
+            
+            const localeMatcher = getOption(opts, 'localeMatcher', 'string', VALID_LOCALE_MATCHERS, 'best fit');
+            
+            // Read numberingSystem
+            let numberingSystem = opts.numberingSystem;
+            if (numberingSystem !== undefined) {
+              const ns = String(numberingSystem);
+              // Must be 3-8 alphanum chars
+              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(ns)) {
+                throw new RangeError('Invalid numberingSystem');
+              }
+              numberingSystem = ns;
+            }
+            
+            const style = getOption(opts, 'style', 'string', VALID_STYLES, 'short');
+            
+            // Process per-unit options
+            const unitOptions = {};
+            for (const unit of DURATION_UNITS) {
+              unitOptions[unit] = getOption(opts, unit, 'string', VALID_UNIT_STYLES, undefined);
+              const displayKey = unit + 'Display';
+              unitOptions[displayKey] = getOption(opts, displayKey, 'string', VALID_DISPLAYS, 'auto');
+            }
+            
+            // fractionalDigits
+            const fractionalDigits = getNumberOption(opts, 'fractionalDigits', 0, 9, undefined);
+            
+            // Store internal slots
+            const slots = {
+              locale: locale,
+              numberingSystem: numberingSystem || 'latn',
+              style: style,
+              fractionalDigits: fractionalDigits,
+              ...unitOptions
+            };
+            dfSlots.set(this, slots);
+            
+            return this;
+          }
+          
+          // format method
+          DurationFormat.prototype.format = function format(duration) {
+            const slots = dfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method Intl.DurationFormat.prototype.format called on incompatible receiver');
+            }
+            
+            if (duration === undefined || duration === null) {
+              throw new TypeError('Duration is required');
+            }
+            
+            if (typeof duration !== 'object') {
+              throw new TypeError('Duration must be an object');
+            }
+            
+            // Read duration components
+            const components = {};
+            let hasAny = false;
+            for (const unit of DURATION_UNITS) {
+              const value = duration[unit];
+              if (value !== undefined) {
+                const num = Number(value);
+                if (!Number.isFinite(num)) {
+                  throw new RangeError('Invalid duration component: ' + unit);
+                }
+                components[unit] = num;
+                if (num !== 0) hasAny = true;
+              } else {
+                components[unit] = 0;
+              }
+            }
+            
+            // Check for sign consistency
+            let hasPositive = false;
+            let hasNegative = false;
+            for (const unit of DURATION_UNITS) {
+              if (components[unit] > 0) hasPositive = true;
+              if (components[unit] < 0) hasNegative = true;
+            }
+            if (hasPositive && hasNegative) {
+              throw new RangeError('Duration cannot have mixed signs');
+            }
+            
+            const style = slots.style;
+            const parts = [];
+            
+            // Unit labels based on style
+            const labels = {
+              long: {
+                years: ['year', 'years'], months: ['month', 'months'], weeks: ['week', 'weeks'],
+                days: ['day', 'days'], hours: ['hour', 'hours'], minutes: ['minute', 'minutes'],
+                seconds: ['second', 'seconds'], milliseconds: ['millisecond', 'milliseconds'],
+                microseconds: ['microsecond', 'microseconds'], nanoseconds: ['nanosecond', 'nanoseconds']
+              },
+              short: {
+                years: ['yr', 'yrs'], months: ['mo', 'mos'], weeks: ['wk', 'wks'],
+                days: ['day', 'days'], hours: ['hr', 'hrs'], minutes: ['min', 'mins'],
+                seconds: ['sec', 'secs'], milliseconds: ['ms', 'ms'],
+                microseconds: ['μs', 'μs'], nanoseconds: ['ns', 'ns']
+              },
+              narrow: {
+                years: ['y', 'y'], months: ['m', 'm'], weeks: ['w', 'w'],
+                days: ['d', 'd'], hours: ['h', 'h'], minutes: ['m', 'm'],
+                seconds: ['s', 's'], milliseconds: ['ms', 'ms'],
+                microseconds: ['μs', 'μs'], nanoseconds: ['ns', 'ns']
+              }
+            };
+            
+            const effectiveStyle = style === 'digital' ? 'short' : style;
+            const unitLabels = labels[effectiveStyle] || labels.short;
+            
+            // Format each component
+            for (const unit of DURATION_UNITS) {
+              const value = components[unit];
+              const display = slots[unit + 'Display'];
+              
+              if (display === 'always' || value !== 0) {
+                const absValue = Math.abs(value);
+                const label = unitLabels[unit];
+                const unitLabel = absValue === 1 ? label[0] : label[1];
+                
+                if (style === 'digital' && (unit === 'hours' || unit === 'minutes' || unit === 'seconds')) {
+                  parts.push(String(Math.floor(absValue)).padStart(2, '0'));
+                } else {
+                  parts.push(absValue + ' ' + unitLabel);
+                }
+              }
+            }
+            
+            if (parts.length === 0) {
+              // Return "0 seconds" or similar for empty duration
+              const defaultUnit = 'seconds';
+              const label = unitLabels[defaultUnit];
+              return '0 ' + label[1];
+            }
+            
+            if (style === 'digital') {
+              return (hasNegative ? '-' : '') + parts.join(':');
+            }
+            
+            return (hasNegative ? '-' : '') + parts.join(', ');
+          };
+          
+          // formatToParts method
+          DurationFormat.prototype.formatToParts = function formatToParts(duration) {
+            const slots = dfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method Intl.DurationFormat.prototype.formatToParts called on incompatible receiver');
+            }
+            
+            // Simplified - return the formatted string as a single literal part
+            const formatted = this.format(duration);
+            return [{ type: 'literal', value: formatted }];
+          };
+          
+          // resolvedOptions method
+          DurationFormat.prototype.resolvedOptions = function resolvedOptions() {
+            const slots = dfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method Intl.DurationFormat.prototype.resolvedOptions called on incompatible receiver');
+            }
+            
+            const result = {
+              locale: slots.locale,
+              numberingSystem: slots.numberingSystem,
+              style: slots.style
+            };
+            
+            // Add per-unit options
+            for (const unit of DURATION_UNITS) {
+              if (slots[unit] !== undefined) {
+                result[unit] = slots[unit];
+              }
+              const displayKey = unit + 'Display';
+              if (slots[displayKey] !== undefined) {
+                result[displayKey] = slots[displayKey];
+              }
+            }
+            
+            if (slots.fractionalDigits !== undefined) {
+              result.fractionalDigits = slots.fractionalDigits;
+            }
+            
+            return result;
+          };
+          
+          // supportedLocalesOf static method
+          DurationFormat.supportedLocalesOf = function supportedLocalesOf(locales, options) {
+            if (options !== undefined) {
+              if (options === null) {
+                throw new TypeError('Cannot convert null to object');
+              }
+              const opts = Object(options);
+              const matcher = opts.localeMatcher;
+              if (matcher !== undefined) {
+                const matcherStr = String(matcher);
+                if (!VALID_LOCALE_MATCHERS.includes(matcherStr)) {
+                  throw new RangeError('Invalid localeMatcher');
+                }
+              }
+            }
+            
+            if (locales === undefined) return [];
+            const requestedLocales = Array.isArray(locales) ? locales : [String(locales)];
+            return Intl.getCanonicalLocales(requestedLocales);
+          };
+          
+          // Make supportedLocalesOf non-enumerable and set length to 1
+          Object.defineProperty(DurationFormat, 'supportedLocalesOf', {
+            value: DurationFormat.supportedLocalesOf,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(DurationFormat.supportedLocalesOf, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Make prototype methods non-enumerable
+          Object.defineProperty(DurationFormat.prototype, 'format', {
+            value: DurationFormat.prototype.format,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(DurationFormat.prototype, 'formatToParts', {
+            value: DurationFormat.prototype.formatToParts,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(DurationFormat.prototype, 'resolvedOptions', {
+            value: DurationFormat.prototype.resolvedOptions,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(DurationFormat.prototype, 'constructor', {
+            value: DurationFormat,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(DurationFormat.prototype, Symbol.toStringTag, {
+            value: 'Intl.DurationFormat',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Set function length
+          Object.defineProperty(DurationFormat, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(DurationFormat, 'name', {
+            value: 'DurationFormat',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Install on Intl object
+          Object.defineProperty(Intl, 'DurationFormat', {
+            value: DurationFormat,
             writable: true,
             enumerable: false,
             configurable: true
