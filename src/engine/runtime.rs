@@ -4364,6 +4364,25 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               locale = 'en-US';
             }
 
+            // Determine if we need to apply default date/time format
+            // Per ECMA-402, if no date/time components and no dateStyle/timeStyle specified,
+            // default to year: 'numeric', month: 'numeric', day: 'numeric'
+            let needsDefault = dateStyle === undefined && timeStyle === undefined &&
+              weekday === undefined && era === undefined && year === undefined &&
+              month === undefined && day === undefined && dayPeriod === undefined &&
+              hour === undefined && minute === undefined && second === undefined &&
+              fractionalSecondDigits === undefined && timeZoneName === undefined;
+            
+            let resolvedYear = year;
+            let resolvedMonth = month;
+            let resolvedDay = day;
+            
+            if (needsDefault) {
+              resolvedYear = 'numeric';
+              resolvedMonth = 'numeric';
+              resolvedDay = 'numeric';
+            }
+
             // Store resolved options
             const resolvedOpts = {
               locale: locale,
@@ -4374,9 +4393,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               hour12: hour12,
               weekday: weekday,
               era: era,
-              year: year,
-              month: month,
-              day: day,
+              year: resolvedYear,
+              month: resolvedMonth,
+              day: resolvedDay,
               dayPeriod: dayPeriod,
               hour: hour,
               minute: minute,
