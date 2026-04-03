@@ -4472,6 +4472,136 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             configurable: true
           });
 
+          // Helper function to format date according to resolved options
+          function formatDateWithOptions(d, opts) {
+            const hasDateComponent = opts.year !== undefined || opts.month !== undefined || 
+              opts.day !== undefined || opts.weekday !== undefined || opts.era !== undefined;
+            const hasTimeComponent = opts.hour !== undefined || opts.minute !== undefined || 
+              opts.second !== undefined || opts.dayPeriod !== undefined;
+            const hasStyle = opts.dateStyle !== undefined || opts.timeStyle !== undefined;
+            
+            // Use dateStyle/timeStyle if specified
+            if (hasStyle) {
+              const styleOpts = {};
+              if (opts.dateStyle) styleOpts.dateStyle = opts.dateStyle;
+              if (opts.timeStyle) styleOpts.timeStyle = opts.timeStyle;
+              styleOpts.timeZone = opts.timeZone;
+              return d.toLocaleString(opts.locale, styleOpts);
+            }
+            
+            // Build format string manually based on resolved options
+            const parts = [];
+            
+            // Date parts
+            if (hasDateComponent || (!hasTimeComponent && !hasStyle)) {
+              // Default to date if no components specified
+              const dateParts = [];
+              const month = d.getMonth() + 1;
+              const day = d.getDate();
+              const year = d.getFullYear();
+              
+              if (opts.month !== undefined) {
+                if (opts.month === '2-digit') {
+                  dateParts.push(month.toString().padStart(2, '0'));
+                } else if (opts.month === 'numeric') {
+                  dateParts.push(month.toString());
+                } else if (opts.month === 'long') {
+                  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+                    'July', 'August', 'September', 'October', 'November', 'December'];
+                  dateParts.push(monthNames[d.getMonth()]);
+                } else if (opts.month === 'short') {
+                  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+                  dateParts.push(monthNames[d.getMonth()]);
+                } else if (opts.month === 'narrow') {
+                  const monthNames = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+                  dateParts.push(monthNames[d.getMonth()]);
+                }
+              }
+              
+              if (opts.day !== undefined) {
+                if (opts.day === '2-digit') {
+                  dateParts.push(day.toString().padStart(2, '0'));
+                } else {
+                  dateParts.push(day.toString());
+                }
+              }
+              
+              if (opts.year !== undefined) {
+                if (opts.year === '2-digit') {
+                  dateParts.push((year % 100).toString().padStart(2, '0'));
+                } else {
+                  dateParts.push(year.toString());
+                }
+              }
+              
+              // Format as M/D/YYYY for numeric, adjust order for locale
+              if (dateParts.length > 0) {
+                parts.push(dateParts.join('/'));
+              }
+            }
+            
+            // Time parts
+            if (hasTimeComponent) {
+              const timeParts = [];
+              let hours = d.getHours();
+              const minutes = d.getMinutes();
+              const seconds = d.getSeconds();
+              let period = '';
+              
+              // Handle 12-hour format - default to 12-hour for en-US and similar locales
+              // 24-hour locales: zh, ja, ko, de, ru, most European except UK/US
+              const locale = (opts.locale || 'en-US').toLowerCase();
+              const is24HourLocale = locale.startsWith('zh') || locale.startsWith('ja') || 
+                locale.startsWith('ko') || locale.startsWith('de') || locale.startsWith('ru') ||
+                locale.startsWith('pl') || locale.startsWith('it') || locale.startsWith('pt') ||
+                locale.startsWith('nl') || locale.startsWith('sv') || locale.startsWith('fi') ||
+                locale.startsWith('da') || locale.startsWith('nb') || locale.startsWith('cs') ||
+                locale.startsWith('hu') || locale.startsWith('ro') || locale.startsWith('sk') ||
+                locale.startsWith('uk') || locale.startsWith('hr') || locale.startsWith('bg') ||
+                locale.startsWith('el') || locale.startsWith('tr') || locale.startsWith('vi') ||
+                locale.startsWith('th') || locale.startsWith('id');
+              
+              // Use hour12 if explicitly set, otherwise check hourCycle, otherwise use locale default
+              let use12Hour;
+              if (opts.hour12 !== undefined) {
+                use12Hour = opts.hour12;
+              } else if (opts.hourCycle !== undefined) {
+                use12Hour = opts.hourCycle === 'h11' || opts.hourCycle === 'h12';
+              } else {
+                use12Hour = !is24HourLocale;
+              }
+              
+              if (use12Hour && opts.hour !== undefined) {
+                period = hours >= 12 ? ' PM' : ' AM';
+                hours = hours % 12;
+                if (hours === 0) hours = 12;
+              }
+              
+              if (opts.hour !== undefined) {
+                if (opts.hour === '2-digit') {
+                  timeParts.push(hours.toString().padStart(2, '0'));
+                } else {
+                  timeParts.push(hours.toString());
+                }
+              }
+              
+              if (opts.minute !== undefined) {
+                timeParts.push(minutes.toString().padStart(2, '0'));
+              }
+              
+              if (opts.second !== undefined) {
+                timeParts.push(seconds.toString().padStart(2, '0'));
+              }
+              
+              if (timeParts.length > 0) {
+                parts.push(timeParts.join(':') + period);
+              }
+            }
+            
+            return parts.join(', ');
+          }
+
           // format getter (returns a bound function)
           Object.defineProperty(newProto, 'format', {
             get: function() {
@@ -4487,12 +4617,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 if (isNaN(d.getTime())) {
                   throw new RangeError('Invalid time value');
                 }
-                // Use the underlying instance if it has format
-                if (slot.instance && typeof slot.instance.format === 'function') {
-                  return slot.instance.format(d);
-                }
-                // Fallback: use toLocaleString
-                return d.toLocaleString(slot.resolvedOpts.locale);
+                // Use our custom formatting that respects resolved options
+                return formatDateWithOptions(d, slot.resolvedOpts);
               };
               // Cache the bound format function
               Object.defineProperty(this, 'format', { value: boundFormat, writable: true, configurable: true });
@@ -4631,30 +4757,6 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
           const originalToLocaleDateString = DateProto.toLocaleDateString;
           const originalToLocaleTimeString = DateProto.toLocaleTimeString;
           
-          // Helper to format date parts
-          function padZero(n, len = 2) {
-            return String(n).padStart(len, '0');
-          }
-          
-          function basicFormatDate(date) {
-            const year = date.getFullYear();
-            const month = date.getMonth();
-            const day = date.getDate();
-            const hours = date.getHours();
-            const minutes = date.getMinutes();
-            const seconds = date.getSeconds();
-            
-            // Default format: M/D/YYYY
-            let datePart = `${month + 1}/${day}/${year}`;
-            
-            // Time format: h:mm:ss AM/PM
-            let hour12 = hours % 12 || 12;
-            let ampm = hours < 12 ? 'AM' : 'PM';
-            let timePart = `${hour12}:${padZero(minutes)}:${padZero(seconds)} ${ampm}`;
-            
-            return { datePart, timePart, full: `${datePart}, ${timePart}` };
-          }
-          
           // Test if the native implementation works (store result to avoid repeated calls)
           let toLocaleStringNeedsPolyfill = false;
           let toLocaleDateStringNeedsPolyfill = false;
@@ -4682,7 +4784,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
             toLocaleTimeStringNeedsPolyfill = true;
           }
           
-          // toLocaleString
+          // toLocaleString - uses DateTimeFormat with date and time components
           if (toLocaleStringNeedsPolyfill) {
             const toLocaleStringFn = function toLocaleString(locales, options) {
               if (this === null || this === undefined) {
@@ -4695,10 +4797,46 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                 return 'Invalid Date';
               }
               
-              const { full } = basicFormatDate(this);
-              return full;
+              // Per ECMA-402 12.5.5 (toLocaleString):
+              // - If no options, default to year/month/day/hour/minute/second
+              // - If options are given (even just {hour12: false}), use them
+              // - toLocaleString does NOT add missing date/time components when some are given
+              let resolvedOptions;
+              if (options === undefined || options === null) {
+                resolvedOptions = {
+                  year: 'numeric',
+                  month: 'numeric', 
+                  day: 'numeric',
+                  hour: 'numeric',
+                  minute: 'numeric',
+                  second: 'numeric'
+                };
+              } else {
+                const opts = Object(options);
+                const hasDate = hasDateOptions(opts);
+                const hasTime = hasTimeOptions(opts);
+                const hasStyle = opts.dateStyle !== undefined || opts.timeStyle !== undefined;
+                
+                if (!hasDate && !hasTime && !hasStyle) {
+                  // Options given but no date/time/style components (e.g., {hour12: false})
+                  // Add both date and time defaults
+                  resolvedOptions = Object.assign({}, opts, {
+                    year: 'numeric',
+                    month: 'numeric',
+                    day: 'numeric',
+                    hour: 'numeric',
+                    minute: 'numeric',
+                    second: 'numeric'
+                  });
+                } else {
+                  // If any date/time/style components specified, use options as-is
+                  resolvedOptions = opts;
+                }
+              }
+              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              return dtf.format(this);
             };
-            // Set length to 0 and remove prototype property to match built-in behavior
+            // Set length to 0 to match built-in behavior
             Object.defineProperty(toLocaleStringFn, 'length', {
               value: 0,
               writable: false,
@@ -4714,7 +4852,20 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
             });
           }
           
-          // toLocaleDateString
+          // Helper to check if object has any date components
+          function hasDateOptions(opts) {
+            return opts && (opts.weekday !== undefined || opts.era !== undefined || 
+              opts.year !== undefined || opts.month !== undefined || opts.day !== undefined);
+          }
+          
+          // Helper to check if object has any time components
+          function hasTimeOptions(opts) {
+            return opts && (opts.hour !== undefined || opts.minute !== undefined || 
+              opts.second !== undefined || opts.dayPeriod !== undefined);
+          }
+          
+          // toLocaleDateString - uses DateTimeFormat with date components
+          // Per ECMA-402: Always includes date components, adds them if missing
           if (toLocaleDateStringNeedsPolyfill) {
             const toLocaleDateStringFn = function toLocaleDateString(locales, options) {
               if (this === null || this === undefined) {
@@ -4727,10 +4878,36 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                 return 'Invalid Date';
               }
               
-              const { datePart } = basicFormatDate(this);
-              return datePart;
+              // Per ECMA-402 12.5.6:
+              // - If no options, default to year/month/day
+              // - If no date options (even if other options present), add year/month/day
+              // This is "date/date" in the spec - date method requires date components
+              let resolvedOptions;
+              if (options === undefined || options === null) {
+                resolvedOptions = {
+                  year: 'numeric',
+                  month: 'numeric',
+                  day: 'numeric'
+                };
+              } else {
+                const opts = Object(options);
+                const hasDate = hasDateOptions(opts);
+                
+                if (!hasDate) {
+                  // No date options - add date defaults (toLocaleDateString always needs date)
+                  resolvedOptions = Object.assign({}, opts, {
+                    year: 'numeric',
+                    month: 'numeric', 
+                    day: 'numeric'
+                  });
+                } else {
+                  resolvedOptions = opts;
+                }
+              }
+              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              return dtf.format(this);
             };
-            // Set length to 0 and remove prototype property to match built-in behavior
+            // Set length to 0 to match built-in behavior
             Object.defineProperty(toLocaleDateStringFn, 'length', {
               value: 0,
               writable: false,
@@ -4746,7 +4923,8 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
             });
           }
           
-          // toLocaleTimeString
+          // toLocaleTimeString - uses DateTimeFormat with time components
+          // Per ECMA-402: Always includes time components, adds them if missing
           if (toLocaleTimeStringNeedsPolyfill) {
             const toLocaleTimeStringFn = function toLocaleTimeString(locales, options) {
               if (this === null || this === undefined) {
@@ -4759,10 +4937,36 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                 return 'Invalid Date';
               }
               
-              const { timePart } = basicFormatDate(this);
-              return timePart;
+              // Per ECMA-402 12.5.7:
+              // - If no options, default to hour/minute/second
+              // - If no time options (even if other options present), add hour/minute/second
+              // This is "time/time" in the spec - time method requires time components
+              let resolvedOptions;
+              if (options === undefined || options === null) {
+                resolvedOptions = {
+                  hour: 'numeric',
+                  minute: 'numeric',
+                  second: 'numeric'
+                };
+              } else {
+                const opts = Object(options);
+                const hasTime = hasTimeOptions(opts);
+                
+                if (!hasTime) {
+                  // No time options - add time defaults (toLocaleTimeString always needs time)
+                  resolvedOptions = Object.assign({}, opts, {
+                    hour: 'numeric',
+                    minute: 'numeric',
+                    second: 'numeric'
+                  });
+                } else {
+                  resolvedOptions = opts;
+                }
+              }
+              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              return dtf.format(this);
             };
-            // Set length to 0 and remove prototype property to match built-in behavior
+            // Set length to 0 to match built-in behavior
             Object.defineProperty(toLocaleTimeStringFn, 'length', {
               value: 0,
               writable: false,
