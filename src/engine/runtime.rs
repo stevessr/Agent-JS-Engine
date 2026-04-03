@@ -2555,6 +2555,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_intl_display_names_builtin(context)?;
     install_intl_date_time_format_polyfill(context)?;
     install_date_locale_methods(context)?;
+    install_intl_relative_time_format_polyfill(context)?;
     Ok(())
 }
 
@@ -4776,6 +4777,349 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               configurable: true
             });
           }
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_intl_relative_time_format_polyfill(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          // Check if RelativeTimeFormat already exists
+          if (typeof Intl.RelativeTimeFormat === 'function') {
+            return;
+          }
+          
+          const VALID_LOCALE_MATCHERS = ['lookup', 'best fit'];
+          const VALID_NUMERIC = ['always', 'auto'];
+          const VALID_STYLE = ['long', 'short', 'narrow'];
+          const VALID_UNITS = ['year', 'years', 'quarter', 'quarters', 'month', 'months', 
+                              'week', 'weeks', 'day', 'days', 'hour', 'hours', 
+                              'minute', 'minutes', 'second', 'seconds'];
+          
+          // Singular unit mapping
+          const SINGULAR_UNITS = {
+            'years': 'year', 'quarters': 'quarter', 'months': 'month',
+            'weeks': 'week', 'days': 'day', 'hours': 'hour',
+            'minutes': 'minute', 'seconds': 'second'
+          };
+          
+          // WeakMap to store internal slots
+          const rtfSlots = new WeakMap();
+          
+          function getOption(options, property, type, values, fallback) {
+            let value = options[property];
+            if (value === undefined) return fallback;
+            if (type === 'string') {
+              value = String(value);
+            }
+            if (values !== undefined && !values.includes(value)) {
+              throw new RangeError('Invalid value ' + value + ' for option ' + property);
+            }
+            return value;
+          }
+          
+          function RelativeTimeFormat(locales, options) {
+            if (!(this instanceof RelativeTimeFormat) && new.target === undefined) {
+              throw new TypeError('Constructor Intl.RelativeTimeFormat requires "new"');
+            }
+            
+            // Process locales
+            let locale;
+            if (locales === undefined) {
+              locale = new Intl.NumberFormat().resolvedOptions().locale || 'en';
+            } else if (typeof locales === 'string') {
+              locale = Intl.getCanonicalLocales(locales)[0] || 'en';
+            } else if (Array.isArray(locales)) {
+              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : 'en';
+            } else {
+              locale = 'en';
+            }
+            
+            // Process options
+            let opts;
+            if (options === undefined) {
+              opts = Object.create(null);
+            } else if (options === null) {
+              throw new TypeError('Cannot convert null to object');
+            } else {
+              opts = Object(options);
+            }
+            
+            const localeMatcher = getOption(opts, 'localeMatcher', 'string', VALID_LOCALE_MATCHERS, 'best fit');
+            
+            // Read numberingSystem
+            let numberingSystem = opts.numberingSystem;
+            if (numberingSystem !== undefined) {
+              const ns = String(numberingSystem);
+              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(ns)) {
+                throw new RangeError('Invalid numberingSystem');
+              }
+              numberingSystem = ns;
+            }
+            
+            const style = getOption(opts, 'style', 'string', VALID_STYLE, 'long');
+            const numeric = getOption(opts, 'numeric', 'string', VALID_NUMERIC, 'always');
+            
+            const resolvedOpts = {
+              locale: locale,
+              style: style,
+              numeric: numeric,
+              numberingSystem: numberingSystem || 'latn'
+            };
+            
+            rtfSlots.set(this, resolvedOpts);
+          }
+          
+          RelativeTimeFormat.prototype.resolvedOptions = function resolvedOptions() {
+            const slots = rtfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method called on incompatible receiver');
+            }
+            return {
+              locale: slots.locale,
+              style: slots.style,
+              numeric: slots.numeric,
+              numberingSystem: slots.numberingSystem
+            };
+          };
+          
+          RelativeTimeFormat.prototype.format = function format(value, unit) {
+            const slots = rtfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method called on incompatible receiver');
+            }
+            
+            value = Number(value);
+            if (!Number.isFinite(value)) {
+              throw new RangeError('Invalid value');
+            }
+            
+            unit = String(unit);
+            if (!VALID_UNITS.includes(unit)) {
+              throw new RangeError('Invalid unit argument');
+            }
+            
+            // Normalize to singular
+            const singularUnit = SINGULAR_UNITS[unit] || unit;
+            const absValue = Math.abs(value);
+            
+            // Simple format implementation
+            const style = slots.style;
+            const numeric = slots.numeric;
+            
+            // Handle auto numeric for special cases
+            if (numeric === 'auto') {
+              if (value === 0) {
+                if (singularUnit === 'second') return 'now';
+                if (singularUnit === 'minute') return 'this minute';
+                if (singularUnit === 'hour') return 'this hour';
+                if (singularUnit === 'day') return 'today';
+                if (singularUnit === 'week') return 'this week';
+                if (singularUnit === 'month') return 'this month';
+                if (singularUnit === 'quarter') return 'this quarter';
+                if (singularUnit === 'year') return 'this year';
+              } else if (value === -1) {
+                if (singularUnit === 'second') return '1 second ago';
+                if (singularUnit === 'minute') return '1 minute ago';
+                if (singularUnit === 'hour') return '1 hour ago';
+                if (singularUnit === 'day') return 'yesterday';
+                if (singularUnit === 'week') return 'last week';
+                if (singularUnit === 'month') return 'last month';
+                if (singularUnit === 'quarter') return 'last quarter';
+                if (singularUnit === 'year') return 'last year';
+              } else if (value === 1) {
+                if (singularUnit === 'second') return 'in 1 second';
+                if (singularUnit === 'minute') return 'in 1 minute';
+                if (singularUnit === 'hour') return 'in 1 hour';
+                if (singularUnit === 'day') return 'tomorrow';
+                if (singularUnit === 'week') return 'next week';
+                if (singularUnit === 'month') return 'next month';
+                if (singularUnit === 'quarter') return 'next quarter';
+                if (singularUnit === 'year') return 'next year';
+              }
+            }
+            
+            // Unit labels based on style
+            let unitLabel;
+            if (style === 'narrow') {
+              const narrowLabels = {
+                year: 'yr', month: 'mo', week: 'wk', day: 'd',
+                hour: 'hr', minute: 'min', second: 's', quarter: 'qtr'
+              };
+              unitLabel = narrowLabels[singularUnit] || singularUnit;
+            } else if (style === 'short') {
+              const shortLabels = {
+                year: 'yr.', month: 'mo.', week: 'wk.', day: 'day',
+                hour: 'hr.', minute: 'min.', second: 'sec.', quarter: 'qtr.'
+              };
+              const shortPluralLabels = {
+                year: 'yr.', month: 'mo.', week: 'wk.', day: 'days',
+                hour: 'hr.', minute: 'min.', second: 'sec.', quarter: 'qtr.'
+              };
+              unitLabel = absValue === 1 ? (shortLabels[singularUnit] || singularUnit) : (shortPluralLabels[singularUnit] || singularUnit + 's');
+            } else {
+              // long style
+              unitLabel = singularUnit;
+              if (absValue !== 1) {
+                unitLabel += 's';
+              }
+            }
+            
+            // Format number using locale-aware NumberFormat
+            const nf = new Intl.NumberFormat(slots.locale, { numberingSystem: slots.numberingSystem });
+            const formattedValue = nf.format(absValue);
+            
+            // Handle negative zero specially: Object.is(value, -0) checks for -0
+            // Positive zero is "in 0 X", negative zero is "0 X ago"
+            if (value < 0 || Object.is(value, -0)) {
+              return formattedValue + ' ' + unitLabel + ' ago';
+            } else {
+              return 'in ' + formattedValue + ' ' + unitLabel;
+            }
+          };
+          
+          RelativeTimeFormat.prototype.formatToParts = function formatToParts(value, unit) {
+            const slots = rtfSlots.get(this);
+            if (!slots) {
+              throw new TypeError('Method called on incompatible receiver');
+            }
+            
+            value = Number(value);
+            if (!Number.isFinite(value)) {
+              throw new RangeError('Invalid value');
+            }
+            
+            unit = String(unit);
+            if (!VALID_UNITS.includes(unit)) {
+              throw new RangeError('Invalid unit argument');
+            }
+            
+            const singularUnit = SINGULAR_UNITS[unit] || unit;
+            const absValue = Math.abs(value);
+            
+            // Format number using locale-aware NumberFormat
+            const nf = new Intl.NumberFormat(slots.locale, { numberingSystem: slots.numberingSystem });
+            const formattedValue = nf.format(absValue);
+            
+            const parts = [];
+            if (value < 0) {
+              parts.push({ type: 'integer', value: formattedValue, unit: singularUnit });
+              parts.push({ type: 'literal', value: ' ' });
+              parts.push({ type: 'literal', value: absValue === 1 ? singularUnit : singularUnit + 's' });
+              parts.push({ type: 'literal', value: ' ago' });
+            } else {
+              parts.push({ type: 'literal', value: 'in ' });
+              parts.push({ type: 'integer', value: String(absValue), unit: singularUnit });
+              parts.push({ type: 'literal', value: ' ' });
+              parts.push({ type: 'literal', value: absValue === 1 ? singularUnit : singularUnit + 's' });
+            }
+            
+            return parts;
+          };
+          
+          RelativeTimeFormat.supportedLocalesOf = function supportedLocalesOf(locales, options) {
+            // Process options
+            if (options !== undefined) {
+              if (options === null) {
+                throw new TypeError('Cannot convert null to object');
+              }
+              const opts = Object(options);
+              const matcher = opts.localeMatcher;
+              if (matcher !== undefined) {
+                const matcherStr = String(matcher);
+                if (!VALID_LOCALE_MATCHERS.includes(matcherStr)) {
+                  throw new RangeError('Invalid localeMatcher');
+                }
+              }
+            }
+            
+            if (locales === undefined) return [];
+            const requestedLocales = Array.isArray(locales) ? locales : [String(locales)];
+            // Validate each locale
+            return Intl.getCanonicalLocales(requestedLocales);
+          };
+          
+          // Make supportedLocalesOf non-enumerable and set length to 1
+          Object.defineProperty(RelativeTimeFormat, 'supportedLocalesOf', {
+            value: RelativeTimeFormat.supportedLocalesOf,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(RelativeTimeFormat.supportedLocalesOf, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Set up prototype chain
+          Object.defineProperty(RelativeTimeFormat, 'prototype', {
+            value: RelativeTimeFormat.prototype,
+            writable: false,
+            enumerable: false,
+            configurable: false
+          });
+          
+          // Make prototype methods non-enumerable
+          Object.defineProperty(RelativeTimeFormat.prototype, 'format', {
+            value: RelativeTimeFormat.prototype.format,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(RelativeTimeFormat.prototype, 'formatToParts', {
+            value: RelativeTimeFormat.prototype.formatToParts,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          Object.defineProperty(RelativeTimeFormat.prototype, 'resolvedOptions', {
+            value: RelativeTimeFormat.prototype.resolvedOptions,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(RelativeTimeFormat.prototype, 'constructor', {
+            value: RelativeTimeFormat,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(RelativeTimeFormat.prototype, Symbol.toStringTag, {
+            value: 'Intl.RelativeTimeFormat',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Set function length
+          Object.defineProperty(RelativeTimeFormat, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          Object.defineProperty(RelativeTimeFormat, 'name', {
+            value: 'RelativeTimeFormat',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+          
+          // Install on Intl object
+          Object.defineProperty(Intl, 'RelativeTimeFormat', {
+            value: RelativeTimeFormat,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
         })();
         "#,
     ))?;
