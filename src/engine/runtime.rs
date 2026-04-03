@@ -2553,6 +2553,8 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_promise_keyed_builtins(context)?;
     install_bigint_to_locale_string(context)?;
     install_intl_display_names_builtin(context)?;
+    install_intl_date_time_format_polyfill(context)?;
+    install_date_locale_methods(context)?;
     Ok(())
 }
 
@@ -4105,6 +4107,573 @@ fn install_intl_display_names_builtin(context: &mut Context) -> JsResult<()> {
             enumerable: false,
             configurable: true,
           });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Intl !== 'object' || Intl === null) return;
+          if (typeof Intl.DateTimeFormat !== 'function') return;
+
+          const DTF = Intl.DateTimeFormat;
+          const proto = DTF.prototype;
+
+          // Store original format function if exists
+          const originalFormat = proto.format;
+
+          // Internal slot storage
+          const dtfSlots = new WeakMap();
+
+          // Valid option values per spec
+          const VALID_LOCALE_MATCHERS = ['lookup', 'best fit'];
+          const VALID_FORMAT_MATCHERS = ['basic', 'best fit'];
+          const VALID_CALENDARS = [
+            'buddhist', 'chinese', 'coptic', 'dangi', 'ethioaa', 'ethiopic',
+            'gregory', 'hebrew', 'indian', 'islamic', 'islamic-umalqura',
+            'islamic-tbla', 'islamic-civil', 'islamic-rgsa', 'iso8601',
+            'japanese', 'persian', 'roc', 'islamicc'
+          ];
+          const VALID_NUMBERING_SYSTEMS = [
+            'arab', 'arabext', 'bali', 'beng', 'deva', 'fullwide', 'gujr',
+            'guru', 'hanidec', 'khmr', 'knda', 'laoo', 'latn', 'limb',
+            'mlym', 'mong', 'mymr', 'orya', 'tamldec', 'telu', 'thai', 'tibt'
+          ];
+          const VALID_HOUR_CYCLES = ['h11', 'h12', 'h23', 'h24'];
+          const VALID_TIME_ZONES = ['UTC'];
+          const VALID_WEEKDAYS = ['narrow', 'short', 'long'];
+          const VALID_ERAS = ['narrow', 'short', 'long'];
+          const VALID_YEARS = ['2-digit', 'numeric'];
+          const VALID_MONTHS = ['2-digit', 'numeric', 'narrow', 'short', 'long'];
+          const VALID_DAYS = ['2-digit', 'numeric'];
+          const VALID_DAY_PERIODS = ['narrow', 'short', 'long'];
+          const VALID_HOURS = ['2-digit', 'numeric'];
+          const VALID_MINUTES = ['2-digit', 'numeric'];
+          const VALID_SECONDS = ['2-digit', 'numeric'];
+          const VALID_FRACTIONAL_SECOND_DIGITS = [1, 2, 3];
+          const VALID_TIME_ZONE_NAMES = ['short', 'long', 'shortOffset', 'longOffset', 'shortGeneric', 'longGeneric'];
+          const VALID_DATE_STYLES = ['full', 'long', 'medium', 'short'];
+          const VALID_TIME_STYLES = ['full', 'long', 'medium', 'short'];
+
+          const CALENDAR_ALIASES = {
+            'islamicc': 'islamic-civil',
+          };
+
+          function canonicalizeCalendar(cal) {
+            if (typeof cal !== 'string') return undefined;
+            const lower = cal.toLowerCase();
+            if (CALENDAR_ALIASES[lower]) return CALENDAR_ALIASES[lower];
+            // Check if it has invalid uppercase characters (like capital dotted I)
+            if (/[\u0130\u0131]/.test(cal)) {
+              throw new RangeError('Invalid calendar');
+            }
+            return lower;
+          }
+
+          function canonicalizeTimeZone(tz) {
+            if (typeof tz !== 'string') return undefined;
+            const upper = tz.toUpperCase();
+            if (upper === 'UTC' || upper === 'GMT' || upper === 'ETC/UTC' || upper === 'ETC/GMT') {
+              return 'UTC';
+            }
+            // Simple offset validation
+            if (/^[+-]\d{1,2}(:\d{2})?$/.test(tz)) {
+              throw new RangeError('Invalid time zone: ' + tz);
+            }
+            if (/^[+-]\d{4,}$/.test(tz)) {
+              throw new RangeError('Invalid time zone: ' + tz);
+            }
+            return tz;
+          }
+
+          function getOption(options, property, type, values, fallback) {
+            let value = options[property];
+            if (value === undefined) return fallback;
+            if (type === 'boolean') {
+              value = Boolean(value);
+            } else if (type === 'string') {
+              value = String(value);
+            } else if (type === 'number') {
+              value = Number(value);
+              if (!Number.isFinite(value)) {
+                throw new RangeError('Invalid ' + property);
+              }
+            }
+            if (values !== undefined && !values.includes(value)) {
+              throw new RangeError('Invalid value ' + value + ' for option ' + property);
+            }
+            return value;
+          }
+
+          function getNumberOption(options, property, minimum, maximum, fallback) {
+            let value = options[property];
+            if (value === undefined) return fallback;
+            value = Number(value);
+            if (!Number.isFinite(value) || value < minimum || value > maximum) {
+              throw new RangeError('Invalid ' + property);
+            }
+            return Math.floor(value);
+          }
+
+          // Wrap the constructor to capture options
+          const WrappedDTF = function DateTimeFormat(locales, options) {
+            if (!(this instanceof WrappedDTF) && new.target === undefined) {
+              return new WrappedDTF(locales, options);
+            }
+
+            // Normalize options
+            let opts = Object.create(null);
+            if (options !== undefined) {
+              if (typeof options !== 'object' && typeof options !== 'function') {
+                throw new TypeError('Options must be an object');
+              }
+              // Copy options
+              for (const key of Object.keys(Object(options))) {
+                opts[key] = options[key];
+              }
+            }
+
+            // Validate and canonicalize options
+            const localeMatcher = getOption(opts, 'localeMatcher', 'string', VALID_LOCALE_MATCHERS, 'best fit');
+            let calendar = opts.calendar;
+            if (calendar !== undefined) {
+              calendar = String(calendar);
+              if (calendar === '' || !/^[a-zA-Z0-9\-]+$/.test(calendar)) {
+                throw new RangeError('Invalid calendar');
+              }
+              calendar = canonicalizeCalendar(calendar);
+            }
+            const numberingSystem = opts.numberingSystem;
+            if (numberingSystem !== undefined) {
+              const ns = String(numberingSystem);
+              if (ns === '' || !/^[a-zA-Z0-9]+$/.test(ns)) {
+                throw new RangeError('Invalid numberingSystem');
+              }
+            }
+            const hour12 = opts.hour12;
+            const hourCycle = getOption(opts, 'hourCycle', 'string', VALID_HOUR_CYCLES, undefined);
+            let timeZone = opts.timeZone;
+            if (timeZone !== undefined) {
+              timeZone = canonicalizeTimeZone(String(timeZone));
+            }
+
+            const weekday = getOption(opts, 'weekday', 'string', VALID_WEEKDAYS, undefined);
+            const era = getOption(opts, 'era', 'string', VALID_ERAS, undefined);
+            const year = getOption(opts, 'year', 'string', VALID_YEARS, undefined);
+            const month = getOption(opts, 'month', 'string', VALID_MONTHS, undefined);
+            const day = getOption(opts, 'day', 'string', VALID_DAYS, undefined);
+            const dayPeriod = getOption(opts, 'dayPeriod', 'string', VALID_DAY_PERIODS, undefined);
+            const hour = getOption(opts, 'hour', 'string', VALID_HOURS, undefined);
+            const minute = getOption(opts, 'minute', 'string', VALID_MINUTES, undefined);
+            const second = getOption(opts, 'second', 'string', VALID_SECONDS, undefined);
+            const fractionalSecondDigits = getNumberOption(opts, 'fractionalSecondDigits', 1, 3, undefined);
+            const timeZoneName = getOption(opts, 'timeZoneName', 'string', VALID_TIME_ZONE_NAMES, undefined);
+            const formatMatcher = getOption(opts, 'formatMatcher', 'string', VALID_FORMAT_MATCHERS, 'best fit');
+            const dateStyle = getOption(opts, 'dateStyle', 'string', VALID_DATE_STYLES, undefined);
+            const timeStyle = getOption(opts, 'timeStyle', 'string', VALID_TIME_STYLES, undefined);
+
+            // dateStyle/timeStyle cannot be combined with individual date/time components
+            if ((dateStyle !== undefined || timeStyle !== undefined) &&
+                (weekday !== undefined || era !== undefined || year !== undefined ||
+                 month !== undefined || day !== undefined || dayPeriod !== undefined ||
+                 hour !== undefined || minute !== undefined || second !== undefined ||
+                 fractionalSecondDigits !== undefined || timeZoneName !== undefined)) {
+              throw new TypeError('dateStyle and timeStyle cannot be combined with other date/time options');
+            }
+
+            // Create the underlying DTF instance
+            let instance;
+            try {
+              instance = new DTF(locales, options);
+            } catch (e) {
+              throw e;
+            }
+
+            // Determine locale
+            let locale;
+            if (locales === undefined) {
+              locale = new Intl.NumberFormat().resolvedOptions().locale || 'en-US';
+            } else if (typeof locales === 'string') {
+              locale = Intl.getCanonicalLocales(locales)[0] || 'en-US';
+            } else if (Array.isArray(locales)) {
+              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : 'en-US';
+            } else {
+              locale = 'en-US';
+            }
+
+            // Store resolved options
+            const resolvedOpts = {
+              locale: locale,
+              calendar: calendar || 'gregory',
+              numberingSystem: numberingSystem ? String(numberingSystem).toLowerCase() : 'latn',
+              timeZone: timeZone || 'UTC',
+              hourCycle: hourCycle,
+              hour12: hour12,
+              weekday: weekday,
+              era: era,
+              year: year,
+              month: month,
+              day: day,
+              dayPeriod: dayPeriod,
+              hour: hour,
+              minute: minute,
+              second: second,
+              fractionalSecondDigits: fractionalSecondDigits,
+              timeZoneName: timeZoneName,
+              dateStyle: dateStyle,
+              timeStyle: timeStyle,
+            };
+
+            // Set hourCycle/hour12 defaults based on each other
+            if (hour !== undefined) {
+              if (hourCycle !== undefined) {
+                resolvedOpts.hour12 = (hourCycle === 'h11' || hourCycle === 'h12');
+              } else if (hour12 !== undefined) {
+                resolvedOpts.hour12 = Boolean(hour12);
+                resolvedOpts.hourCycle = hour12 ? 'h12' : 'h23';
+              }
+            }
+
+            dtfSlots.set(this, { instance, resolvedOpts });
+
+            return this;
+          };
+
+          // Copy static properties
+          Object.defineProperty(WrappedDTF, 'length', { value: 0, configurable: true });
+          Object.defineProperty(WrappedDTF, 'name', { value: 'DateTimeFormat', configurable: true });
+
+          if (typeof DTF.supportedLocalesOf === 'function') {
+            WrappedDTF.supportedLocalesOf = function supportedLocalesOf(locales, options) {
+              return DTF.supportedLocalesOf(locales, options);
+            };
+            Object.defineProperty(WrappedDTF.supportedLocalesOf, 'length', { value: 1, configurable: true });
+          }
+
+          // Create new prototype
+          const newProto = Object.create(Object.prototype);
+
+          // resolvedOptions method
+          Object.defineProperty(newProto, 'resolvedOptions', {
+            value: function resolvedOptions() {
+              const slot = dtfSlots.get(this);
+              if (!slot) {
+                throw new TypeError('Method Intl.DateTimeFormat.prototype.resolvedOptions called on incompatible receiver');
+              }
+              const opts = slot.resolvedOpts;
+              const result = {
+                locale: opts.locale,
+                calendar: opts.calendar,
+                numberingSystem: opts.numberingSystem,
+                timeZone: opts.timeZone,
+              };
+              if (opts.hourCycle !== undefined) result.hourCycle = opts.hourCycle;
+              if (opts.hour12 !== undefined) result.hour12 = opts.hour12;
+              if (opts.weekday !== undefined) result.weekday = opts.weekday;
+              if (opts.era !== undefined) result.era = opts.era;
+              if (opts.year !== undefined) result.year = opts.year;
+              if (opts.month !== undefined) result.month = opts.month;
+              if (opts.day !== undefined) result.day = opts.day;
+              if (opts.dayPeriod !== undefined) result.dayPeriod = opts.dayPeriod;
+              if (opts.hour !== undefined) result.hour = opts.hour;
+              if (opts.minute !== undefined) result.minute = opts.minute;
+              if (opts.second !== undefined) result.second = opts.second;
+              if (opts.fractionalSecondDigits !== undefined) result.fractionalSecondDigits = opts.fractionalSecondDigits;
+              if (opts.timeZoneName !== undefined) result.timeZoneName = opts.timeZoneName;
+              if (opts.dateStyle !== undefined) result.dateStyle = opts.dateStyle;
+              if (opts.timeStyle !== undefined) result.timeStyle = opts.timeStyle;
+              return result;
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          // format getter (returns a bound function)
+          Object.defineProperty(newProto, 'format', {
+            get: function() {
+              const slot = dtfSlots.get(this);
+              if (!slot) {
+                throw new TypeError('Method get Intl.DateTimeFormat.prototype.format called on incompatible receiver');
+              }
+              const boundFormat = (date) => {
+                if (date === undefined) {
+                  date = Date.now();
+                }
+                const d = new Date(date);
+                if (isNaN(d.getTime())) {
+                  throw new RangeError('Invalid time value');
+                }
+                // Use the underlying instance if it has format
+                if (slot.instance && typeof slot.instance.format === 'function') {
+                  return slot.instance.format(d);
+                }
+                // Fallback: use toLocaleString
+                return d.toLocaleString(slot.resolvedOpts.locale);
+              };
+              // Cache the bound format function
+              Object.defineProperty(this, 'format', { value: boundFormat, writable: true, configurable: true });
+              return boundFormat;
+            },
+            enumerable: false,
+            configurable: true
+          });
+
+          // formatToParts method
+          Object.defineProperty(newProto, 'formatToParts', {
+            value: function formatToParts(date) {
+              const slot = dtfSlots.get(this);
+              if (!slot) {
+                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatToParts called on incompatible receiver');
+              }
+              if (date === undefined) {
+                date = Date.now();
+              }
+              const d = new Date(date);
+              if (isNaN(d.getTime())) {
+                throw new RangeError('Invalid time value');
+              }
+              // Use the underlying instance if it has formatToParts
+              if (slot.instance && typeof slot.instance.formatToParts === 'function') {
+                return slot.instance.formatToParts(d);
+              }
+              // Fallback: return simple parts
+              const formatted = d.toLocaleString(slot.resolvedOpts.locale);
+              return [{ type: 'literal', value: formatted }];
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          // formatRange method
+          Object.defineProperty(newProto, 'formatRange', {
+            value: function formatRange(startDate, endDate) {
+              const slot = dtfSlots.get(this);
+              if (!slot) {
+                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRange called on incompatible receiver');
+              }
+              if (startDate === undefined || endDate === undefined) {
+                throw new TypeError('startDate and endDate are required');
+              }
+              const start = new Date(startDate);
+              const end = new Date(endDate);
+              if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+                throw new RangeError('Invalid time value');
+              }
+              // Use the underlying instance if it has formatRange
+              if (slot.instance && typeof slot.instance.formatRange === 'function') {
+                return slot.instance.formatRange(start, end);
+              }
+              // Fallback
+              const opts = slot.resolvedOpts;
+              return start.toLocaleString(opts.locale) + ' – ' + end.toLocaleString(opts.locale);
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          // formatRangeToParts method
+          Object.defineProperty(newProto, 'formatRangeToParts', {
+            value: function formatRangeToParts(startDate, endDate) {
+              const slot = dtfSlots.get(this);
+              if (!slot) {
+                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRangeToParts called on incompatible receiver');
+              }
+              if (startDate === undefined || endDate === undefined) {
+                throw new TypeError('startDate and endDate are required');
+              }
+              const start = new Date(startDate);
+              const end = new Date(endDate);
+              if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+                throw new RangeError('Invalid time value');
+              }
+              // Use the underlying instance if it has formatRangeToParts
+              if (slot.instance && typeof slot.instance.formatRangeToParts === 'function') {
+                return slot.instance.formatRangeToParts(start, end);
+              }
+              // Fallback
+              return [
+                { type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }
+              ];
+            },
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          Object.defineProperty(newProto, 'constructor', {
+            value: WrappedDTF,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          Object.defineProperty(newProto, Symbol.toStringTag, {
+            value: 'Intl.DateTimeFormat',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+
+          Object.defineProperty(WrappedDTF, 'prototype', {
+            value: newProto,
+            writable: false,
+            enumerable: false,
+            configurable: false
+          });
+
+          // Replace Intl.DateTimeFormat
+          Object.defineProperty(Intl, 'DateTimeFormat', {
+            value: WrappedDTF,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const DateProto = Date.prototype;
+          
+          // Store original methods before overwriting
+          const originalToLocaleString = DateProto.toLocaleString;
+          const originalToLocaleDateString = DateProto.toLocaleDateString;
+          const originalToLocaleTimeString = DateProto.toLocaleTimeString;
+          
+          // Helper to format date parts
+          function padZero(n, len = 2) {
+            return String(n).padStart(len, '0');
+          }
+          
+          function basicFormatDate(date) {
+            const year = date.getFullYear();
+            const month = date.getMonth();
+            const day = date.getDate();
+            const hours = date.getHours();
+            const minutes = date.getMinutes();
+            const seconds = date.getSeconds();
+            
+            // Default format: M/D/YYYY
+            let datePart = `${month + 1}/${day}/${year}`;
+            
+            // Time format: h:mm:ss AM/PM
+            let hour12 = hours % 12 || 12;
+            let ampm = hours < 12 ? 'AM' : 'PM';
+            let timePart = `${hour12}:${padZero(minutes)}:${padZero(seconds)} ${ampm}`;
+            
+            return { datePart, timePart, full: `${datePart}, ${timePart}` };
+          }
+          
+          // Test if the native implementation works (store result to avoid repeated calls)
+          let toLocaleStringNeedsPolyfill = false;
+          let toLocaleDateStringNeedsPolyfill = false;
+          let toLocaleTimeStringNeedsPolyfill = false;
+          
+          const testDate = new Date(2020, 0, 1);
+          try {
+            const result = originalToLocaleString.call(testDate);
+            toLocaleStringNeedsPolyfill = typeof result !== 'string';
+          } catch (e) {
+            toLocaleStringNeedsPolyfill = true;
+          }
+          
+          try {
+            const result = originalToLocaleDateString.call(testDate);
+            toLocaleDateStringNeedsPolyfill = typeof result !== 'string';
+          } catch (e) {
+            toLocaleDateStringNeedsPolyfill = true;
+          }
+          
+          try {
+            const result = originalToLocaleTimeString.call(testDate);
+            toLocaleTimeStringNeedsPolyfill = typeof result !== 'string';
+          } catch (e) {
+            toLocaleTimeStringNeedsPolyfill = true;
+          }
+          
+          // toLocaleString
+          if (toLocaleStringNeedsPolyfill) {
+            const toLocaleStringFn = function toLocaleString(locales, options) {
+              if (this === null || this === undefined) {
+                throw new TypeError('Date.prototype.toLocaleString called on null or undefined');
+              }
+              if (!(this instanceof Date)) {
+                throw new TypeError('this is not a Date object');
+              }
+              if (isNaN(this.getTime())) {
+                return 'Invalid Date';
+              }
+              
+              const { full } = basicFormatDate(this);
+              return full;
+            };
+            Object.defineProperty(DateProto, 'toLocaleString', {
+              value: toLocaleStringFn,
+              writable: true,
+              enumerable: false,
+              configurable: true
+            });
+          }
+          
+          // toLocaleDateString
+          if (toLocaleDateStringNeedsPolyfill) {
+            const toLocaleDateStringFn = function toLocaleDateString(locales, options) {
+              if (this === null || this === undefined) {
+                throw new TypeError('Date.prototype.toLocaleDateString called on null or undefined');
+              }
+              if (!(this instanceof Date)) {
+                throw new TypeError('this is not a Date object');
+              }
+              if (isNaN(this.getTime())) {
+                return 'Invalid Date';
+              }
+              
+              const { datePart } = basicFormatDate(this);
+              return datePart;
+            };
+            Object.defineProperty(DateProto, 'toLocaleDateString', {
+              value: toLocaleDateStringFn,
+              writable: true,
+              enumerable: false,
+              configurable: true
+            });
+          }
+          
+          // toLocaleTimeString
+          if (toLocaleTimeStringNeedsPolyfill) {
+            const toLocaleTimeStringFn = function toLocaleTimeString(locales, options) {
+              if (this === null || this === undefined) {
+                throw new TypeError('Date.prototype.toLocaleTimeString called on null or undefined');
+              }
+              if (!(this instanceof Date)) {
+                throw new TypeError('this is not a Date object');
+              }
+              if (isNaN(this.getTime())) {
+                return 'Invalid Date';
+              }
+              
+              const { timePart } = basicFormatDate(this);
+              return timePart;
+            };
+            Object.defineProperty(DateProto, 'toLocaleTimeString', {
+              value: toLocaleTimeStringFn,
+              writable: true,
+              enumerable: false,
+              configurable: true
+            });
+          }
         })();
         "#,
     ))?;
