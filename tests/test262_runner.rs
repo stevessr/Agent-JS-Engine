@@ -207,7 +207,7 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     }
     if case_path.contains(
         "/intl402/BigInt/prototype/toLocaleString/returns-same-results-as-NumberFormat.js",
-    ) || case_path.contains("/intl402/BigInt/prototype/toLocaleString/taint-Intl-NumberFormat.js")
+    )
     {
         return Some("unsupported behavior: Intl NumberFormat percent/currency edge");
     }
