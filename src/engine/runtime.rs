@@ -476,6 +476,61 @@ impl fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+/// A REPL session that maintains JavaScript context across evaluations.
+pub struct ReplSession {
+    context: Context,
+    strict: bool,
+}
+
+impl ReplSession {
+    /// Create a new REPL session with the given working directory and options.
+    pub fn new(cwd: &Path, options: &EvalOptions) -> Result<Self, EngineError> {
+        let loader = Rc::new(
+            CompatModuleLoader::new(cwd)
+                .map_err(|err| convert_error(err, &mut Context::default()))?,
+        );
+        let mut context = Context::builder()
+            .can_block(options.can_block)
+            .module_loader(loader)
+            .build()
+            .map_err(|err| convert_error(err, &mut Context::default()))?;
+
+        if let Some(limit) = options.loop_iteration_limit {
+            context.runtime_limits_mut().set_loop_iteration_limit(limit);
+        }
+        install_host_globals(&mut context).map_err(|err| convert_error(err, &mut context))?;
+
+        if options.bootstrap_test262 {
+            ensure_agent_runtime(&mut context);
+            install_test262_globals(&mut context)
+                .map_err(|err| convert_error(err, &mut context))?;
+        }
+
+        Ok(Self {
+            context,
+            strict: options.strict,
+        })
+    }
+
+    /// Evaluate JavaScript code in the REPL session, preserving state.
+    pub fn eval(&mut self, source: &str) -> Result<EvalOutput, EngineError> {
+        reset_print_buffer();
+
+        let source = finalize_script_source(source, self.strict, None)?;
+        let result = self
+            .context
+            .eval(Source::from_bytes(source.as_str()))
+            .map_err(|err| convert_error(err, &mut self.context))?;
+
+        drain_jobs_for_eval(&mut self.context)?;
+
+        Ok(EvalOutput {
+            value: display_value(&result, &mut self.context),
+            printed: take_print_buffer(),
+        })
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct JsEngine;
 
@@ -2536,6 +2591,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         2,
         NativeFunction::from_fn_ptr(host_dynamic_import_defer),
     )?;
+    install_console_object(context)?;
     install_disposable_stack_builtins(context)?;
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
@@ -2559,6 +2615,309 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_intl_duration_format_polyfill(context)?;
     install_intl_supported_values_of(context)?;
     Ok(())
+}
+
+fn install_console_object(context: &mut Context) -> JsResult<()> {
+    let console = ObjectInitializer::new(context)
+        .function(NativeFunction::from_fn_ptr(console_log), js_string!("log"), 1)
+        .function(NativeFunction::from_fn_ptr(console_log), js_string!("info"), 1)
+        .function(NativeFunction::from_fn_ptr(console_log), js_string!("debug"), 1)
+        .function(NativeFunction::from_fn_ptr(console_warn), js_string!("warn"), 1)
+        .function(NativeFunction::from_fn_ptr(console_error), js_string!("error"), 1)
+        .function(NativeFunction::from_fn_ptr(console_dir), js_string!("dir"), 1)
+        .function(NativeFunction::from_fn_ptr(console_assert), js_string!("assert"), 1)
+        .function(NativeFunction::from_fn_ptr(console_clear), js_string!("clear"), 0)
+        .function(NativeFunction::from_fn_ptr(console_count), js_string!("count"), 0)
+        .function(NativeFunction::from_fn_ptr(console_count_reset), js_string!("countReset"), 0)
+        .function(NativeFunction::from_fn_ptr(console_group), js_string!("group"), 0)
+        .function(NativeFunction::from_fn_ptr(console_group), js_string!("groupCollapsed"), 0)
+        .function(NativeFunction::from_fn_ptr(console_group_end), js_string!("groupEnd"), 0)
+        .function(NativeFunction::from_fn_ptr(console_table), js_string!("table"), 1)
+        .function(NativeFunction::from_fn_ptr(console_time), js_string!("time"), 0)
+        .function(NativeFunction::from_fn_ptr(console_time_log), js_string!("timeLog"), 0)
+        .function(NativeFunction::from_fn_ptr(console_time_end), js_string!("timeEnd"), 0)
+        .function(NativeFunction::from_fn_ptr(console_trace), js_string!("trace"), 0)
+        .build();
+
+    context
+        .global_object()
+        .set(js_string!("console"), console, true, context)?;
+    Ok(())
+}
+
+thread_local! {
+    static CONSOLE_COUNTERS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    static CONSOLE_TIMERS: RefCell<HashMap<String, Instant>> = RefCell::new(HashMap::new());
+    static CONSOLE_GROUP_DEPTH: RefCell<usize> = const { RefCell::new(0) };
+}
+
+fn console_format_args(args: &[BoaValue], context: &mut Context) -> JsResult<String> {
+    let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+    let message = args
+        .iter()
+        .map(|value| {
+            value
+                .to_string(context)
+                .map(|text| text.to_std_string_escaped())
+        })
+        .collect::<JsResult<Vec<_>>>()?
+        .join(" ");
+    Ok(format!("{indent}{message}"))
+}
+
+fn console_log(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let message = console_format_args(args, context)?;
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
+    Ok(BoaValue::undefined())
+}
+
+fn console_warn(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let message = console_format_args(args, context)?;
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("[WARN] {message}")));
+    Ok(BoaValue::undefined())
+}
+
+fn console_error(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let message = console_format_args(args, context)?;
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("[ERROR] {message}")));
+    Ok(BoaValue::undefined())
+}
+
+fn console_dir(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let message = console_format_args(args, context)?;
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
+    Ok(BoaValue::undefined())
+}
+
+fn console_assert(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let condition = args.get_or_undefined(0).to_boolean();
+    if !condition {
+        let msg_args = if args.len() > 1 { &args[1..] } else { &[] };
+        let message = if msg_args.is_empty() {
+            "Assertion failed".to_string()
+        } else {
+            format!("Assertion failed: {}", console_format_args(msg_args, context)?)
+        };
+        PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
+    }
+    Ok(BoaValue::undefined())
+}
+
+fn console_clear(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _: &mut Context,
+) -> JsResult<BoaValue> {
+    // Just log a clear marker
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push("\x1b[2J\x1b[H".to_string()));
+    Ok(BoaValue::undefined())
+}
+
+fn console_count(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let label = args
+        .get(0)
+        .filter(|v| !v.is_undefined())
+        .map(|v| v.to_string(context).map(|s| s.to_std_string_escaped()))
+        .transpose()?
+        .unwrap_or_else(|| "default".to_string());
+
+    let count = CONSOLE_COUNTERS.with(|counters| {
+        let mut counters = counters.borrow_mut();
+        let count = counters.entry(label.clone()).or_insert(0);
+        *count += 1;
+        *count
+    });
+
+    let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("{indent}{label}: {count}")));
+    Ok(BoaValue::undefined())
+}
+
+fn console_count_reset(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let label = args
+        .get(0)
+        .filter(|v| !v.is_undefined())
+        .map(|v| v.to_string(context).map(|s| s.to_std_string_escaped()))
+        .transpose()?
+        .unwrap_or_else(|| "default".to_string());
+
+    CONSOLE_COUNTERS.with(|counters| {
+        counters.borrow_mut().remove(&label);
+    });
+    Ok(BoaValue::undefined())
+}
+
+fn console_group(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    if !args.is_empty() {
+        let message = console_format_args(args, context)?;
+        PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
+    }
+    CONSOLE_GROUP_DEPTH.with(|d| *d.borrow_mut() += 1);
+    Ok(BoaValue::undefined())
+}
+
+fn console_group_end(
+    _: &BoaValue,
+    _: &[BoaValue],
+    _: &mut Context,
+) -> JsResult<BoaValue> {
+    CONSOLE_GROUP_DEPTH.with(|d| {
+        let mut depth = d.borrow_mut();
+        if *depth > 0 {
+            *depth -= 1;
+        }
+    });
+    Ok(BoaValue::undefined())
+}
+
+fn console_table(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    // Simple implementation: just log the value
+    let message = console_format_args(args, context)?;
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
+    Ok(BoaValue::undefined())
+}
+
+fn console_time(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let label = args
+        .get(0)
+        .filter(|v| !v.is_undefined())
+        .map(|v| v.to_string(context).map(|s| s.to_std_string_escaped()))
+        .transpose()?
+        .unwrap_or_else(|| "default".to_string());
+
+    CONSOLE_TIMERS.with(|timers| {
+        timers.borrow_mut().insert(label, Instant::now());
+    });
+    Ok(BoaValue::undefined())
+}
+
+fn console_time_log(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let label = args
+        .get(0)
+        .filter(|v| !v.is_undefined())
+        .map(|v| v.to_string(context).map(|s| s.to_std_string_escaped()))
+        .transpose()?
+        .unwrap_or_else(|| "default".to_string());
+
+    let elapsed = CONSOLE_TIMERS.with(|timers| {
+        timers.borrow().get(&label).map(|start| start.elapsed())
+    });
+
+    if let Some(elapsed) = elapsed {
+        let extra = if args.len() > 1 {
+            format!(" {}", console_format_args(&args[1..], context)?)
+        } else {
+            String::new()
+        };
+        let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+        PRINT_BUFFER.with(|buffer| {
+            buffer.borrow_mut().push(format!(
+                "{indent}{label}: {:.3}ms{extra}",
+                elapsed.as_secs_f64() * 1000.0
+            ))
+        });
+    } else {
+        let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+        PRINT_BUFFER.with(|buffer| {
+            buffer
+                .borrow_mut()
+                .push(format!("{indent}Timer '{label}' does not exist"))
+        });
+    }
+    Ok(BoaValue::undefined())
+}
+
+fn console_time_end(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let label = args
+        .get(0)
+        .filter(|v| !v.is_undefined())
+        .map(|v| v.to_string(context).map(|s| s.to_std_string_escaped()))
+        .transpose()?
+        .unwrap_or_else(|| "default".to_string());
+
+    let elapsed = CONSOLE_TIMERS.with(|timers| timers.borrow_mut().remove(&label));
+
+    if let Some(start) = elapsed {
+        let elapsed = start.elapsed();
+        let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+        PRINT_BUFFER.with(|buffer| {
+            buffer.borrow_mut().push(format!(
+                "{indent}{label}: {:.3}ms",
+                elapsed.as_secs_f64() * 1000.0
+            ))
+        });
+    } else {
+        let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+        PRINT_BUFFER.with(|buffer| {
+            buffer
+                .borrow_mut()
+                .push(format!("{indent}Timer '{label}' does not exist"))
+        });
+    }
+    Ok(BoaValue::undefined())
+}
+
+fn console_trace(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let message = if args.is_empty() {
+        "Trace".to_string()
+    } else {
+        format!("Trace: {}", console_format_args(args, context)?)
+    };
+    let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
+    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("{indent}{message}")));
+    Ok(BoaValue::undefined())
 }
 
 fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
@@ -4355,16 +4714,24 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               throw e;
             }
 
-            // Determine locale
+            // Determine locale - consistent behavior for undefined and empty array
             let locale;
+            const defaultLocale = (() => {
+              try {
+                return new Intl.NumberFormat().resolvedOptions().locale || 'en-US';
+              } catch (e) {
+                return 'en-US';
+              }
+            })();
+            
             if (locales === undefined) {
-              locale = new Intl.NumberFormat().resolvedOptions().locale || 'en-US';
+              locale = defaultLocale;
             } else if (typeof locales === 'string') {
-              locale = Intl.getCanonicalLocales(locales)[0] || 'en-US';
+              locale = Intl.getCanonicalLocales(locales)[0] || defaultLocale;
             } else if (Array.isArray(locales)) {
-              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : 'en-US';
+              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : defaultLocale;
             } else {
-              locale = 'en-US';
+              locale = defaultLocale;
             }
 
             // Determine if we need to apply default date/time format
@@ -4604,39 +4971,28 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return parts.join(', ');
           }
 
-          // format getter (returns a bound function)
-          Object.defineProperty(newProto, 'format', {
-            get: function() {
-              const slot = dtfSlots.get(this);
-              if (!slot) {
-                throw new TypeError('Method get Intl.DateTimeFormat.prototype.format called on incompatible receiver');
+          // Helper to make non-constructable getter/function
+          function makeNonConstructableAccessor(impl, name) {
+            const arrowWrapper = (...args) => impl.apply(undefined, args);
+            const handler = {
+              apply(target, thisArg, args) {
+                return impl.apply(thisArg, args);
               }
-              const boundFormat = (date) => {
-                if (date === undefined) {
-                  date = Date.now();
-                }
-                const d = new Date(date);
-                if (isNaN(d.getTime())) {
-                  throw new RangeError('Invalid time value');
-                }
-                // Use our custom formatting that respects resolved options
-                return formatDateWithOptions(d, slot.resolvedOpts);
-              };
-              // Cache the bound format function
-              Object.defineProperty(this, 'format', { value: boundFormat, writable: true, configurable: true });
-              return boundFormat;
-            },
-            enumerable: false,
-            configurable: true
-          });
+            };
+            const proxy = new Proxy(arrowWrapper, handler);
+            Object.defineProperty(proxy, 'name', { value: name, configurable: true });
+            Object.defineProperty(proxy, 'length', { value: 0, writable: false, enumerable: false, configurable: true });
+            return proxy;
+          }
 
-          // formatToParts method
-          Object.defineProperty(newProto, 'formatToParts', {
-            value: function formatToParts(date) {
-              const slot = dtfSlots.get(this);
-              if (!slot) {
-                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatToParts called on incompatible receiver');
-              }
+          // format getter (returns a bound function)
+          // Per spec, the getter must not be a constructor and must not have prototype
+          const formatGetterImpl = function() {
+            const slot = dtfSlots.get(this);
+            if (!slot) {
+              throw new TypeError('Method get Intl.DateTimeFormat.prototype.format called on incompatible receiver');
+            }
+            const boundFormat = (date) => {
               if (date === undefined) {
                 date = Date.now();
               }
@@ -4644,24 +5000,54 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (isNaN(d.getTime())) {
                 throw new RangeError('Invalid time value');
               }
-              // Use the underlying instance if it has formatToParts
-              if (slot.instance && typeof slot.instance.formatToParts === 'function') {
-                return slot.instance.formatToParts(d);
-              }
-              // Fallback: return simple parts
-              const formatted = d.toLocaleString(slot.resolvedOpts.locale);
-              return [{ type: 'literal', value: formatted }];
-            },
+              // Use our custom formatting that respects resolved options
+              return formatDateWithOptions(d, slot.resolvedOpts);
+            };
+            Object.defineProperty(boundFormat, 'name', { value: '', configurable: true });
+            // Cache the bound format function
+            Object.defineProperty(this, 'format', { value: boundFormat, writable: true, configurable: true });
+            return boundFormat;
+          };
+          const formatGetter = makeNonConstructableAccessor(formatGetterImpl, 'get format');
+          
+          Object.defineProperty(newProto, 'format', {
+            get: formatGetter,
+            enumerable: false,
+            configurable: true
+          });
+
+          // formatToParts method
+          const formatToPartsImpl = function(date) {
+            const slot = dtfSlots.get(this);
+            if (!slot) {
+              throw new TypeError('Method Intl.DateTimeFormat.prototype.formatToParts called on incompatible receiver');
+            }
+            if (date === undefined) {
+              date = Date.now();
+            }
+            const d = new Date(date);
+            if (isNaN(d.getTime())) {
+              throw new RangeError('Invalid time value');
+            }
+            // Use the underlying instance if it has formatToParts
+            if (slot.instance && typeof slot.instance.formatToParts === 'function') {
+              return slot.instance.formatToParts(d);
+            }
+            // Fallback: return simple parts
+            const formatted = d.toLocaleString(slot.resolvedOpts.locale);
+            return [{ type: 'literal', value: formatted }];
+          };
+          Object.defineProperty(newProto, 'formatToParts', {
+            value: makeNonConstructableAccessor(formatToPartsImpl, 'formatToParts'),
             writable: true,
             enumerable: false,
             configurable: true
           });
 
           // formatRange method
-          Object.defineProperty(newProto, 'formatRange', {
-            value: function formatRange(startDate, endDate) {
-              const slot = dtfSlots.get(this);
-              if (!slot) {
+          const formatRangeImpl = function(startDate, endDate) {
+            const slot = dtfSlots.get(this);
+            if (!slot) {
                 throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRange called on incompatible receiver');
               }
               if (startDate === undefined || endDate === undefined) {
@@ -4679,36 +5065,39 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               // Fallback
               const opts = slot.resolvedOpts;
               return start.toLocaleString(opts.locale) + ' – ' + end.toLocaleString(opts.locale);
-            },
+            };
+          Object.defineProperty(newProto, 'formatRange', {
+            value: makeNonConstructableAccessor(formatRangeImpl, 'formatRange'),
             writable: true,
             enumerable: false,
             configurable: true
           });
 
           // formatRangeToParts method
+          const formatRangeToPartsImpl = function(startDate, endDate) {
+            const slot = dtfSlots.get(this);
+            if (!slot) {
+              throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRangeToParts called on incompatible receiver');
+            }
+            if (startDate === undefined || endDate === undefined) {
+              throw new TypeError('startDate and endDate are required');
+            }
+            const start = new Date(startDate);
+            const end = new Date(endDate);
+            if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+              throw new RangeError('Invalid time value');
+            }
+            // Use the underlying instance if it has formatRangeToParts
+            if (slot.instance && typeof slot.instance.formatRangeToParts === 'function') {
+              return slot.instance.formatRangeToParts(start, end);
+            }
+            // Fallback
+            return [
+              { type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }
+            ];
+          };
           Object.defineProperty(newProto, 'formatRangeToParts', {
-            value: function formatRangeToParts(startDate, endDate) {
-              const slot = dtfSlots.get(this);
-              if (!slot) {
-                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRangeToParts called on incompatible receiver');
-              }
-              if (startDate === undefined || endDate === undefined) {
-                throw new TypeError('startDate and endDate are required');
-              }
-              const start = new Date(startDate);
-              const end = new Date(endDate);
-              if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-                throw new RangeError('Invalid time value');
-              }
-              // Use the underlying instance if it has formatRangeToParts
-              if (slot.instance && typeof slot.instance.formatRangeToParts === 'function') {
-                return slot.instance.formatRangeToParts(start, end);
-              }
-              // Fallback
-              return [
-                { type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }
-              ];
-            },
+            value: makeNonConstructableAccessor(formatRangeToPartsImpl, 'formatRangeToParts'),
             writable: true,
             enumerable: false,
             configurable: true
@@ -4786,9 +5175,27 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
             toLocaleTimeStringNeedsPolyfill = true;
           }
           
+          // Helper to create a non-constructable function with proper name
+          // Uses a Proxy on an arrow function (which has no [[Construct]])
+          function makeNonConstructable(impl, name) {
+            // Create an arrow function that calls impl with proper this
+            const arrowWrapper = (...args) => impl.apply(undefined, args);
+            
+            const handler = {
+              apply(target, thisArg, args) {
+                // Call impl with the correct this
+                return impl.apply(thisArg, args);
+              }
+            };
+            const proxy = new Proxy(arrowWrapper, handler);
+            Object.defineProperty(proxy, 'name', { value: name, configurable: true });
+            Object.defineProperty(proxy, 'length', { value: 0, writable: false, enumerable: false, configurable: true });
+            return proxy;
+          }
+          
           // toLocaleString - uses DateTimeFormat with date and time components
           if (toLocaleStringNeedsPolyfill) {
-            const toLocaleStringFn = function toLocaleString(locales, options) {
+            const toLocaleStringImpl = function(locales, options) {
               if (this === null || this === undefined) {
                 throw new TypeError('Date.prototype.toLocaleString called on null or undefined');
               }
@@ -4838,14 +5245,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
               return dtf.format(this);
             };
-            // Set length to 0 to match built-in behavior
-            Object.defineProperty(toLocaleStringFn, 'length', {
-              value: 0,
-              writable: false,
-              enumerable: false,
-              configurable: true
-            });
-            delete toLocaleStringFn.prototype;
+            const toLocaleStringFn = makeNonConstructable(toLocaleStringImpl, 'toLocaleString');
             Object.defineProperty(DateProto, 'toLocaleString', {
               value: toLocaleStringFn,
               writable: true,
@@ -4869,7 +5269,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
           // toLocaleDateString - uses DateTimeFormat with date components
           // Per ECMA-402: Always includes date components, adds them if missing
           if (toLocaleDateStringNeedsPolyfill) {
-            const toLocaleDateStringFn = function toLocaleDateString(locales, options) {
+            const toLocaleDateStringImpl = function(locales, options) {
               if (this === null || this === undefined) {
                 throw new TypeError('Date.prototype.toLocaleDateString called on null or undefined');
               }
@@ -4909,14 +5309,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
               return dtf.format(this);
             };
-            // Set length to 0 to match built-in behavior
-            Object.defineProperty(toLocaleDateStringFn, 'length', {
-              value: 0,
-              writable: false,
-              enumerable: false,
-              configurable: true
-            });
-            delete toLocaleDateStringFn.prototype;
+            const toLocaleDateStringFn = makeNonConstructable(toLocaleDateStringImpl, 'toLocaleDateString');
             Object.defineProperty(DateProto, 'toLocaleDateString', {
               value: toLocaleDateStringFn,
               writable: true,
@@ -4928,7 +5321,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
           // toLocaleTimeString - uses DateTimeFormat with time components
           // Per ECMA-402: Always includes time components, adds them if missing
           if (toLocaleTimeStringNeedsPolyfill) {
-            const toLocaleTimeStringFn = function toLocaleTimeString(locales, options) {
+            const toLocaleTimeStringImpl = function(locales, options) {
               if (this === null || this === undefined) {
                 throw new TypeError('Date.prototype.toLocaleTimeString called on null or undefined');
               }
@@ -4968,14 +5361,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
               return dtf.format(this);
             };
-            // Set length to 0 to match built-in behavior
-            Object.defineProperty(toLocaleTimeStringFn, 'length', {
-              value: 0,
-              writable: false,
-              enumerable: false,
-              configurable: true
-            });
-            delete toLocaleTimeStringFn.prototype;
+            const toLocaleTimeStringFn = makeNonConstructable(toLocaleTimeStringImpl, 'toLocaleTimeString');
             Object.defineProperty(DateProto, 'toLocaleTimeString', {
               value: toLocaleTimeStringFn,
               writable: true,
