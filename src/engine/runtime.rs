@@ -4625,9 +4625,27 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return Math.floor(value);
           }
 
+          // OrdinaryHasInstance implementation that doesn't use Symbol.hasInstance
+          function ordinaryHasInstance(C, O) {
+            if (typeof C !== 'function') return false;
+            if (typeof O !== 'object' || O === null) return false;
+            const P = C.prototype;
+            if (typeof P !== 'object' || P === null) {
+              throw new TypeError('Function has non-object prototype in instanceof check');
+            }
+            // Walk the prototype chain
+            let proto = Object.getPrototypeOf(O);
+            while (proto !== null) {
+              if (proto === P) return true;
+              proto = Object.getPrototypeOf(proto);
+            }
+            return false;
+          }
+
           // Wrap the constructor to capture options
           const WrappedDTF = function DateTimeFormat(locales, options) {
-            if (!(this instanceof WrappedDTF) && new.target === undefined) {
+            // Use OrdinaryHasInstance instead of instanceof to avoid Symbol.hasInstance lookup
+            if (!ordinaryHasInstance(WrappedDTF, this) && new.target === undefined) {
               return new WrappedDTF(locales, options);
             }
 
@@ -4961,6 +4979,24 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               
               if (opts.second !== undefined) {
                 timeParts.push(seconds.toString().padStart(2, '0'));
+              }
+              
+              // Handle fractionalSecondDigits - add milliseconds portion
+              if (opts.fractionalSecondDigits !== undefined) {
+                const ms = d.getMilliseconds();
+                const fractional = ms.toString().padStart(3, '0');
+                const digits = opts.fractionalSecondDigits;
+                // Truncate to requested precision (round down)
+                const truncated = fractional.substring(0, digits);
+                // If we have seconds, append with dot, otherwise add to last part
+                if (opts.second !== undefined) {
+                  const lastIdx = timeParts.length - 1;
+                  timeParts[lastIdx] = timeParts[lastIdx] + '.' + truncated;
+                } else {
+                  // Per spec, fractionalSecondDigits requires second to be present
+                  // but if not, just append it
+                  timeParts.push('.' + truncated);
+                }
               }
               
               if (timeParts.length > 0) {
