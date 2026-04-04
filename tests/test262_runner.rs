@@ -115,9 +115,7 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case.metadata.has_feature("IsHTMLDDA") {
         return Some("unsupported feature: IsHTMLDDA");
     }
-    if case.metadata.has_feature("iterator-helpers") {
-        return Some("unsupported feature: iterator-helpers");
-    }
+    // iterator-helpers is now implemented via polyfill
     if case.metadata.has_feature("joint-iteration") {
         return Some("unsupported feature: joint-iteration");
     }

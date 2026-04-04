@@ -2614,6 +2614,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_intl_relative_time_format_polyfill(context)?;
     install_intl_duration_format_polyfill(context)?;
     install_intl_supported_values_of(context)?;
+    install_iterator_helpers(context)?;
     Ok(())
 }
 
@@ -6269,6 +6270,511 @@ fn install_intl_supported_values_of(context: &mut Context) -> JsResult<()> {
           
           Object.defineProperty(Intl, 'supportedValuesOf', {
             value: supportedValuesOf,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          // Check if Iterator already exists and has helpers
+          if (typeof globalThis.Iterator === 'function' && 
+              typeof Iterator.prototype.map === 'function') {
+            return;
+          }
+
+          // Get the %IteratorPrototype%
+          const IteratorPrototype = Object.getPrototypeOf(
+            Object.getPrototypeOf([][Symbol.iterator]())
+          );
+
+          // WrapForValidIteratorPrototype - internal prototype for wrapper iterators
+          const WrapForValidIteratorPrototype = Object.create(IteratorPrototype);
+
+          // Helper to get iterator record
+          function GetIteratorDirect(obj) {
+            if (typeof obj !== 'object' || obj === null) {
+              throw new TypeError('Iterator must be an object');
+            }
+            const nextMethod = obj.next;
+            if (typeof nextMethod !== 'function') {
+              throw new TypeError('Iterator next method must be callable');
+            }
+            return { iterator: obj, nextMethod, done: false };
+          }
+
+          // Helper to iterate and close on error/completion
+          function IteratorClose(iteratorRecord, completion) {
+            const iterator = iteratorRecord.iterator;
+            const returnMethod = iterator.return;
+            if (returnMethod === undefined) {
+              return completion;
+            }
+            let innerResult;
+            try {
+              innerResult = returnMethod.call(iterator);
+            } catch (e) {
+              if (completion.type === 'throw') {
+                return completion;
+              }
+              throw e;
+            }
+            if (completion.type === 'throw') {
+              return completion;
+            }
+            if (typeof innerResult !== 'object' || innerResult === null) {
+              throw new TypeError('Iterator return must return an object');
+            }
+            return completion;
+          }
+
+          // Iterator constructor
+          function Iterator() {
+            if (new.target === undefined) {
+              throw new TypeError('Constructor Iterator requires "new"');
+            }
+            if (new.target === Iterator) {
+              throw new TypeError('Abstract class Iterator not directly constructable');
+            }
+          }
+
+          // Iterator.prototype setup
+          const IteratorHelperPrototype = Object.create(IteratorPrototype);
+
+          Object.defineProperty(IteratorHelperPrototype, Symbol.toStringTag, {
+            value: 'Iterator Helper',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+
+          // Create a helper iterator wrapper
+          function createIteratorHelper(underlyingIterator, nextImpl, returnImpl) {
+            const helper = Object.create(IteratorHelperPrototype);
+            const state = { 
+              underlying: underlyingIterator, 
+              done: false,
+              nextImpl,
+              returnImpl
+            };
+            
+            helper.next = function() {
+              if (state.done) {
+                return { value: undefined, done: true };
+              }
+              try {
+                return state.nextImpl(state);
+              } catch (e) {
+                state.done = true;
+                throw e;
+              }
+            };
+            
+            helper.return = function(value) {
+              state.done = true;
+              if (state.returnImpl) {
+                return state.returnImpl(state, value);
+              }
+              const underlying = state.underlying;
+              if (underlying && typeof underlying.return === 'function') {
+                return underlying.return(value);
+              }
+              return { value: value, done: true };
+            };
+            
+            return helper;
+          }
+
+          // Iterator.prototype.map
+          IteratorPrototype.map = function map(mapper) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.map called on non-object');
+            }
+            if (typeof mapper !== 'function') {
+              throw new TypeError('mapper must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            return createIteratorHelper(iterated.iterator, (state) => {
+              const next = state.underlying.next();
+              if (next.done) {
+                state.done = true;
+                return { value: undefined, done: true };
+              }
+              const mapped = mapper(next.value, counter++);
+              return { value: mapped, done: false };
+            });
+          };
+
+          // Iterator.prototype.filter
+          IteratorPrototype.filter = function filter(predicate) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.filter called on non-object');
+            }
+            if (typeof predicate !== 'function') {
+              throw new TypeError('predicate must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            return createIteratorHelper(iterated.iterator, (state) => {
+              while (true) {
+                const next = state.underlying.next();
+                if (next.done) {
+                  state.done = true;
+                  return { value: undefined, done: true };
+                }
+                if (predicate(next.value, counter++)) {
+                  return { value: next.value, done: false };
+                }
+              }
+            });
+          };
+
+          // Iterator.prototype.take
+          IteratorPrototype.take = function take(limit) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.take called on non-object');
+            }
+            const numLimit = Number(limit);
+            if (Number.isNaN(numLimit)) {
+              throw new RangeError('limit must be a number');
+            }
+            if (numLimit < 0) {
+              throw new RangeError('limit must be non-negative');
+            }
+            const intLimit = Math.trunc(numLimit);
+            const iterated = GetIteratorDirect(this);
+            let remaining = intLimit;
+            
+            return createIteratorHelper(iterated.iterator, (state) => {
+              if (remaining <= 0) {
+                state.done = true;
+                // Close underlying iterator
+                if (typeof state.underlying.return === 'function') {
+                  state.underlying.return();
+                }
+                return { value: undefined, done: true };
+              }
+              remaining--;
+              const next = state.underlying.next();
+              if (next.done) {
+                state.done = true;
+              }
+              return next;
+            });
+          };
+
+          // Iterator.prototype.drop
+          IteratorPrototype.drop = function drop(limit) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.drop called on non-object');
+            }
+            const numLimit = Number(limit);
+            if (Number.isNaN(numLimit)) {
+              throw new RangeError('limit must be a number');
+            }
+            if (numLimit < 0) {
+              throw new RangeError('limit must be non-negative');
+            }
+            const intLimit = Math.trunc(numLimit);
+            const iterated = GetIteratorDirect(this);
+            let remaining = intLimit;
+            
+            return createIteratorHelper(iterated.iterator, (state) => {
+              // Skip the first 'limit' values
+              while (remaining > 0) {
+                const next = state.underlying.next();
+                if (next.done) {
+                  state.done = true;
+                  return { value: undefined, done: true };
+                }
+                remaining--;
+              }
+              const next = state.underlying.next();
+              if (next.done) {
+                state.done = true;
+              }
+              return next;
+            });
+          };
+
+          // Iterator.prototype.flatMap
+          IteratorPrototype.flatMap = function flatMap(mapper) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.flatMap called on non-object');
+            }
+            if (typeof mapper !== 'function') {
+              throw new TypeError('mapper must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            let innerIterator = null;
+            
+            return createIteratorHelper(iterated.iterator, (state) => {
+              while (true) {
+                // If we have an inner iterator, consume it first
+                if (innerIterator !== null) {
+                  const innerNext = innerIterator.next();
+                  if (!innerNext.done) {
+                    return { value: innerNext.value, done: false };
+                  }
+                  innerIterator = null;
+                }
+                
+                // Get next from outer iterator
+                const next = state.underlying.next();
+                if (next.done) {
+                  state.done = true;
+                  return { value: undefined, done: true };
+                }
+                
+                // Map and get inner iterator
+                const mapped = mapper(next.value, counter++);
+                if (mapped != null && typeof mapped[Symbol.iterator] === 'function') {
+                  innerIterator = mapped[Symbol.iterator]();
+                } else if (mapped != null && typeof mapped.next === 'function') {
+                  innerIterator = mapped;
+                } else {
+                  throw new TypeError('flatMap mapper must return an iterable or iterator');
+                }
+              }
+            });
+          };
+
+          // Iterator.prototype.forEach
+          IteratorPrototype.forEach = function forEach(fn) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.forEach called on non-object');
+            }
+            if (typeof fn !== 'function') {
+              throw new TypeError('callback must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return undefined;
+              }
+              fn(next.value, counter++);
+            }
+          };
+
+          // Iterator.prototype.some
+          IteratorPrototype.some = function some(predicate) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.some called on non-object');
+            }
+            if (typeof predicate !== 'function') {
+              throw new TypeError('predicate must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return false;
+              }
+              if (predicate(next.value, counter++)) {
+                // Close iterator
+                if (typeof iterated.iterator.return === 'function') {
+                  iterated.iterator.return();
+                }
+                return true;
+              }
+            }
+          };
+
+          // Iterator.prototype.every
+          IteratorPrototype.every = function every(predicate) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.every called on non-object');
+            }
+            if (typeof predicate !== 'function') {
+              throw new TypeError('predicate must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return true;
+              }
+              if (!predicate(next.value, counter++)) {
+                // Close iterator
+                if (typeof iterated.iterator.return === 'function') {
+                  iterated.iterator.return();
+                }
+                return false;
+              }
+            }
+          };
+
+          // Iterator.prototype.find
+          IteratorPrototype.find = function find(predicate) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.find called on non-object');
+            }
+            if (typeof predicate !== 'function') {
+              throw new TypeError('predicate must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return undefined;
+              }
+              if (predicate(next.value, counter++)) {
+                // Close iterator
+                if (typeof iterated.iterator.return === 'function') {
+                  iterated.iterator.return();
+                }
+                return next.value;
+              }
+            }
+          };
+
+          // Iterator.prototype.reduce
+          IteratorPrototype.reduce = function reduce(reducer, ...args) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.reduce called on non-object');
+            }
+            if (typeof reducer !== 'function') {
+              throw new TypeError('reducer must be a function');
+            }
+            const iterated = GetIteratorDirect(this);
+            let counter = 0;
+            let accumulator;
+            
+            if (args.length === 0) {
+              // No initial value - use first element
+              const first = iterated.iterator.next();
+              if (first.done) {
+                throw new TypeError('Reduce of empty iterator with no initial value');
+              }
+              accumulator = first.value;
+              counter = 1;
+            } else {
+              accumulator = args[0];
+            }
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return accumulator;
+              }
+              accumulator = reducer(accumulator, next.value, counter++);
+            }
+          };
+
+          // Iterator.prototype.toArray
+          IteratorPrototype.toArray = function toArray() {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Iterator.prototype.toArray called on non-object');
+            }
+            const iterated = GetIteratorDirect(this);
+            const result = [];
+            
+            while (true) {
+              const next = iterated.iterator.next();
+              if (next.done) {
+                return result;
+              }
+              result.push(next.value);
+            }
+          };
+
+          // Iterator.prototype[Symbol.iterator]
+          IteratorPrototype[Symbol.iterator] = function() {
+            return this;
+          };
+
+          // Iterator.prototype[Symbol.dispose] (for using)
+          IteratorPrototype[Symbol.dispose] = function() {
+            if (typeof this.return === 'function') {
+              this.return();
+            }
+          };
+
+          // Iterator.from static method
+          Iterator.from = function from(obj) {
+            if (typeof obj !== 'object' && typeof obj !== 'string') {
+              throw new TypeError('Iterator.from requires an object or string');
+            }
+            if (obj === null) {
+              throw new TypeError('Iterator.from requires an object or string');
+            }
+
+            // Check if already an iterator
+            let iterator;
+            const iteratorMethod = obj[Symbol.iterator];
+            if (typeof iteratorMethod === 'function') {
+              iterator = iteratorMethod.call(obj);
+            } else if (typeof obj.next === 'function') {
+              iterator = obj;
+            } else {
+              throw new TypeError('obj is not iterable');
+            }
+
+            // Check if it's already a proper Iterator
+            if (Object.prototype.isPrototypeOf.call(IteratorPrototype, iterator)) {
+              return iterator;
+            }
+
+            // Wrap it
+            return createIteratorHelper(iterator, (state) => {
+              return state.underlying.next();
+            });
+          };
+
+          // Set up Iterator constructor
+          Object.setPrototypeOf(Iterator, Function.prototype);
+          Iterator.prototype = IteratorPrototype;
+          
+          Object.defineProperty(Iterator, 'prototype', {
+            writable: false,
+            enumerable: false,
+            configurable: false
+          });
+
+          Object.defineProperty(IteratorPrototype, 'constructor', {
+            value: Iterator,
+            writable: true,
+            enumerable: false,
+            configurable: true
+          });
+
+          Object.defineProperty(Iterator, 'name', {
+            value: 'Iterator',
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+
+          Object.defineProperty(Iterator, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+
+          // Expose Iterator globally
+          Object.defineProperty(globalThis, 'Iterator', {
+            value: Iterator,
             writable: true,
             enumerable: false,
             configurable: true
