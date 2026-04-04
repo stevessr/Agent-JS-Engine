@@ -1,36 +1,73 @@
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
-
+   Compiling memchr v2.8.0
+   Compiling libc v0.2.183
+   Compiling bitflags v2.11.0
+   Compiling rustix v1.1.4
+   Compiling cfg_aliases v0.2.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling nibble_vec v0.1.0
+   Compiling endian-type v0.1.2
+   Compiling option-ext v0.2.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling unicode-width v0.2.2
+   Compiling log v0.4.29
+   Compiling home v0.5.12
+   Compiling utf8parse v0.2.2
+   Compiling nix v0.29.0
+   Compiling boa_ast v0.21.0
+   Compiling radix_trie v0.2.1
+   Compiling aho-corasick v1.1.4
+   Compiling combine v4.6.7
+   Compiling regress v0.10.5 (/home/steve/文档/vibe coding/Agent-JS-Engine/vendor/regress)
+   Compiling serde_json v1.0.149
+   Compiling regex-automata v0.4.14
+   Compiling getrandom v0.3.4
+   Compiling parking_lot_core v0.9.12
+   Compiling dirs-sys v0.5.0
+   Compiling time v0.3.47
+   Compiling dirs v6.0.0
+   Compiling rand_core v0.9.5
+   Compiling dashmap v6.1.0
+   Compiling fd-lock v4.0.4
+   Compiling rand_chacha v0.9.0
+   Compiling rustyline v15.0.0
+   Compiling tzif v0.4.1
+   Compiling icu_list v2.0.1
+   Compiling regex v1.12.3
+   Compiling timezone_provider v0.1.2
+   Compiling rand v0.9.2
+   Compiling boa_parser v0.21.0
+   Compiling temporal_rs v0.1.0
+   Compiling boa_icu_provider v0.21.0
+   Compiling boa_engine v0.21.0
+   Compiling ai-agent v0.1.0 (/home/steve/文档/vibe coding/Agent-JS-Engine)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 46.31s
+     Running tests/test262_runner.rs (target/debug/deps/test262_runner-04f607e6708f60d8)
 
 running 1 test
-Total test attempted: 53393
-Passed parsing: 41672
-Passed execution: 30275
-Parse Pass Rate: 78.05%
-Eval Pass Rate: 56.70%
-test test262_runner_main ... ok
+test test262_core_profile has been running for over 60 seconds
+Total cases: 53125
+Executed: 44884
+Passed: 44108
+Skipped: 8241
+Total pass rate: 83.03%
+Executed pass rate: 98.27%
+Skip reasons:
+  unsupported behavior: 0
+  unsupported feature: 0
+Sample failures:
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/built-ins/Date/prototype/toLocaleDateString/not-a-constructor.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: isConstructor(Date.prototype.toLocaleDateString) must return false Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/built-ins/Date/prototype/toLocaleString/not-a-constructor.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: isConstructor(Date.prototype.toLocaleString) must return false Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/built-ins/Date/prototype/toLocaleTimeString/not-a-constructor.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: isConstructor(Date.prototype.toLocaleTimeString) must return false Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/Date/prototype/taint-Intl-DateTimeFormat.js (assertion or runtime mismatch (actual: Err: TypeError: TypeError: not a constructor))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/Date/prototype/throws-same-exceptions-as-DateTimeFormat.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Internal error: Expected exception was not thrown by Intl.DateTimeFormat for locales null. Expected SameValue(«undefined», «undefined») to be false))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/Date/prototype/toLocaleDateString/builtin.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Built-in functions that aren't constructors must not have a prototype property. Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/Date/prototype/toLocaleString/builtin.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Built-in functions that aren't constructors must not have a prototype property. Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/Date/prototype/toLocaleTimeString/builtin.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Built-in functions that aren't constructors must not have a prototype property. Expected SameValue(«true», «false») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/DateTimeFormat/constructor-default-value.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Expected SameValue(«"zh"», «"en-US"») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/DateTimeFormat/constructor-no-instanceof.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: ))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/DateTimeFormat/constructor-options-calendar-islamic-fallback.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: no valid fallback for 'islamic' calendar option Expected SameValue(«false», «true») to be true))
+  /home/steve/文档/vibe coding/Agent-JS-Engine/test262/test/intl402/DateTimeFormat/ignore-invalid-unicode-ext-values.js (assertion or runtime mismatch (actual: Err: Test262Error: Test262Error: Locale ja-JP-u-cu-usd is affected by key cu; value USD. Expected SameValue(«"ja-JP-u-cu-usd"», «"ja-JP"») to be true))
+test test262_core_profile ... ok
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 26.98s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 6901.99s
 
