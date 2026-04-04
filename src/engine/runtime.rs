@@ -6395,22 +6395,43 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             }
           }
 
-          // Iterator.prototype setup - store constructor in a closure variable for the accessor
-          let _iteratorConstructor = Iterator;
+          // SetterThatIgnoresPrototypeProperties per spec
+          // 1. If this is not Object, throw TypeError
+          // 2. If this is home (IteratorPrototype), throw TypeError
+          // 3. If desc is undefined, CreateDataPropertyOrThrow
+          // 4. Otherwise, Set(this, p, v, true)
+          function SetterThatIgnoresPrototypeProperties(home, p, v) {
+            if (typeof this !== 'object' || this === null) {
+              throw new TypeError('Cannot set property on non-object');
+            }
+            if (this === home) {
+              throw new TypeError('Cannot set property on prototype');
+            }
+            const desc = Object.getOwnPropertyDescriptor(this, p);
+            if (desc === undefined) {
+              Object.defineProperty(this, p, {
+                value: v,
+                writable: true,
+                enumerable: true,
+                configurable: true
+              });
+            } else {
+              this[p] = v;
+            }
+          }
 
           // Iterator.prototype.constructor should be an accessor property per spec
           Object.defineProperty(IteratorPrototype, 'constructor', {
-            get() { return _iteratorConstructor; },
-            set(v) { _iteratorConstructor = v; },
+            get() { return Iterator; },
+            set(v) { SetterThatIgnoresPrototypeProperties.call(this, IteratorPrototype, 'constructor', v); },
             enumerable: false,
             configurable: true
           });
 
           // Iterator.prototype[@@toStringTag] should be an accessor property per spec
-          let _iteratorToStringTag = 'Iterator';
           Object.defineProperty(IteratorPrototype, Symbol.toStringTag, {
-            get() { return _iteratorToStringTag; },
-            set(v) { _iteratorToStringTag = v; },
+            get() { return 'Iterator'; },
+            set(v) { SetterThatIgnoresPrototypeProperties.call(this, IteratorPrototype, Symbol.toStringTag, v); },
             enumerable: false,
             configurable: true
           });
@@ -6444,11 +6465,24 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                 return state.nextImpl(state);
               } catch (e) {
                 state.done = true;
+                // IfAbruptCloseIterator: close the underlying iterator
+                const underlying = state.underlyingRecord.iterator;
+                if (underlying && typeof underlying.return === 'function') {
+                  try {
+                    underlying.return();
+                  } catch (closeErr) {
+                    // If close also throws, the original error takes precedence
+                  }
+                }
                 throw e;
               }
             };
             
             helper.return = function(value) {
+              if (state.done) {
+                // Already closed, don't forward return again
+                return { value: value, done: true };
+              }
               state.done = true;
               if (state.returnImpl) {
                 return state.returnImpl(state, value);
@@ -6469,6 +6503,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.map called on non-object');
             }
             if (typeof mapper !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('mapper must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6491,6 +6529,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.filter called on non-object');
             }
             if (typeof predicate !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('predicate must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6510,19 +6552,51 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             });
           }, 1);
 
+          // Helper to close iterator if it has a return method
+          function IteratorClose(iteratorRecord, error) {
+            const iterator = iteratorRecord.iterator;
+            if (typeof iterator.return === 'function') {
+              try {
+                iterator.return();
+              } catch (e) {
+                if (error) throw error;
+                throw e;
+              }
+            }
+            if (error) throw error;
+          }
+
           // Iterator.prototype.take
           defineNonConstructibleMethod(IteratorPrototype, 'take', function take(limit) {
             if (typeof this !== 'object' || this === null) {
               throw new TypeError('Iterator.prototype.take called on non-object');
             }
-            const numLimit = Number(limit);
+            // Steps 2-5: Validate arguments BEFORE GetIteratorDirect
+            // But if validation fails, close the iterator (this) directly
+            let numLimit;
+            try {
+              numLimit = Number(limit);
+            } catch (e) {
+              // ToNumber threw - close iterator before re-throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
+              throw e;
+            }
             if (Number.isNaN(numLimit)) {
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new RangeError('limit must be a number');
             }
             const intLimit = Math.trunc(numLimit);
             if (intLimit < 0) {
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new RangeError('limit must be non-negative');
             }
+            // Step 6: NOW get the iterator
             const iterated = GetIteratorDirect(this);
             let remaining = intLimit;
             
@@ -6539,8 +6613,11 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               const next = IteratorNext(state.underlyingRecord);
               if (next.done) {
                 state.done = true;
+                return { value: undefined, done: true };
               }
-              return next;
+              // Per spec: Yield(? IteratorValue(next)) - must read .value
+              const value = next.value;
+              return { value: value, done: false };
             });
           }, 1);
 
@@ -6549,14 +6626,32 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             if (typeof this !== 'object' || this === null) {
               throw new TypeError('Iterator.prototype.drop called on non-object');
             }
-            const numLimit = Number(limit);
+            // Steps 2-5: Validate arguments BEFORE GetIteratorDirect
+            // But if validation fails, close the iterator (this) directly
+            let numLimit;
+            try {
+              numLimit = Number(limit);
+            } catch (e) {
+              // ToNumber threw - close iterator before re-throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
+              throw e;
+            }
             if (Number.isNaN(numLimit)) {
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new RangeError('limit must be a number');
             }
             const intLimit = Math.trunc(numLimit);
             if (intLimit < 0) {
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new RangeError('limit must be non-negative');
             }
+            // Step 6: NOW get the iterator
             const iterated = GetIteratorDirect(this);
             let remaining = intLimit;
             
@@ -6568,13 +6663,18 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   state.done = true;
                   return { value: undefined, done: true };
                 }
+                // Per spec: during drop, must read .value for side effects
+                const _ = next.value;
                 remaining--;
               }
               const next = IteratorNext(state.underlyingRecord);
               if (next.done) {
                 state.done = true;
+                return { value: undefined, done: true };
               }
-              return next;
+              // Per spec: Yield(? IteratorValue(next)) - must read .value
+              const value = next.value;
+              return { value: value, done: false };
             });
           }, 1);
 
@@ -6584,21 +6684,26 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.flatMap called on non-object');
             }
             if (typeof mapper !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('mapper must be a function');
             }
             const iterated = GetIteratorDirect(this);
             let counter = 0;
-            let innerIterator = null;
+            // Store inner iterator in an object so returnImpl can access it
+            const innerState = { iterator: null };
             
-            return createIteratorHelper(iterated, (state) => {
+            const helper = createIteratorHelper(iterated, (state) => {
               while (true) {
                 // If we have an inner iterator, consume it first
-                if (innerIterator !== null) {
-                  const innerNext = innerIterator.next();
+                if (innerState.iterator !== null) {
+                  const innerNext = innerState.iterator.next();
                   if (!innerNext.done) {
                     return { value: innerNext.value, done: false };
                   }
-                  innerIterator = null;
+                  innerState.iterator = null;
                 }
                 
                 // Get next from outer iterator
@@ -6608,17 +6713,42 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   return { value: undefined, done: true };
                 }
                 
-                // Map and get inner iterator
+                // Map and get inner iterator - GetIteratorFlattenable semantics
                 const mapped = mapper(next.value, counter++);
-                if (mapped != null && typeof mapped[Symbol.iterator] === 'function') {
-                  innerIterator = mapped[Symbol.iterator]();
-                } else if (mapped != null && typeof mapped.next === 'function') {
-                  innerIterator = mapped;
+                if (typeof mapped !== 'object' || mapped === null) {
+                  throw new TypeError('flatMap mapper must return an iterable or iterator');
+                }
+                
+                // Check Symbol.iterator property
+                const iteratorMethod = mapped[Symbol.iterator];
+                if (iteratorMethod !== undefined && iteratorMethod !== null) {
+                  // Has non-null/undefined @@iterator - must be callable
+                  if (typeof iteratorMethod !== 'function') {
+                    throw new TypeError('Symbol.iterator is not a function');
+                  }
+                  innerState.iterator = iteratorMethod.call(mapped);
+                } else if (typeof mapped.next === 'function') {
+                  // Fallback to using object directly as iterator
+                  innerState.iterator = mapped;
                 } else {
                   throw new TypeError('flatMap mapper must return an iterable or iterator');
                 }
               }
+            }, (state, value) => {
+              // Custom return: close inner iterator first, then outer
+              if (innerState.iterator !== null && typeof innerState.iterator.return === 'function') {
+                try {
+                  innerState.iterator.return();
+                } catch (_) {}
+              }
+              innerState.iterator = null;
+              const underlying = state.underlyingRecord.iterator;
+              if (underlying && typeof underlying.return === 'function') {
+                return underlying.return(value);
+              }
+              return { value: value, done: true };
             });
+            return helper;
           }, 1);
 
           // Iterator.prototype.forEach
@@ -6627,6 +6757,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.forEach called on non-object');
             }
             if (typeof fn !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('callback must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6637,7 +6771,11 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (next.done) {
                 return undefined;
               }
-              fn(next.value, counter++);
+              try {
+                fn(next.value, counter++);
+              } catch (e) {
+                IteratorClose(iterated, e);
+              }
             }
           }, 1);
 
@@ -6647,6 +6785,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.some called on non-object');
             }
             if (typeof predicate !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('predicate must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6657,7 +6799,13 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (next.done) {
                 return false;
               }
-              if (predicate(next.value, counter++)) {
+              let result;
+              try {
+                result = predicate(next.value, counter++);
+              } catch (e) {
+                IteratorClose(iterated, e);
+              }
+              if (result) {
                 // Close iterator
                 if (typeof iterated.iterator.return === 'function') {
                   iterated.iterator.return();
@@ -6673,6 +6821,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.every called on non-object');
             }
             if (typeof predicate !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('predicate must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6683,7 +6835,13 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (next.done) {
                 return true;
               }
-              if (!predicate(next.value, counter++)) {
+              let result;
+              try {
+                result = predicate(next.value, counter++);
+              } catch (e) {
+                IteratorClose(iterated, e);
+              }
+              if (!result) {
                 // Close iterator
                 if (typeof iterated.iterator.return === 'function') {
                   iterated.iterator.return();
@@ -6699,6 +6857,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.find called on non-object');
             }
             if (typeof predicate !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('predicate must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6709,7 +6871,13 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (next.done) {
                 return undefined;
               }
-              if (predicate(next.value, counter++)) {
+              let result;
+              try {
+                result = predicate(next.value, counter++);
+              } catch (e) {
+                IteratorClose(iterated, e);
+              }
+              if (result) {
                 // Close iterator
                 if (typeof iterated.iterator.return === 'function') {
                   iterated.iterator.return();
@@ -6725,6 +6893,10 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.prototype.reduce called on non-object');
             }
             if (typeof reducer !== 'function') {
+              // Close iterator before throwing
+              if (typeof this.return === 'function') {
+                try { this.return(); } catch (_) {}
+              }
               throw new TypeError('reducer must be a function');
             }
             const iterated = GetIteratorDirect(this);
@@ -6748,7 +6920,11 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (next.done) {
                 return accumulator;
               }
-              accumulator = reducer(accumulator, next.value, counter++);
+              try {
+                accumulator = reducer(accumulator, next.value, counter++);
+              } catch (e) {
+                IteratorClose(iterated, e);
+              }
             }
           }, 1);
 
@@ -6805,28 +6981,34 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             }
 
             // Check for @@iterator method
-            let iterator;
+            let iteratorRecord;
             const iteratorMethod = obj[Symbol.iterator];
             if (iteratorMethod !== undefined && iteratorMethod !== null) {
               // Has @@iterator property that is not null/undefined - must be callable
               if (typeof iteratorMethod !== 'function') {
                 throw new TypeError('Symbol.iterator is not callable');
               }
-              iterator = iteratorMethod.call(obj);
-            } else if (typeof obj.next === 'function') {
-              // No @@iterator, but has next method - treat as iterator
-              iterator = obj;
+              const iterator = iteratorMethod.call(obj);
+              // Check if it's already a proper Iterator
+              if (Object.prototype.isPrototypeOf.call(IteratorPrototype, iterator)) {
+                return iterator;
+              }
+              iteratorRecord = GetIteratorDirect(iterator);
             } else {
-              throw new TypeError('obj is not iterable');
+              // GetIteratorFlattenable with stringHandling = "iterate-string-primitives"
+              // For objects without @@iterator, try to get .next directly
+              // Read .next only once here via GetIteratorDirect
+              if (typeof obj !== 'object' || obj === null) {
+                throw new TypeError('obj is not iterable');
+              }
+              iteratorRecord = GetIteratorDirect(obj);
+              // Now validate that nextMethod is callable
+              if (typeof iteratorRecord.nextMethod !== 'function') {
+                throw new TypeError('obj is not iterable');
+              }
             }
 
-            // Check if it's already a proper Iterator
-            if (Object.prototype.isPrototypeOf.call(IteratorPrototype, iterator)) {
-              return iterator;
-            }
-
-            // Wrap it - create an iterator record
-            const iteratorRecord = GetIteratorDirect(iterator);
+            // Wrap it
             return createIteratorHelper(iteratorRecord, (state) => {
               return IteratorNext(state.underlyingRecord);
             });
