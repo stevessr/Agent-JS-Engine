@@ -6453,32 +6453,36 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             const state = { 
               underlyingRecord: underlyingRecord,
               done: false,
+              executing: false,
               nextImpl,
               returnImpl
             };
             
             helper.next = function() {
+              if (state.executing) {
+                throw new TypeError('Generator is already executing');
+              }
               if (state.done) {
                 return { value: undefined, done: true };
               }
+              state.executing = true;
               try {
                 return state.nextImpl(state);
               } catch (e) {
                 state.done = true;
-                // IfAbruptCloseIterator: close the underlying iterator
-                const underlying = state.underlyingRecord.iterator;
-                if (underlying && typeof underlying.return === 'function') {
-                  try {
-                    underlying.return();
-                  } catch (closeErr) {
-                    // If close also throws, the original error takes precedence
-                  }
-                }
+                // NOTE: We do NOT close the iterator here
+                // IfAbruptCloseIterator is handled by each method's nextImpl
+                // when their callback/mapper/predicate throws
                 throw e;
+              } finally {
+                state.executing = false;
               }
             };
             
             helper.return = function(value) {
+              if (state.executing) {
+                throw new TypeError('Generator is already executing');
+              }
               if (state.done) {
                 // Already closed, don't forward return again
                 return { value: value, done: true };
@@ -6518,7 +6522,17 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                 state.done = true;
                 return { value: undefined, done: true };
               }
-              const mapped = mapper(next.value, counter++);
+              // Wrap mapper call - close iterator if it throws
+              let mapped;
+              try {
+                mapped = mapper(next.value, counter++);
+              } catch (e) {
+                // IfAbruptCloseIterator
+                if (typeof state.underlyingRecord.iterator.return === 'function') {
+                  try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                }
+                throw e;
+              }
               return { value: mapped, done: false };
             });
           }, 1);
@@ -6545,7 +6559,18 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   state.done = true;
                   return { value: undefined, done: true };
                 }
-                if (predicate(next.value, counter++)) {
+                // Wrap predicate call - close iterator if it throws
+                let result;
+                try {
+                  result = predicate(next.value, counter++);
+                } catch (e) {
+                  // IfAbruptCloseIterator
+                  if (typeof state.underlyingRecord.iterator.return === 'function') {
+                    try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                  }
+                  throw e;
+                }
+                if (result) {
                   return { value: next.value, done: false };
                 }
               }
@@ -6714,8 +6739,22 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                 }
                 
                 // Map and get inner iterator - GetIteratorFlattenable semantics
-                const mapped = mapper(next.value, counter++);
+                // Wrap mapper call - close iterator if it throws
+                let mapped;
+                try {
+                  mapped = mapper(next.value, counter++);
+                } catch (e) {
+                  // IfAbruptCloseIterator
+                  if (typeof state.underlyingRecord.iterator.return === 'function') {
+                    try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                  }
+                  throw e;
+                }
                 if (typeof mapped !== 'object' || mapped === null) {
+                  // IfAbruptCloseIterator for validation error
+                  if (typeof state.underlyingRecord.iterator.return === 'function') {
+                    try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                  }
                   throw new TypeError('flatMap mapper must return an iterable or iterator');
                 }
                 
@@ -6724,6 +6763,9 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                 if (iteratorMethod !== undefined && iteratorMethod !== null) {
                   // Has non-null/undefined @@iterator - must be callable
                   if (typeof iteratorMethod !== 'function') {
+                    if (typeof state.underlyingRecord.iterator.return === 'function') {
+                      try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                    }
                     throw new TypeError('Symbol.iterator is not a function');
                   }
                   innerState.iterator = iteratorMethod.call(mapped);
@@ -6731,6 +6773,9 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   // Fallback to using object directly as iterator
                   innerState.iterator = mapped;
                 } else {
+                  if (typeof state.underlyingRecord.iterator.return === 'function') {
+                    try { state.underlyingRecord.iterator.return(); } catch (_) {}
+                  }
                   throw new TypeError('flatMap mapper must return an iterable or iterator');
                 }
               }
