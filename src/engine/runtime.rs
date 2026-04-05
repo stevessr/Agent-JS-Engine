@@ -7352,6 +7352,7 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             // Create the zipped iterator
             let executing = false;
             let allDone = iters.length === 0;
+            let hasYielded = false;  // Track if we've entered suspended-yield state
             // Initialize openIters array (all start as the iterator objects)
             for (let i = 0; i < iters.length; i++) {
               openIters.push(iters[i].iterator);
@@ -7435,16 +7436,31 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                     
                     if (mode === 'shortest') {
                       // Close remaining iterators in reverse order (excluding i)
+                      // IteratorCloseAll with ReturnCompletion(undefined)
+                      // Close in reverse order, propagate first error if any
+                      let closeError = null;
                       for (let j = iterCount - 1; j >= 0; j--) {
                         if (j !== i && openIters[j] !== null) {
                           const iter = openIters[j];
                           if (typeof iter.return === 'function') {
-                            try { iter.return.call(iter); } catch (e2) {}
+                            try { 
+                              const result = iter.return.call(iter); 
+                              if (closeError === null && (typeof result !== 'object' || result === null)) {
+                                closeError = new TypeError('Iterator result must be an object');
+                              }
+                            } catch (e2) {
+                              if (closeError === null) {
+                                closeError = e2;
+                              }
+                            }
                           }
                           openIters[j] = null;
                         }
                       }
                       allDone = true;
+                      if (closeError !== null) {
+                        throw closeError;
+                      }
                       return { value: undefined, done: true };
                     } else if (mode === 'strict') {
                       // In strict mode, when iterator at index i finishes:
@@ -7560,6 +7576,7 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   }
                 }
                 
+                hasYielded = true;
                 return { value: results, done: false };
               } finally {
                 executing = false;
@@ -7570,19 +7587,47 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (executing) {
                 throw new TypeError('Generator is already executing');
               }
-              executing = true;
+              if (allDone) {
+                return { value: undefined, done: true };
+              }
+              
+              // Per spec:
+              // - If suspended-start (hasYielded is false): set state to completed, then close
+              // - If suspended-yield (hasYielded is true): set state to executing during close
+              if (!hasYielded) {
+                // suspended-start: set to completed before close
+                allDone = true;
+              } else {
+                // suspended-yield: set executing during close
+                executing = true;
+              }
+              
               try {
-                // Close all open iterators in reverse order
+                // IteratorCloseAll with ReturnCompletion(undefined)
+                // Close all open iterators in reverse order, propagate first error
+                let closeError = null;
                 for (let i = openIters.length - 1; i >= 0; i--) {
                   if (openIters[i] !== null) {
                     const iter = openIters[i];
                     if (typeof iter.return === 'function') {
-                      try { iter.return.call(iter); } catch (e) {}
+                      try { 
+                        const result = iter.return.call(iter);
+                        if (closeError === null && (typeof result !== 'object' || result === null)) {
+                          closeError = new TypeError('Iterator result must be an object');
+                        }
+                      } catch (e) {
+                        if (closeError === null) {
+                          closeError = e;
+                        }
+                      }
                     }
                     openIters[i] = null;
                   }
                 }
                 allDone = true;
+                if (closeError !== null) {
+                  throw closeError;
+                }
                 return { value: undefined, done: true };
               } finally {
                 executing = false;
@@ -7700,6 +7745,7 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             // Create the zipped iterator
             let executing = false;
             let allDone = iters.length === 0;
+            let hasYielded = false;  // Track if we've entered suspended-yield state
             
             function nextImpl() {
               if (executing) {
@@ -7775,16 +7821,30 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                     openIters[i] = null;
                     
                     if (mode === 'shortest') {
+                      // IteratorCloseAll with ReturnCompletion(undefined)
+                      let closeError = null;
                       for (let j = iterCount - 1; j >= 0; j--) {
                         if (j !== i && openIters[j] !== null) {
                           const iter = openIters[j];
                           if (typeof iter.return === 'function') {
-                            try { iter.return.call(iter); } catch (e2) {}
+                            try { 
+                              const result = iter.return.call(iter);
+                              if (closeError === null && (typeof result !== 'object' || result === null)) {
+                                closeError = new TypeError('Iterator result must be an object');
+                              }
+                            } catch (e2) {
+                              if (closeError === null) {
+                                closeError = e2;
+                              }
+                            }
                           }
                           openIters[j] = null;
                         }
                       }
                       allDone = true;
+                      if (closeError !== null) {
+                        throw closeError;
+                      }
                       return { value: undefined, done: true };
                     } else if (mode === 'strict') {
                       // In strict mode, when iterator at index i finishes:
@@ -7896,6 +7956,7 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                   }
                 }
                 
+                hasYielded = true;
                 return { value: resultObj, done: false };
               } finally {
                 executing = false;
@@ -7906,18 +7967,46 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (executing) {
                 throw new TypeError('Generator is already executing');
               }
-              executing = true;
+              if (allDone) {
+                return { value: undefined, done: true };
+              }
+              
+              // Per spec:
+              // - If suspended-start (hasYielded is false): set state to completed, then close
+              // - If suspended-yield (hasYielded is true): set state to executing during close
+              if (!hasYielded) {
+                // suspended-start: set to completed before close
+                allDone = true;
+              } else {
+                // suspended-yield: set executing during close
+                executing = true;
+              }
+              
               try {
+                // IteratorCloseAll with ReturnCompletion(undefined)
+                let closeError = null;
                 for (let i = openIters.length - 1; i >= 0; i--) {
                   if (openIters[i] !== null) {
                     const iter = openIters[i];
                     if (typeof iter.return === 'function') {
-                      try { iter.return.call(iter); } catch (e) {}
+                      try { 
+                        const result = iter.return.call(iter);
+                        if (closeError === null && (typeof result !== 'object' || result === null)) {
+                          closeError = new TypeError('Iterator result must be an object');
+                        }
+                      } catch (e) {
+                        if (closeError === null) {
+                          closeError = e;
+                        }
+                      }
                     }
                     openIters[i] = null;
                   }
                 }
                 allDone = true;
+                if (closeError !== null) {
+                  throw closeError;
+                }
                 return { value: undefined, done: true };
               } finally {
                 executing = false;
