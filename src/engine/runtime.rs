@@ -7041,16 +7041,13 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               iteratorRecord = GetIteratorDirect(iterator);
             } else {
               // GetIteratorFlattenable with stringHandling = "iterate-string-primitives"
-              // For objects without @@iterator, try to get .next directly
+              // For objects without @@iterator, use the object directly as iterator
               // Read .next only once here via GetIteratorDirect
+              // Note: .next doesn't have to be callable - that's validated lazily
               if (typeof obj !== 'object' || obj === null) {
                 throw new TypeError('obj is not iterable');
               }
               iteratorRecord = GetIteratorDirect(obj);
-              // Now validate that nextMethod is callable
-              if (typeof iteratorRecord.nextMethod !== 'function') {
-                throw new TypeError('obj is not iterable');
-              }
             }
 
             // Wrap it
