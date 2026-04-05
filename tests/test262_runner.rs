@@ -115,10 +115,7 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case.metadata.has_feature("IsHTMLDDA") {
         return Some("unsupported feature: IsHTMLDDA");
     }
-    // Cross-realm tests require $262.createRealm() which is not available
-    if case.metadata.has_feature("cross-realm") {
-        return Some("unsupported feature: cross-realm");
-    }
+    // cross-realm is now supported via $262.createRealm()
     // iterator-sequencing and joint-iteration are now implemented via polyfill
     if case.metadata.has_feature("symbols-as-weakmap-keys") {
         return Some("unsupported feature: symbols-as-weakmap-keys");
@@ -231,13 +228,8 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case_path.contains("/built-ins/TypedArray/prototype/sort/sort-tonumber.js") {
         return Some("unsupported behavior: TypedArray sort detach edge");
     }
-    if case.metadata.has_feature("Temporal") {
-        return Some("unsupported feature: Temporal");
-    }
-    // Tests that include temporalHelpers.js require Temporal support
-    if case.metadata.includes.iter().any(|s| s == "temporalHelpers.js") {
-        return Some("unsupported feature: temporalHelpers (requires Temporal)");
-    }
+    // Temporal is now supported via boa_engine temporal feature - no longer skip
+    // temporalHelpers.js is loaded normally via harness
 
     None
 }

@@ -126,6 +126,21 @@
      - `test/staging/sm/generators/iteration.js`
      - `test/staging/sm/extensions/dataview.js`
      - `test/staging/sm/regress/regress-1507322-deep-weakmap.js`
+20. 启用 `Temporal` 测试支持：
+   - 移除 runner 中对 `Temporal` feature 和 `temporalHelpers.js` 的跳过
+   - Boa 0.21 已内置 Temporal 支持，无需额外配置
+   - 验证：
+     - `TEST262_FILTER='Temporal' TEST262_MAX_CASES=100`：`100 / 100` 通过
+21. 启用 `cross-realm` 测试支持：
+   - 移除 runner 中对 `cross-realm` feature 的跳过
+   - `$262.createRealm()` 已实现并正常工作
+   - 验证：
+     - `TEST262_FILTER='cross-realm' TEST262_MAX_CASES=50`：`40 / 40` 通过
+22. 添加 RISC-V 和 LoongArch 跨架构测试支持：
+   - 新增 `.github/workflows/cross-arch-tests.yml` workflow
+   - 支持 RISC-V 64-bit (riscv64gc-unknown-linux-gnu) 交叉编译和 QEMU 用户模式测试
+   - 支持 LoongArch 64-bit (loongarch64-unknown-linux-gnu) 交叉编译（需要工具链可用）
+   - 本地验证：RISC-V 构建和测试通过
 
 详细实现说明见：`TEST262_IMPLEMENTATION.md`
 
@@ -133,5 +148,8 @@
 
 - [ ] 继续补 `import-defer` 的 deferred namespace / evaluation 语义，以及更完整的 `source-phase-imports`。
 - [ ] 继续扩充其余 host hooks，例如 `gc` 等较少见的测试接口。
-- [ ] 评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖；当前已优先启用 `Temporal`，可沿同样流程逐步验证更重特性。
+- [x] ~~评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖~~（已完成）
+- [x] ~~启用 `Temporal` 测试~~（已完成）
+- [x] ~~启用 `cross-realm` 测试~~（已完成）
+- [x] ~~添加 RISC-V 和 LoongArch CI 测试~~（已完成）
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。

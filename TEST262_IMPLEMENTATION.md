@@ -469,9 +469,48 @@ TEST262_FILTER='test/staging/sm/extensions/regress-650753.js' cargo test --test 
 - `staging` 放开
 - `$262` 关键宿主对象与接口到位
 - 长跑验证迁移到 GitHub Actions
+- `Temporal` 测试已启用
+- `cross-realm` 测试已启用
+- RISC-V 和 LoongArch 跨架构测试支持
 
 后续若继续推进，最有价值的方向是：
 
 - 更深层 `import-defer` / `source-phase-imports` 语义收敛
 - 继续扩宿主接口（如更多 `$262` / GC 边角能力）
 - 逐步把当前自研 parser / interpreter 与这套运行时能力重新对齐
+
+---
+
+## 跨架构测试支持
+
+### RISC-V 64-bit
+
+通过 QEMU 用户模式模拟支持 RISC-V 64-bit 架构测试：
+
+```bash
+# 安装交叉编译工具链
+sudo apt-get install gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user-static
+
+# 添加 Rust 目标
+rustup target add riscv64gc-unknown-linux-gnu
+
+# 构建
+CC_riscv64gc_unknown_linux_gnu=riscv64-linux-gnu-gcc cargo build --release --target riscv64gc-unknown-linux-gnu
+
+# 运行测试
+qemu-riscv64 -L /usr/riscv64-linux-gnu ./target/riscv64gc-unknown-linux-gnu/release/ai-agent -p "1 + 2"
+```
+
+### LoongArch 64-bit
+
+LoongArch 支持依赖于交叉编译工具链的可用性，目前在大多数发行版中尚未广泛可用。
+
+GitHub Actions workflow 会在工具链可用时自动尝试构建和测试。
+
+### CI Workflow
+
+跨架构测试通过 `.github/workflows/cross-arch-tests.yml` 配置，包含：
+
+- x86_64 原生测试（基线）
+- RISC-V 64 交叉编译和 QEMU 测试
+- LoongArch 64 交叉编译和 QEMU 测试（条件执行）

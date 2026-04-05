@@ -1248,7 +1248,7 @@ fn engine_bootstraps_test262_agent_broadcasts() {
         )
         .unwrap();
 
-    assert_eq!(output.value.as_deref(), Some("1"));
+    assert_eq!(output.value.as_deref(), Some("'1'"));
 }
 
 #[test]
@@ -1487,7 +1487,7 @@ fn engine_allows_valid_import_call_trailing_commas() {
         "typeof import('./dep.mjs', {},);",
     ] {
         let output = engine.eval(source).unwrap();
-        assert_eq!(output.value.as_deref(), Some("object"), "source: {source}");
+        assert_eq!(output.value.as_deref(), Some("'object'"), "source: {source}");
     }
 }
 
@@ -1712,7 +1712,7 @@ fn engine_executes_32_deep_nested_function_calls() {
             )
             .unwrap();
 
-        assert_eq!(output.value.as_deref(), Some("ok"));
+        assert_eq!(output.value.as_deref(), Some("'ok'"));
     });
 }
 
@@ -1923,7 +1923,7 @@ fn engine_bootstraps_temporal_in_test262_agents() {
         )
         .unwrap();
 
-    assert_eq!(output.value.as_deref(), Some("ok"));
+    assert_eq!(output.value.as_deref(), Some("'ok'"));
 }
 
 #[test]

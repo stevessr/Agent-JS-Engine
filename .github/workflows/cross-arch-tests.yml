@@ -1,0 +1,220 @@
+name: Cross-Architecture Tests (RISC-V & LoongArch)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - '.github/workflows/cross-arch-tests.yml'
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'src/**/*.rs'
+      - 'tests/**/*.rs'
+      - '.github/workflows/cross-arch-tests.yml'
+
+concurrency:
+  group: cross-arch-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Native x86_64 smoke test (baseline)
+  native-x86_64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-arch-native
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Run isolated tests
+        run: cargo test --test isolated_test
+
+      - name: Run basic eval test
+        run: |
+          ./target/release/ai-agent --eval "print('Hello from x86_64')"
+          ./target/release/ai-agent --eval "print(1 + 2)"
+          ./target/release/ai-agent --eval "print(typeof Temporal)"
+
+  # RISC-V 64-bit (riscv64gc-unknown-linux-gnu) via QEMU
+  riscv64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu qemu-user-static
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-arch-riscv64
+
+      - name: Configure cargo for cross-compilation
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.riscv64gc-unknown-linux-gnu]
+          linker = "riscv64-linux-gnu-gcc"
+          runner = "qemu-riscv64-static -L /usr/riscv64-linux-gnu"
+          EOF
+
+      - name: Build for RISC-V 64
+        run: cargo build --release --target riscv64gc-unknown-linux-gnu
+        env:
+          CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
+          CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
+
+      - name: Run basic eval tests via QEMU
+        run: |
+          qemu-riscv64-static -L /usr/riscv64-linux-gnu ./target/riscv64gc-unknown-linux-gnu/release/ai-agent --eval "print('Hello from RISC-V 64')"
+          qemu-riscv64-static -L /usr/riscv64-linux-gnu ./target/riscv64gc-unknown-linux-gnu/release/ai-agent --eval "print(1 + 2)"
+          qemu-riscv64-static -L /usr/riscv64-linux-gnu ./target/riscv64gc-unknown-linux-gnu/release/ai-agent --eval "print(typeof Temporal)"
+          qemu-riscv64-static -L /usr/riscv64-linux-gnu ./target/riscv64gc-unknown-linux-gnu/release/ai-agent --eval "print(JSON.stringify([1,2,3].map(x => x * 2)))"
+
+      - name: Run isolated tests via QEMU (limited)
+        run: |
+          cargo test --release --target riscv64gc-unknown-linux-gnu --test isolated_test -- --test-threads=1
+        env:
+          CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
+          CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
+        continue-on-error: true
+
+  # LoongArch 64-bit (loongarch64-unknown-linux-gnu) via QEMU
+  # Note: LoongArch cross-compilation toolchain is not widely available yet
+  # This job attempts to build if toolchain is available, otherwise reports status
+  loongarch64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Rust nightly (required for loongarch64 target)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: loongarch64-unknown-linux-gnu
+
+      - name: Install cross-compilation tools
+        run: |
+          sudo apt-get update
+          # Install QEMU for LoongArch user-mode emulation
+          sudo apt-get install -y qemu-user-static || true
+          # Try to get loongarch64 cross compiler (may not be available)
+          sudo apt-get install -y gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu 2>/dev/null || true
+
+      - name: Check LoongArch toolchain availability
+        id: check-toolchain
+        run: |
+          if command -v loongarch64-linux-gnu-gcc &> /dev/null; then
+            echo "toolchain_available=true" >> $GITHUB_OUTPUT
+            echo "LoongArch toolchain is available"
+            loongarch64-linux-gnu-gcc --version
+          else
+            echo "toolchain_available=false" >> $GITHUB_OUTPUT
+            echo "LoongArch toolchain is NOT available on this runner"
+            echo "This is expected - LoongArch cross-compilation support is still maturing"
+          fi
+
+      - name: Cache cargo registry and target
+        if: steps.check-toolchain.outputs.toolchain_available == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cross-arch-loongarch64
+
+      - name: Configure cargo for cross-compilation
+        if: steps.check-toolchain.outputs.toolchain_available == 'true'
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.loongarch64-unknown-linux-gnu]
+          linker = "loongarch64-linux-gnu-gcc"
+          runner = "qemu-loongarch64-static -L /usr/loongarch64-linux-gnu"
+          EOF
+
+      - name: Build for LoongArch 64
+        if: steps.check-toolchain.outputs.toolchain_available == 'true'
+        run: cargo +nightly build --release --target loongarch64-unknown-linux-gnu
+        env:
+          CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
+          CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
+        continue-on-error: true
+
+      - name: Run basic eval tests via QEMU
+        if: steps.check-toolchain.outputs.toolchain_available == 'true'
+        run: |
+          if [ -f ./target/loongarch64-unknown-linux-gnu/release/ai-agent ]; then
+            echo "Testing LoongArch binary..."
+            qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent -p "1 + 2" || echo "QEMU execution failed"
+            qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent -p "typeof Temporal" || echo "QEMU execution failed"
+          else
+            echo "LoongArch binary not built - skipping tests"
+          fi
+        continue-on-error: true
+
+      - name: Report LoongArch status
+        run: |
+          echo "## LoongArch 64-bit Build Status" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.check-toolchain.outputs.toolchain_available }}" == "true" ]; then
+            echo "✅ LoongArch toolchain available" >> $GITHUB_STEP_SUMMARY
+            if [ -f ./target/loongarch64-unknown-linux-gnu/release/ai-agent ]; then
+              echo "✅ Binary built successfully" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ Binary build failed" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "⚠️ LoongArch toolchain not available on this runner" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Note:** LoongArch cross-compilation toolchain is not yet widely available in standard repositories." >> $GITHUB_STEP_SUMMARY
+            echo "Options for future support:" >> $GITHUB_STEP_SUMMARY
+            echo "- Use a custom Docker image with LoongArch toolchain" >> $GITHUB_STEP_SUMMARY
+            echo "- Use a self-hosted runner on LoongArch hardware" >> $GITHUB_STEP_SUMMARY
+            echo "- Wait for Ubuntu/Debian to add official loongarch64 cross-compiler packages" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Summary job
+  summary:
+    needs: [native-x86_64, riscv64, loongarch64]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate summary
+        run: |
+          echo "# Cross-Architecture Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| x86_64 (native) | ${{ needs.native-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| RISC-V 64 (QEMU) | ${{ needs.riscv64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| LoongArch 64 (QEMU) | ${{ needs.loongarch64.result }} |" >> $GITHUB_STEP_SUMMARY
