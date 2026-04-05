@@ -119,13 +119,7 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case.metadata.has_feature("cross-realm") {
         return Some("unsupported feature: cross-realm");
     }
-    // iterator-helpers is now implemented via polyfill
-    if case.metadata.has_feature("joint-iteration") {
-        return Some("unsupported feature: joint-iteration");
-    }
-    if case.metadata.has_feature("iterator-sequencing") {
-        return Some("unsupported feature: iterator-sequencing");
-    }
+    // iterator-sequencing and joint-iteration are now implemented via polyfill
     if case.metadata.has_feature("symbols-as-weakmap-keys") {
         return Some("unsupported feature: symbols-as-weakmap-keys");
     }
