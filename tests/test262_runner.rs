@@ -115,6 +115,10 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     if case.metadata.has_feature("IsHTMLDDA") {
         return Some("unsupported feature: IsHTMLDDA");
     }
+    // Cross-realm tests require $262.createRealm() which is not available
+    if case.metadata.has_feature("cross-realm") {
+        return Some("unsupported feature: cross-realm");
+    }
     // iterator-helpers is now implemented via polyfill
     if case.metadata.has_feature("joint-iteration") {
         return Some("unsupported feature: joint-iteration");
