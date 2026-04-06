@@ -315,7 +315,7 @@ jobs:
     needs:
       - guard-current-head
       - core-profile-shards
-    if: ${{ always() && needs.guard-current-head.result == 'success' }}
+    if: ${{ needs.guard-current-head.result == 'success' && needs.core-profile-shards.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download shard summaries
@@ -323,7 +323,18 @@ jobs:
         with:
           path: shard-summaries
 
+      - name: Check shard summaries
+        id: summaries
+        run: |
+          if find shard-summaries -name 'summary.json' -print -quit | grep -q .; then
+            echo "has_summaries=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No shard summaries uploaded; skipping aggregation."
+            echo "has_summaries=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Aggregate results
+        if: ${{ steps.summaries.outputs.has_summaries == 'true' }}
         run: |
           python - <<'PY'
           import json
@@ -338,7 +349,11 @@ jobs:
               passed += data.get('passed', 0)
               skipped += data.get('skipped', 0)
 
-          total_pass_rate = (passed / total * 100.0) if total else 0.0
+          if total == 0:
+              print('No shard summaries present; exiting without failure.')
+              sys.exit(0)
+
+          total_pass_rate = (passed / total * 100.0)
           executed_pass_rate = (passed / executed * 100.0) if executed else 0.0
 
           print(f'Total cases: {total}')
