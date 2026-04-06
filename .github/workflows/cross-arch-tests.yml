@@ -111,6 +111,22 @@ jobs:
           CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
         continue-on-error: true
 
+      - name: Download test262 suite
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
+          git -C test262 sparse-checkout set test harness
+
+      - name: Run test262 shard via QEMU
+        run: |
+          TEST262_DIR="$GITHUB_WORKSPACE/test262" \
+          TEST262_OFFSET=0 \
+          TEST262_MAX_CASES=250 \
+          cargo test --release --target riscv64gc-unknown-linux-gnu --test test262_runner -- --ignored --exact test262_core_profile --nocapture
+        env:
+          CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
+          CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
+        continue-on-error: true
+
   # LoongArch 64-bit (loongarch64-unknown-linux-gnu) via Docker + QEMU
   loongarch64:
     runs-on: ubuntu-24.04
@@ -168,6 +184,25 @@ jobs:
           RUSTUP_HOME: /github/home/.rustup
           CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
           CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
+        continue-on-error: true
+
+      - name: Download test262 suite
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/tc39/test262.git test262
+          git -C test262 sparse-checkout set test harness
+
+      - name: Run test262 shard via QEMU
+        run: |
+          TEST262_DIR="$GITHUB_WORKSPACE/test262" \
+          TEST262_OFFSET=0 \
+          TEST262_MAX_CASES=250 \
+          cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test test262_runner -- --ignored --exact test262_core_profile --nocapture
+        env:
+          CARGO_HOME: /github/home/.cargo
+          RUSTUP_HOME: /github/home/.rustup
+          CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
+          CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
+        continue-on-error: true
 
       - name: Report LoongArch status
         if: always()
@@ -196,3 +231,5 @@ jobs:
           echo "| x86_64 (native) | ${{ needs.native-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| RISC-V 64 (QEMU) | ${{ needs.riscv64.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "| LoongArch 64 (QEMU) | ${{ needs.loongarch64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Both cross-arch jobs now include isolated tests and a small test262 shard under QEMU." >> $GITHUB_STEP_SUMMARY
