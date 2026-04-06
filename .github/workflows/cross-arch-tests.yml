@@ -127,12 +127,16 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install Rust nightly
+        env:
+          CARGO_HOME: /github/home/.cargo
+          RUSTUP_HOME: /github/home/.rustup
         run: |
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          "$HOME/.cargo/bin/rustup" target add loongarch64-unknown-linux-gnu
-          "$HOME/.cargo/bin/rustc" --version
-          "$HOME/.cargo/bin/cargo" --version
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          "$CARGO_HOME/bin/rustup" target add --toolchain nightly loongarch64-unknown-linux-gnu
+          "$CARGO_HOME/bin/rustc" +nightly --version
+          "$CARGO_HOME/bin/cargo" +nightly --version
+          "$CARGO_HOME/bin/rustup" show
 
       - name: Configure cargo for cross-compilation
         run: |
@@ -144,8 +148,10 @@ jobs:
           EOF
 
       - name: Build for LoongArch 64
-        run: cargo build --release --target loongarch64-unknown-linux-gnu
+        run: cargo +nightly build --release --target loongarch64-unknown-linux-gnu
         env:
+          CARGO_HOME: /github/home/.cargo
+          RUSTUP_HOME: /github/home/.rustup
           CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
           CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
 
@@ -156,8 +162,10 @@ jobs:
           qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(typeof Temporal)"
 
       - name: Run isolated tests via QEMU (limited)
-        run: cargo test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
+        run: cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
         env:
+          CARGO_HOME: /github/home/.cargo
+          RUSTUP_HOME: /github/home/.rustup
           CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
           CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
 
