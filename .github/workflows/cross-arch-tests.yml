@@ -111,110 +111,67 @@ jobs:
           CXX_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-g++
         continue-on-error: true
 
-  # LoongArch 64-bit (loongarch64-unknown-linux-gnu) via QEMU
-  # Note: LoongArch cross-compilation toolchain is not widely available yet
-  # This job attempts to build if toolchain is available, otherwise reports status
+  # LoongArch 64-bit (loongarch64-unknown-linux-gnu) via Docker + QEMU
   loongarch64:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
+    container:
+      image: debian:sid
     steps:
+      - name: Install container dependencies
+        run: |
+          apt-get update
+          apt-get install -y git curl ca-certificates xz-utils qemu-user-static gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu pkg-config build-essential
+
       - name: Check out repository
         uses: actions/checkout@v5
 
-      - name: Set up Rust nightly (required for loongarch64 target)
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          targets: loongarch64-unknown-linux-gnu
-
-      - name: Install cross-compilation tools
+      - name: Install Rust nightly
         run: |
-          sudo apt-get update
-          # Install QEMU for LoongArch user-mode emulation
-          sudo apt-get install -y qemu-user-static || true
-          # Try to get loongarch64 cross compiler (may not be available)
-          sudo apt-get install -y gcc-loongarch64-linux-gnu g++-loongarch64-linux-gnu 2>/dev/null || true
-
-      - name: Check LoongArch toolchain availability
-        id: check-toolchain
-        run: |
-          if command -v loongarch64-linux-gnu-gcc &> /dev/null; then
-            echo "toolchain_available=true" >> $GITHUB_OUTPUT
-            echo "LoongArch toolchain is available"
-            loongarch64-linux-gnu-gcc --version
-          else
-            echo "toolchain_available=false" >> $GITHUB_OUTPUT
-            echo "LoongArch toolchain is NOT available on this runner"
-            echo "This is expected - LoongArch cross-compilation support is still maturing"
-          fi
-
-      - name: Cache cargo registry and target
-        if: steps.check-toolchain.outputs.toolchain_available == 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: cross-arch-loongarch64
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" target add loongarch64-unknown-linux-gnu
+          "$HOME/.cargo/bin/rustc" --version
+          "$HOME/.cargo/bin/cargo" --version
 
       - name: Configure cargo for cross-compilation
-        if: steps.check-toolchain.outputs.toolchain_available == 'true'
         run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml << 'EOF'
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" << 'EOF'
           [target.loongarch64-unknown-linux-gnu]
           linker = "loongarch64-linux-gnu-gcc"
           runner = "qemu-loongarch64-static -L /usr/loongarch64-linux-gnu"
           EOF
 
       - name: Build for LoongArch 64
-        if: steps.check-toolchain.outputs.toolchain_available == 'true'
-        run: cargo +nightly build --release --target loongarch64-unknown-linux-gnu
+        run: cargo build --release --target loongarch64-unknown-linux-gnu
         env:
           CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
           CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
-        continue-on-error: true
 
       - name: Run basic eval tests via QEMU
-        if: steps.check-toolchain.outputs.toolchain_available == 'true'
         run: |
-          if [ -f ./target/loongarch64-unknown-linux-gnu/release/ai-agent ]; then
-            echo "Testing LoongArch binary..."
-            qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent -p "1 + 2" || echo "QEMU execution failed"
-            qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent -p "typeof Temporal" || echo "QEMU execution failed"
-          else
-            echo "LoongArch binary not built - skipping tests"
-          fi
-        continue-on-error: true
+          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print('Hello from LoongArch 64')"
+          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(1 + 2)"
+          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(typeof Temporal)"
 
       - name: Run isolated tests via QEMU (limited)
-        if: steps.check-toolchain.outputs.toolchain_available == 'true'
-        run: |
-          if [ -f ./target/loongarch64-unknown-linux-gnu/release/deps/isolated_test-* ] || [ -d ./target/loongarch64-unknown-linux-gnu/release/deps ]; then
-            cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
-          else
-            echo "LoongArch test binary not built - skipping isolated tests"
-          fi
+        run: cargo test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
         env:
           CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
           CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
-        continue-on-error: true
 
       - name: Report LoongArch status
+        if: always()
         run: |
           echo "## LoongArch 64-bit Build Status" >> $GITHUB_STEP_SUMMARY
-          if [ "${{ steps.check-toolchain.outputs.toolchain_available }}" == "true" ]; then
-            echo "✅ LoongArch toolchain available" >> $GITHUB_STEP_SUMMARY
-            if [ -f ./target/loongarch64-unknown-linux-gnu/release/ai-agent ]; then
-              echo "✅ Binary built successfully" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "⚠️ Binary build failed" >> $GITHUB_STEP_SUMMARY
-            fi
+          if [ -f ./target/loongarch64-unknown-linux-gnu/release/ai-agent ]; then
+            echo "✅ Binary built successfully" >> $GITHUB_STEP_SUMMARY
+            echo "✅ QEMU smoke tests configured" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ LoongArch toolchain not available on this runner" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**Note:** LoongArch cross-compilation toolchain is not yet widely available in standard repositories." >> $GITHUB_STEP_SUMMARY
-            echo "Options for future support:" >> $GITHUB_STEP_SUMMARY
-            echo "- Use a custom Docker image with LoongArch toolchain" >> $GITHUB_STEP_SUMMARY
-            echo "- Use a self-hosted runner on LoongArch hardware" >> $GITHUB_STEP_SUMMARY
-            echo "- Wait for Ubuntu/Debian to add official loongarch64 cross-compiler packages" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Binary build failed" >> $GITHUB_STEP_SUMMARY
           fi
+
 
   # Summary job
   summary:
