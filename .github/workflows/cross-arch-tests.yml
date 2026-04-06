@@ -144,7 +144,7 @@ jobs:
           cat >> "$HOME/.cargo/config.toml" << 'EOF'
           [target.loongarch64-unknown-linux-gnu]
           linker = "loongarch64-linux-gnu-gcc"
-          runner = "qemu-loongarch64-static -L /usr/loongarch64-linux-gnu"
+          runner = "qemu-loongarch64 -L /usr/loongarch64-linux-gnu"
           EOF
 
       - name: Build for LoongArch 64
@@ -157,9 +157,9 @@ jobs:
 
       - name: Run basic eval tests via QEMU
         run: |
-          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print('Hello from LoongArch 64')"
-          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(1 + 2)"
-          qemu-loongarch64-static -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(typeof Temporal)"
+          qemu-loongarch64 -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print('Hello from LoongArch 64')"
+          qemu-loongarch64 -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(1 + 2)"
+          qemu-loongarch64 -L /usr/loongarch64-linux-gnu ./target/loongarch64-unknown-linux-gnu/release/ai-agent --eval "print(typeof Temporal)"
 
       - name: Run isolated tests via QEMU (limited)
         run: cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
