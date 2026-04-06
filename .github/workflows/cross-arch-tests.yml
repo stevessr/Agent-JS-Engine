@@ -183,6 +183,19 @@ jobs:
           fi
         continue-on-error: true
 
+      - name: Run isolated tests via QEMU (limited)
+        if: steps.check-toolchain.outputs.toolchain_available == 'true'
+        run: |
+          if [ -f ./target/loongarch64-unknown-linux-gnu/release/deps/isolated_test-* ] || [ -d ./target/loongarch64-unknown-linux-gnu/release/deps ]; then
+            cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test isolated_test -- --test-threads=1
+          else
+            echo "LoongArch test binary not built - skipping isolated tests"
+          fi
+        env:
+          CC_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-gcc
+          CXX_loongarch64_unknown_linux_gnu: loongarch64-linux-gnu-g++
+        continue-on-error: true
+
       - name: Report LoongArch status
         run: |
           echo "## LoongArch 64-bit Build Status" >> $GITHUB_STEP_SUMMARY
