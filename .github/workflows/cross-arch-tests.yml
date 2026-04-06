@@ -388,9 +388,14 @@ jobs:
           path: shard-summaries
 
       - name: Generate summary
+        env:
+          NATIVE_RESULT: ${{ needs.native-x86_64.result }}
+          RISCV_RESULT: ${{ needs.riscv64-test262-shards.result }}
+          LOONG_RESULT: ${{ needs.loongarch64-test262-shards.result }}
         run: |
           python - <<'PY'
           import json
+          import os
           import pathlib
 
           def aggregate(prefix: str):
@@ -412,8 +417,8 @@ jobs:
               f.write('# Cross-Architecture Test Results\n\n')
               f.write('| Job | Status | Total | Executed | Passed | Skipped |\n')
               f.write('|-----|--------|-------|----------|--------|---------|\n')
-              f.write(f"| x86_64 smoke | ${{{{ needs.native-x86_64.result }}}} | - | - | - | - |\n")
-              f.write(f"| RISC-V 64 test262 matrix | ${{{{ needs.riscv64-test262-shards.result }}}} | {riscv[0]} | {riscv[1]} | {riscv[2]} | {riscv[3]} |\n")
-              f.write(f"| LoongArch 64 test262 matrix | ${{{{ needs.loongarch64-test262-shards.result }}}} | {loong[0]} | {loong[1]} | {loong[2]} | {loong[3]} |\n")
+              f.write(f"| x86_64 smoke | {os.environ['NATIVE_RESULT']} | - | - | - | - |\n")
+              f.write(f"| RISC-V 64 test262 matrix | {os.environ['RISCV_RESULT']} | {riscv[0]} | {riscv[1]} | {riscv[2]} | {riscv[3]} |\n")
+              f.write(f"| LoongArch 64 test262 matrix | {os.environ['LOONG_RESULT']} | {loong[0]} | {loong[1]} | {loong[2]} | {loong[3]} |\n")
           PY
           cat /tmp/cross-arch-summary.md >> "$GITHUB_STEP_SUMMARY"
