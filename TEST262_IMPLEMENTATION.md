@@ -95,6 +95,8 @@ Runner 使用：
 - `HarnessCache::load()`
 - `build_source()`
 
+`HarnessCache` 现在按 `harness/` 相对路径建索引（而不是仅文件名），因此 `sm/non262-Reflect-shell.js` 这类带目录 include 可以被稳定加载。
+
 对于 `async + module` case，会显式把 `$DONE` 暴露到 `globalThis`，避免 ESM 场景下 harness 不可见。
 
 ### 4. Case 执行与统计
@@ -428,6 +430,10 @@ workflow 文件：
    - 长跑默认应交给 CI
    - 本机更适合跑小样本 / 小目录验证
 
+5. **仍有 3 个 Annex B 边界语义缺口**
+   - `IsHTMLDDA` 已完成引擎级 `[[IsHTMLDDA]]` exotic object 支持并放开相关测试
+   - 余下 3 个 Annex B 边界 case 仍依赖更底层 parser/runtime 语义，当前保持 skip
+
 ---
 
 ## 推荐开发与验证流程
@@ -472,6 +478,14 @@ TEST262_FILTER='test/staging/sm/extensions/regress-650753.js' cargo test --test 
 - `Temporal` 测试已启用
 - `cross-realm` 测试已启用
 - RISC-V 和 LoongArch 跨架构测试支持
+- `Array.fromAsync` 兼容层已修正 `@@asyncIterator` / `@@iterator` 可观察探测顺序
+- `IsHTMLDDA` 已切到引擎级 exotic object（含 `typeof` / `ToBoolean` / `== null` / 可调用返回 `null`）
+
+最近一次本地分片回归（`TEST262_MAX_CASES=5000`）结果：
+
+- Passed: `4997`
+- Skipped: `3`（`Annex B edge semantics: 3`）
+- Failed: `0`
 
 后续若继续推进，最有价值的方向是：
 

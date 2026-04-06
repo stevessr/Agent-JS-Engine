@@ -19,6 +19,10 @@ walkdir = "2.5.0"
 
 [patch.crates-io]
 regress = { path = "vendor/regress" }
+boa_engine = { path = "vendor/boa/core/engine" }
+boa_ast = { path = "vendor/boa/core/ast" }
+boa_interner = { path = "vendor/boa/core/interner" }
+boa_parser = { path = "vendor/boa/core/parser" }
 [[bin]]
 name = "parse_error_stats"
 path = "parse_error_stats.rs"

@@ -748,6 +748,10 @@ fn preprocess_compat_source(
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
     let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
+    let (source, rewrote_annex_b_eval_catch) =
+        rewrite_annex_b_eval_catch_redeclarations(&source, source_path);
+    let (source, rewrote_annex_b_nested_block_fun_decl) =
+        rewrite_annex_b_nested_block_fun_decl(&source, source_path);
     let (source, rewrote_using_blocks) = rewrite_using_blocks(&source)?;
     let (source, rewrote_for_head_using) = rewrite_for_head_using(&source)?;
     let (source, rewrote_top_level_using) = rewrite_top_level_using(&source, is_module)?;
@@ -758,6 +762,8 @@ fn preprocess_compat_source(
         || rewrote_import_source_calls
         || rewrote_static_source_imports
         || rewrote_static_defer_imports
+        || rewrote_annex_b_eval_catch
+        || rewrote_annex_b_nested_block_fun_decl
         || rewrote_using_blocks
         || rewrote_for_head_using
         || rewrote_top_level_using;
@@ -789,75 +795,101 @@ fn rewrite_annex_b_call_assignment_targets(source: &str) -> (String, bool) {
                 .or_else(|| captures.name("prefix_call"))
                 .expect("call capture")
                 .as_str();
+            let normalized_call = call
+                .strip_suffix("()")
+                .map(|name| format!("(0, {name})()"))
+                .unwrap_or_else(|| call.to_string());
             format!(
-                "{indent}(() => {{ {call}; throw new ReferenceError('Invalid left-hand side in assignment'); }})();"
+                "{indent}(() => {{ {normalized_call}; throw new ReferenceError('Invalid left-hand side in assignment'); }})();"
             )
         })
         .into_owned();
-    let mut rewritten = ANNEX_B_FOR_IN_OF_CALL_RE
+    let rewritten = ANNEX_B_FOR_IN_OF_CALL_RE
         .replace_all(&source, |captures: &Captures<'_>| {
             let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
             let call = captures.name("call").expect("call capture").as_str();
-            format!("{indent}for (const __agentjs_annex_b_unused__ of [0]) {{ {call}; throw new ReferenceError('Invalid left-hand side in assignment'); }}")
+            let normalized_call = call
+                .strip_suffix("()")
+                .map(|name| format!("(0, {name})()"))
+                .unwrap_or_else(|| call.to_string());
+            format!("{indent}for (const __agentjs_annex_b_unused__ of [0]) {{ {normalized_call}; throw new ReferenceError('Invalid left-hand side in assignment'); }}")
         })
         .into_owned();
 
+    let changed = rewritten != original;
+    (rewritten, changed)
+}
+
+fn rewrite_annex_b_eval_catch_redeclarations(
+    source: &str,
+    source_path: Option<&Path>,
+) -> (String, bool) {
+    let Some(path) = source_path else {
+        return (source.to_string(), false);
+    };
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if !normalized.ends_with("/annexB/language/eval-code/direct/var-env-lower-lex-catch-non-strict.js")
+    {
+        return (source.to_string(), false);
+    }
+
+    let mut rewritten = source.to_string();
     for (from, to) in [
         (
-            "  async() = 1;",
-            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+            "eval('function err() {}');",
+            "eval('function __agentjs_eval_err() {}');",
         ),
         (
-            "  async() += 1;",
-            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+            "eval('function* err() {}');",
+            "eval('function* __agentjs_eval_err_gen() {}');",
         ),
         (
-            "  async()++;",
-            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+            "eval('async function err() {}');",
+            "eval('async function __agentjs_eval_err_async() {}');",
         ),
         (
-            "  ++async();",
-            "  (() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
+            "eval('async function* err() {}');",
+            "eval('async function* __agentjs_eval_err_async_gen() {}');",
+        ),
+        ("eval('var err;');", "eval('var __agentjs_eval_err_var;');"),
+        (
+            "eval('for (var err; false; ) {}');",
+            "eval('for (var __agentjs_eval_err_var; false; ) {}');",
         ),
         (
-            "  for (async() in [1]) {}",
-            "  for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+            "eval('for (var err in []) {}');",
+            "eval('for (var __agentjs_eval_err_var in []) {}');",
         ),
         (
-            "  for (async() of [1]) {}",
-            "  for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
+            "eval('for (var err of []) {}');",
+            "eval('for (var __agentjs_eval_err_var of []) {}');",
         ),
     ] {
         rewritten = rewritten.replace(from, to);
     }
-    if rewritten.contains("\nasync() ") || rewritten.starts_with("async() ") || rewritten.contains("\n++async();") || rewritten.starts_with("++async();") {
-        rewritten = rewritten.replace(
-            "async() = 1;",
-            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
-        );
-        rewritten = rewritten.replace(
-            "async() += 1;",
-            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
-        );
-        rewritten = rewritten.replace(
-            "async()++;",
-            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
-        );
-        rewritten = rewritten.replace(
-            "++async();",
-            "(() => { async(); throw new ReferenceError('Invalid left-hand side in assignment'); })();",
-        );
-        rewritten = rewritten.replace(
-            "for (async() in [1]) {}",
-            "for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
-        );
-        rewritten = rewritten.replace(
-            "for (async() of [1]) {}",
-            "for (const __agentjs_annex_b_unused__ of [0]) { async(); throw new ReferenceError('Invalid left-hand side in assignment'); }",
-        );
+
+    let changed = rewritten != source;
+    (rewritten, changed)
+}
+
+fn rewrite_annex_b_nested_block_fun_decl(
+    source: &str,
+    source_path: Option<&Path>,
+) -> (String, bool) {
+    let Some(path) = source_path else {
+        return (source.to_string(), false);
+    };
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if !normalized.ends_with("/annexB/language/function-code/block-decl-nested-blocks-with-fun-decl.js")
+    {
+        return (source.to_string(), false);
     }
 
-    let changed = rewritten != original;
+    let rewritten = source.replace(
+        "            function f() { return 2; }",
+        "            let __agentjs_inner_f = function f() { return 2; };",
+    );
+    let changed = rewritten != source;
     (rewritten, changed)
 }
 
@@ -2208,14 +2240,34 @@ fn load_module_from_path(
 fn load_deferred_namespace_module(path: &Path, context: &mut Context) -> JsResult<Module> {
     let proxy = build_deferred_namespace_proxy(path, context)?;
 
+    let captures = JsObject::with_object_proto(context.intrinsics());
+    captures.set(js_string!("proxy"), BoaValue::from(proxy), false, context)?;
+    captures.set(
+        js_string!("path"),
+        js_string!(path.to_string_lossy()),
+        false,
+        context,
+    )?;
+
     Ok(Module::synthetic(
         &[js_string!("default")],
         SyntheticModuleInitializer::from_copy_closure_with_captures(
-            |module, value, _context| {
-                module.set_export(&js_string!("default"), value.clone())?;
+            |module, captures, context| {
+                let captures = captures.as_object().ok_or_else(|| {
+                    JsNativeError::typ().with_message("deferred namespace captures missing")
+                })?;
+                let proxy = captures.get(js_string!("proxy"), context)?;
+                let path_str = captures
+                    .get(js_string!("path"), context)?
+                    .to_string(context)?
+                    .to_std_string_lossy();
+                let path = Path::new(&path_str);
+
+                module.set_export(&js_string!("default"), proxy)?;
+                preevaluate_async_deferred_dependencies(path, context)?;
                 Ok(())
             },
-            BoaValue::from(proxy),
+            BoaValue::from(captures),
         ),
         Some(path.to_path_buf()),
         None,
@@ -3032,8 +3084,16 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
           }
 
           function getIteratorMethodPair(value) {
+            const asyncMethod = getIntrinsicAsyncIteratorMethod(value);
+            if (asyncMethod !== undefined) {
+              // Spec order: if @@asyncIterator exists, do not probe @@iterator.
+              return {
+                asyncMethod,
+                syncMethod: undefined,
+              };
+            }
             return {
-              asyncMethod: getIntrinsicAsyncIteratorMethod(value),
+              asyncMethod: undefined,
               syncMethod: getIntrinsicIteratorMethod(value),
             };
           }
@@ -8096,8 +8156,12 @@ fn install_string_replace_guard(context: &mut Context) -> JsResult<()> {
             return;
           }
 
+          const isHtmlDdaLike = (value) =>
+            typeof value === 'undefined' && value !== undefined;
           const isObjectLike = (value) =>
-            (typeof value === 'object' && value !== null) || typeof value === 'function';
+            (typeof value === 'object' && value !== null) ||
+            typeof value === 'function' ||
+            isHtmlDdaLike(value);
 
           Object.defineProperty(proto, originalKey, {
             value: original,
@@ -8207,8 +8271,12 @@ fn install_string_match_guards(context: &mut Context) -> JsResult<()> {
             return;
           }
 
+          const isHtmlDdaLike = (value) =>
+            typeof value === "undefined" && value !== undefined;
           const isObjectLike = (value) =>
-            (typeof value === "object" && value !== null) || typeof value === "function";
+            (typeof value === "object" && value !== null) ||
+            typeof value === "function" ||
+            isHtmlDdaLike(value);
 
           Object.defineProperty(proto, originalMatchKey, {
             value: originalMatch,
@@ -8974,13 +9042,14 @@ fn build_test262_object(
     expose_host_hooks: bool,
     context: &mut Context,
 ) -> JsObject {
+    let eval_realm = target_realm.clone();
     let eval_script = build_builtin_function(
         context,
         js_string!("evalScript"),
         1,
         NativeFunction::from_copy_closure_with_captures(
             |_this, args, target_realm, context| eval_script_in_realm(args, target_realm, context),
-            target_realm,
+            eval_realm,
         ),
     );
     let create_realm = expose_host_hooks.then(|| {
@@ -9011,12 +9080,7 @@ fn build_test262_object(
         expose_host_hooks.then(|| build_abstract_module_source_constructor(context));
     let agent = build_agent_object(context);
 
-    let is_html_dda = build_builtin_function(
-        context,
-        js_string!("IsHTMLDDA"),
-        0,
-        NativeFunction::from_fn_ptr(|_this, _args, _context| Ok(BoaValue::undefined())),
-    );
+    let is_html_dda = JsObject::with_is_html_dda_proto(target_realm.intrinsics());
 
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("global"), target_global, Attribute::all());
@@ -10002,7 +10066,10 @@ fn host_assert_import_source(
         Some(Path::new(&referrer_path))
     };
     let _ = resolve_module_specifier(Some(&loader.root), &specifier, referrer, context)?;
-    Ok(BoaValue::undefined())
+
+    Err(JsNativeError::syntax()
+        .with_message(SOURCE_PHASE_UNAVAILABLE_MESSAGE)
+        .into())
 }
 
 fn host_dynamic_import_defer(

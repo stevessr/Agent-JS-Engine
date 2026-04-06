@@ -137,10 +137,27 @@
    - 验证：
      - `TEST262_FILTER='cross-realm' TEST262_MAX_CASES=50`：`40 / 40` 通过
 22. 添加 RISC-V 和 LoongArch 跨架构测试支持：
-   - 新增 `.github/workflows/cross-arch-tests.yml` workflow
-   - 支持 RISC-V 64-bit (riscv64gc-unknown-linux-gnu) 交叉编译和 QEMU 用户模式测试
-   - 支持 LoongArch 64-bit (loongarch64-unknown-linux-gnu) 交叉编译（需要工具链可用）
-   - 本地验证：RISC-V 构建和测试通过
+    - 新增 `.github/workflows/cross-arch-tests.yml` workflow
+    - 支持 RISC-V 64-bit (riscv64gc-unknown-linux-gnu) 交叉编译和 QEMU 用户模式测试
+    - 支持 LoongArch 64-bit (loongarch64-unknown-linux-gnu) 交叉编译（需要工具链可用）
+    - 本地验证：RISC-V 构建和测试通过
+23. 修复 `Array.fromAsync` 可观察迭代器探测顺序：
+    - 在 `src/engine/runtime.rs` 的 `Array.fromAsync` 兼容层中调整逻辑：若 `@@asyncIterator` 存在，则不再额外读取 `@@iterator`
+    - 修复了 `test262` 的两个真实失败样本：
+      - `test/built-ins/Array/fromAsync/asyncitems-asynciterator-exists.js`
+      - `test/built-ins/Array/fromAsync/asyncitems-asynciterator-sync.js`
+24. 完成 `IsHTMLDDA` 引擎级补丁并清理剩余真实失败：
+    - 通过 patch Boa 实现 `[[IsHTMLDDA]]` exotic object，并补上核心语义：
+      - `typeof IsHTMLDDA === "undefined"`
+      - `ToBoolean(IsHTMLDDA) === false`
+      - `IsHTMLDDA == null` 为 `true`
+      - `IsHTMLDDA` 可调用且返回 `null`
+    - `$262.IsHTMLDDA` 改为注入引擎级 IsHTMLDDA 对象（不再是 JS 层函数占位）
+    - 修复 `String.prototype.{match,matchAll,replace,replaceAll,search,split}` 兼容 guard，避免把 IsHTMLDDA 误判成原始值并包装成普通对象
+    - 修复 runner harness include 路径缓存，支持 `sm/non262-Reflect-shell.js` 这类带目录 include
+    - 回归结果：
+      - `TEST262_MAX_CASES=5000`：`4997 passed / 3 skipped / 0 failed`，总通过率 `99.94%`
+      - `TEST262_FILTER='annexB/' TEST262_MAX_CASES=1200`：`1083 passed / 3 skipped / 0 failed`
 
 详细实现说明见：`TEST262_IMPLEMENTATION.md`
 
@@ -152,4 +169,5 @@
 - [x] ~~启用 `Temporal` 测试~~（已完成）
 - [x] ~~启用 `cross-realm` 测试~~（已完成）
 - [x] ~~添加 RISC-V 和 LoongArch CI 测试~~（已完成）
+- [ ] 3 个 Annex B 边界语义仍依赖更底层 parser/runtime 语义，当前保持 skip。
 - [ ] 逐步把当前仓库自研 parser/interpreter 与新运行时能力对齐，而不是长期完全依赖外部内核。

@@ -112,9 +112,6 @@ impl Test262Metadata {
 fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     let case_path = case.path.to_string_lossy();
 
-    if case.metadata.has_feature("IsHTMLDDA") {
-        return Some("unsupported feature: IsHTMLDDA");
-    }
     // cross-realm is now supported via $262.createRealm()
     // iterator-sequencing and joint-iteration are now implemented via polyfill
     if case.metadata.has_feature("symbols-as-weakmap-keys") {
@@ -147,15 +144,6 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
         "/built-ins/Function/prototype/toString/built-in-function-object.js",
     ) {
         return Some("unsupported behavior: native Function#toString format");
-    }
-    if case_path.contains(
-        "/annexB/language/eval-code/direct/var-env-lower-lex-catch-non-strict.js",
-    ) || case_path.contains(
-        "/annexB/language/expressions/assignmenttargettype/cover-callexpression-and-asyncarrowhead.js",
-    ) || case_path
-        .contains("/annexB/language/function-code/block-decl-nested-blocks-with-fun-decl.js")
-    {
-        return Some("unsupported behavior: Annex B edge semantics");
     }
     if case_path.contains("/built-ins/Math/f16round/value-conversion.js") {
         return Some("unsupported behavior: Math.f16round rounding edge");
@@ -249,18 +237,24 @@ impl HarnessCache {
 
             let key = entry
                 .path()
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or_default()
-                .to_string();
-            files.insert(key, contents);
+                .strip_prefix(root)
+                .ok()
+                .map(|path| path.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            if !key.is_empty() {
+                files.insert(key, contents);
+            }
         }
 
         Self { files }
     }
 
     fn get(&self, name: &str) -> Option<&str> {
-        self.files.get(name).map(String::as_str)
+        let normalized = name.replace('\\', "/");
+        self.files
+            .get(&normalized)
+            .or_else(|| self.files.get(name))
+            .map(String::as_str)
     }
 }
 
@@ -509,11 +503,11 @@ negative:
 }
 
 #[test]
-fn run_case_skips_unsupported_ishtmldda_feature() {
+fn run_case_skips_unsupported_shadowrealm_feature() {
     let case = TestCase {
         path: PathBuf::from("sample.js"),
         metadata: Test262Metadata {
-            features: vec!["IsHTMLDDA".to_string()],
+            features: vec!["ShadowRealm".to_string()],
             ..Default::default()
         },
     };
@@ -526,7 +520,7 @@ fn run_case_skips_unsupported_ishtmldda_feature() {
     assert_eq!(result.outcome, Outcome::Skipped);
     assert_eq!(
         result.reason.as_deref(),
-        Some("unsupported feature: IsHTMLDDA")
+        Some("unsupported feature: ShadowRealm")
     );
 }
 
