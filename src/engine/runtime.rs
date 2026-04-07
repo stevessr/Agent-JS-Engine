@@ -6445,14 +6445,50 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             return nextMethod.call(iteratorRecord.iterator);
           }
 
+          function getIntrinsicIteratorPrototype(newTarget) {
+            if (newTarget === undefined || newTarget === Iterator) {
+              return Iterator.prototype;
+            }
+            const proto = newTarget.prototype;
+            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
+              return proto;
+            }
+            try {
+              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+              const otherIterator = otherGlobal && otherGlobal.Iterator;
+              const otherProto = otherIterator && otherIterator.prototype;
+              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
+                return otherProto;
+              }
+            } catch {}
+            return Iterator.prototype;
+          }
+
+          function iteratorFromConstructInput(obj) {
+            const iteratorMethod = obj[Symbol.iterator];
+            if (iteratorMethod !== undefined && iteratorMethod !== null) {
+              if (typeof iteratorMethod !== 'function') {
+                throw new TypeError('Symbol.iterator is not callable');
+              }
+              const iterator = iteratorMethod.call(obj);
+              return GetIteratorDirect(iterator);
+            }
+            if (typeof obj !== 'object' || obj === null) {
+              throw new TypeError('obj is not iterable');
+            }
+            return GetIteratorDirect(obj);
+          }
+
           // Iterator constructor - abstract class
-          function Iterator() {
+          function Iterator(_iterable) {
             if (new.target === undefined) {
               throw new TypeError('Constructor Iterator requires "new"');
             }
             if (new.target === Iterator) {
               throw new TypeError('Abstract class Iterator not directly constructable');
             }
+            const proto = getIntrinsicIteratorPrototype(new.target);
+            return Object.create(proto);
           }
 
           // SetterThatIgnoresPrototypeProperties per spec
@@ -7076,6 +7112,43 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             }
           }, 0);
 
+          const WrapForValidIteratorPrototype = Object.create(IteratorPrototype);
+
+          function createIteratorWrapper(iteratorRecord) {
+            let returnMethodInitialized = false;
+            let cachedReturn;
+            const helper = createIteratorHelper(
+              iteratorRecord,
+              (state) => IteratorNext(state.underlyingRecord),
+              (state, value) => {
+                if (!returnMethodInitialized) {
+                  const returnMethod = state.underlyingRecord.iterator.return;
+                  cachedReturn = typeof returnMethod === 'function' ? returnMethod : undefined;
+                  returnMethodInitialized = true;
+                }
+                if (cachedReturn === undefined) {
+                  return { value, done: true };
+                }
+                const result = cachedReturn.call(state.underlyingRecord.iterator, value);
+                if (typeof result !== 'object' || result === null) {
+                  throw new TypeError('Iterator result must be an object');
+                }
+                return result;
+              }
+            );
+            const sourceProto = Object.getPrototypeOf(iteratorRecord.iterator);
+            const keepSourcePrototype =
+              sourceProto !== null &&
+              sourceProto !== Object.prototype &&
+              sourceProto !== IteratorPrototype &&
+              typeof iteratorRecord.iterator.throw === 'function';
+            if (keepSourcePrototype) {
+              Object.setPrototypeOf(helper, sourceProto);
+            } else {
+              Object.setPrototypeOf(helper, WrapForValidIteratorPrototype);
+            }
+            return helper;
+          }
           // Iterator.from static method (non-constructible)
           defineNonConstructibleMethod(Iterator, 'from', function from(obj) {
             if (typeof obj !== 'object' && typeof obj !== 'string') {
@@ -7085,41 +7158,28 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               throw new TypeError('Iterator.from requires an object or string');
             }
 
-            // Check for @@iterator method
             let iteratorRecord;
             const iteratorMethod = obj[Symbol.iterator];
             if (iteratorMethod !== undefined && iteratorMethod !== null) {
-              // Has @@iterator property that is not null/undefined - must be callable
               if (typeof iteratorMethod !== 'function') {
                 throw new TypeError('Symbol.iterator is not callable');
               }
               const iterator = iteratorMethod.call(obj);
-              // Check if it's already a proper Iterator
-              if (Object.prototype.isPrototypeOf.call(IteratorPrototype, iterator)) {
-                return iterator;
-              }
               iteratorRecord = GetIteratorDirect(iterator);
             } else {
-              // GetIteratorFlattenable with stringHandling = "iterate-string-primitives"
-              // For objects without @@iterator, use the object directly as iterator
-              // Read .next only once here via GetIteratorDirect
-              // Note: .next doesn't have to be callable - that's validated lazily
               if (typeof obj !== 'object' || obj === null) {
                 throw new TypeError('obj is not iterable');
               }
               iteratorRecord = GetIteratorDirect(obj);
             }
 
-            // Wrap it
-            return createIteratorHelper(iteratorRecord, (state) => {
-              return IteratorNext(state.underlyingRecord);
-            });
+            const helper = createIteratorWrapper(iteratorRecord);
+            return helper;
           }, 1);
 
           // Iterator.concat static method (iterator-sequencing proposal)
           // https://tc39.es/proposal-iterator-sequencing/
           defineNonConstructibleMethod(Iterator, 'concat', function concat(...items) {
-            // 1. Let iterables be a new empty List.
             const iterables = [];
             // 2. For each element item of items, do
             for (let i = 0; i < items.length; i++) {
@@ -7245,28 +7305,98 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             return helper;
           }, 0);
 
+          function closeInputIterator(inputIterRecord, error) {
+            const iterator = inputIterRecord && inputIterRecord.iterator ? inputIterRecord.iterator : inputIterRecord;
+            let returnMethod;
+            try {
+              returnMethod = iterator?.return;
+            } catch (e) {
+              if (error !== undefined) {
+                throw error;
+              }
+              throw e;
+            }
+            if (typeof returnMethod === 'function') {
+              if (error !== undefined) {
+                try {
+                  returnMethod.call(iterator);
+                } catch (_) {}
+              } else {
+                const result = returnMethod.call(iterator);
+                if (typeof result !== 'object' || result === null) {
+                  throw new TypeError('Iterator result must be an object');
+                }
+              }
+            }
+            if (error !== undefined) {
+              throw error;
+            }
+          }
+
+          function closeIteratorList(iteratorList, startIndex, skipIndex, error, shouldThrow = true) {
+            let closeError = null;
+            for (let i = iteratorList.length - 1; i >= startIndex; i--) {
+              if (i === skipIndex || iteratorList[i] === null) {
+                continue;
+              }
+              const record = iteratorList[i];
+              const iter = record && record.iterator ? record.iterator : record;
+              let returnMethod;
+              try {
+                returnMethod = iter?.return;
+              } catch (e) {
+                if (error === undefined && closeError === null) {
+                  closeError = e;
+                }
+                iteratorList[i] = null;
+                continue;
+              }
+              if (typeof returnMethod === 'function') {
+                if (error !== undefined) {
+                  try {
+                    returnMethod.call(iter);
+                  } catch (_) {}
+                } else {
+                  try {
+                    const result = returnMethod.call(iter);
+                    if (typeof result !== 'object' || result === null) {
+                      throw new TypeError('Iterator result must be an object');
+                    }
+                  } catch (e) {
+                    if (closeError === null) {
+                      closeError = e;
+                    }
+                  }
+                }
+              }
+              iteratorList[i] = null;
+            }
+            if (error !== undefined) {
+              if (shouldThrow) {
+                throw error;
+              }
+              return error;
+            }
+            if (closeError !== null) {
+              throw closeError;
+            }
+          }
+
           // Iterator.zip static method (joint-iteration proposal)
           // https://tc39.es/proposal-joint-iteration/
           defineNonConstructibleMethod(Iterator, 'zip', function zip(iterables, options) {
-            // 1. If iterables is not an Object, throw a TypeError exception.
             if (typeof iterables !== 'object' || iterables === null) {
               throw new TypeError('Iterator.zip: iterables is not an object');
             }
-            
-            // 2. Let mode be "shortest".
+
             let mode = 'shortest';
-            // 3. Let paddingOption be undefined.
             let paddingOption = undefined;
-            
-            // 4. If options is not undefined, then
+
             if (options !== undefined) {
-              // a. If options is not an Object, throw a TypeError exception.
               if (typeof options !== 'object' || options === null) {
                 throw new TypeError('Iterator.zip: options is not an object');
               }
-              // b. Let modeOption be ? Get(options, "mode").
               const modeOption = options.mode;
-              // c. If modeOption is undefined, set mode to "shortest".
               if (modeOption === undefined) {
                 mode = 'shortest';
               } else if (modeOption === 'longest' || modeOption === 'strict' || modeOption === 'shortest') {
@@ -7274,52 +7404,38 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               } else {
                 throw new TypeError('Iterator.zip: mode must be "shortest", "longest", or "strict"');
               }
-              // d. If mode is "longest", then
               if (mode === 'longest') {
-                // i. Let paddingOption be ? Get(options, "padding").
                 paddingOption = options.padding;
               }
             }
-            
-            // 5. Let iters be a new empty List.
-            // Each element is { iterator, nextMethod, done }
+
             const iters = [];
-            // 6. Let padding be a new empty List.
-            let padding = [];
-            // Track which iterators are open (for closing in reverse order)
             const openIters = [];
-            
-            // Helper to close iterators in reverse order from openIters
-            function closeOpenIterators(startIdx, endIdx, rethrowError) {
-              let firstError = null;
-              // Close from endIdx down to startIdx (reverse order)
-              for (let i = endIdx; i >= startIdx; i--) {
-                const iter = openIters[i];
-                if (iter !== null) {
-                  const returnMethod = iter.return;
-                  if (typeof returnMethod === 'function') {
-                    try {
-                      const result = returnMethod.call(iter);
-                      if (typeof result !== 'object' || result === null) {
-                        if (firstError === null) {
-                          firstError = new TypeError('Iterator result must be an object');
-                        }
-                      }
-                    } catch (e) {
-                      if (firstError === null) {
-                        firstError = e;
-                      }
-                    }
-                  }
+
+            function closeZipIterators(skipIndex, error) {
+              closeIteratorList(openIters, 0, skipIndex, error);
+            }
+
+            function getIteratorFlattenable(value) {
+              if (typeof value !== 'object' || value === null) {
+                throw new TypeError('Iterator.zip: iterable element is not an object');
+              }
+              const iterMethod = value[Symbol.iterator];
+              let iter;
+              if (iterMethod === undefined) {
+                iter = value;
+              } else {
+                if (typeof iterMethod !== 'function') {
+                  throw new TypeError('Iterator.zip: @@iterator is not callable');
+                }
+                iter = iterMethod.call(value);
+                if (typeof iter !== 'object' || iter === null) {
+                  throw new TypeError('Iterator.zip: iterator is not an object');
                 }
               }
-              if (rethrowError && firstError !== null) {
-                throw firstError;
-              }
-              return firstError;
+              return GetIteratorDirect(iter);
             }
-            
-            // 7. Let inputIter be ? GetIterator(iterables, SYNC).
+
             const inputIterMethod = iterables[Symbol.iterator];
             if (typeof inputIterMethod !== 'function') {
               throw new TypeError('Iterator.zip: iterables is not iterable');
@@ -7328,96 +7444,101 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
             if (typeof inputIter !== 'object' || inputIter === null) {
               throw new TypeError('Iterator.zip: iterables iterator is not an object');
             }
-            
-            // Iterate over input iterables to build iters list
+            const inputIterRecord = GetIteratorDirect(inputIter);
+
             try {
               while (true) {
-                const next = inputIter.next();
+                let next;
+                try {
+                  next = IteratorNext(inputIterRecord);
+                } catch (e) {
+                  closeIteratorList(openIters, 0, -1, e, false);
+                  throw e;
+                }
                 if (typeof next !== 'object' || next === null) {
-                  throw new TypeError('Iterator.zip: iterator result is not an object');
+                  const error = new TypeError('Iterator.zip: iterator result is not an object');
+                  closeIteratorList(openIters, 0, -1, error, false);
+                  throw error;
                 }
-                if (next.done) break;
-                
+                const done = !!next.done;
+                if (done) {
+                  break;
+                }
                 const value = next.value;
-                // GetIteratorFlattenable(value, REJECT-STRINGS)
-                if (typeof value !== 'object' || value === null) {
-                  throw new TypeError('Iterator.zip: iterable element is not an object');
+                try {
+                  const iterRecord = getIteratorFlattenable(value);
+                  iters.push({ iterator: iterRecord.iterator, nextMethod: iterRecord.nextMethod, done: false });
+                  openIters.push(iterRecord.iterator);
+                } catch (e) {
+                  closeIteratorList(openIters, 0, -1, e, false);
+                  closeInputIterator(inputIterRecord, e);
                 }
-                const iterMethod = value[Symbol.iterator];
-                let iter;
-                if (iterMethod === undefined || iterMethod === null) {
-                  // Use object directly as iterator
-                  iter = value;
-                } else {
-                  if (typeof iterMethod !== 'function') {
-                    throw new TypeError('Iterator.zip: @@iterator is not callable');
-                  }
-                  iter = iterMethod.call(value);
-                  if (typeof iter !== 'object' || iter === null) {
-                    throw new TypeError('Iterator.zip: iterator is not an object');
-                  }
-                }
-                // Get the next method once
-                const nextMethod = iter.next;
-                iters.push({ iterator: iter, nextMethod, done: false });
-                // Don't add to openIters yet - they're opened lazily during iteration
               }
             } catch (e) {
-              // Close the inputIter on error
-              if (typeof inputIter.return === 'function') {
-                try { inputIter.return.call(inputIter); } catch (e2) {}
-              }
-              // Close any iterators we already got (in reverse order)
-              for (let i = iters.length - 1; i >= 0; i--) {
-                const iter = iters[i].iterator;
-                if (typeof iter.return === 'function') {
-                  try { iter.return.call(iter); } catch (e2) {}
-                }
-              }
               throw e;
             }
-            
-            // Handle padding for longest mode
-            if (mode === 'longest') {
-              if (paddingOption === undefined) {
-                padding = new Array(iters.length).fill(undefined);
-              } else {
-                // GetIterator(paddingOption, SYNC)
-                if (typeof paddingOption !== 'object' || paddingOption === null) {
-                  throw new TypeError('Iterator.zip: padding is not an object');
+
+            const padding = new Array(iters.length).fill(undefined);
+            if (mode === 'longest' && paddingOption !== undefined) {
+              if (typeof paddingOption !== 'object' || paddingOption === null) {
+                closeZipIterators(-1, new TypeError('Iterator.zip: padding is not an object'));
+              }
+              const paddingIterMethod = paddingOption[Symbol.iterator];
+              if (typeof paddingIterMethod !== 'function') {
+                closeZipIterators(-1, new TypeError('Iterator.zip: padding is not iterable'));
+              }
+              let paddingIter;
+              try {
+                paddingIter = paddingIterMethod.call(paddingOption);
+              } catch (e) {
+                closeZipIterators(-1, e);
+              }
+              if (typeof paddingIter !== 'object' || paddingIter === null) {
+                closeZipIterators(-1, new TypeError('Iterator.zip: padding iterator is not an object'));
+              }
+              const paddingIterRecord = GetIteratorDirect(paddingIter);
+              let usingIterator = true;
+              let completionError;
+              for (let i = 0; i < iters.length; i++) {
+                if (!usingIterator) {
+                  padding[i] = undefined;
+                  continue;
                 }
-                const paddingIterMethod = paddingOption[Symbol.iterator];
-                if (typeof paddingIterMethod !== 'function') {
-                  throw new TypeError('Iterator.zip: padding is not iterable');
-                }
-                const paddingIter = paddingIterMethod.call(paddingOption);
-                if (typeof paddingIter !== 'object' || paddingIter === null) {
-                  throw new TypeError('Iterator.zip: padding iterator is not an object');
-                }
-                padding = [];
-                for (let i = 0; i < iters.length; i++) {
-                  const pnext = paddingIter.next();
-                  if (typeof pnext !== 'object' || pnext === null) {
+                try {
+                  const next = IteratorNext(paddingIterRecord);
+                  if (typeof next !== 'object' || next === null) {
                     throw new TypeError('Iterator.zip: padding iterator result is not an object');
                   }
-                  if (pnext.done) {
-                    padding.push(undefined);
+                  const done = !!next.done;
+                  if (done) {
+                    usingIterator = false;
+                    padding[i] = undefined;
                   } else {
-                    padding.push(pnext.value);
+                    padding[i] = next.value;
                   }
+                } catch (e) {
+                  completionError = e;
+                  break;
+                }
+              }
+              if (completionError !== undefined) {
+                closeIteratorList(openIters, 0, -1, completionError, false);
+                throw completionError;
+              }
+              if (usingIterator) {
+                try {
+                  closeInputIterator(paddingIterRecord);
+                } catch (e) {
+                  closeIteratorList(openIters, 0, -1, e, false);
+                  throw e;
                 }
               }
             }
-            
-            // Create the zipped iterator
+
             let executing = false;
             let allDone = iters.length === 0;
-            let hasYielded = false;  // Track if we've entered suspended-yield state
-            // Initialize openIters array (all start as the iterator objects)
-            for (let i = 0; i < iters.length; i++) {
-              openIters.push(iters[i].iterator);
-            }
-            
+            let hasYielded = false;
+
             function nextImpl() {
               if (executing) {
                 throw new TypeError('Generator is already executing');
@@ -7425,224 +7546,111 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (allDone) {
                 return { value: undefined, done: true };
               }
-              
+
               executing = true;
               try {
                 const iterCount = iters.length;
                 const results = [];
-                
+
                 for (let i = 0; i < iterCount; i++) {
-                  if (iters[i].done) {
-                    // This iterator already finished
+                  const iter = iters[i];
+                  if (iter.done) {
                     if (mode === 'longest') {
                       results.push(padding[i]);
                     }
                     continue;
                   }
-                  
-                  // Call next
-                  const nextMethod = iters[i].nextMethod;
-                  if (typeof nextMethod !== 'function') {
-                    // Close all in reverse order (from iterCount-1 down to 0, skipping i)
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
+
+                  if (typeof iter.nextMethod !== 'function') {
                     allDone = true;
-                    throw new TypeError('Iterator next method is not callable');
+                    closeZipIterators(i, new TypeError('Iterator next method is not callable'));
                   }
-                  
+
                   let result;
                   try {
-                    result = nextMethod.call(iters[i].iterator);
+                    result = iter.nextMethod.call(iter.iterator);
                   } catch (e) {
-                    // Close all iterators in reverse order, except i
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
                     allDone = true;
-                    throw e;
+                    closeZipIterators(i, e);
                   }
-                  
+
                   if (typeof result !== 'object' || result === null) {
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
                     allDone = true;
-                    throw new TypeError('Iterator result must be an object');
+                    closeZipIterators(i, new TypeError('Iterator result must be an object'));
                   }
-                  
+
                   const done = !!result.done;
                   if (done) {
-                    iters[i].done = true;
+                    iter.done = true;
                     openIters[i] = null;
-                    
+
                     if (mode === 'shortest') {
-                      // Close remaining iterators in reverse order (excluding i)
-                      // IteratorCloseAll with ReturnCompletion(undefined)
-                      // Close in reverse order, propagate first error if any
-                      let closeError = null;
-                      for (let j = iterCount - 1; j >= 0; j--) {
-                        if (j !== i && openIters[j] !== null) {
-                          const iter = openIters[j];
-                          if (typeof iter.return === 'function') {
-                            try { 
-                              const result = iter.return.call(iter); 
-                              if (closeError === null && (typeof result !== 'object' || result === null)) {
-                                closeError = new TypeError('Iterator result must be an object');
-                              }
-                            } catch (e2) {
-                              if (closeError === null) {
-                                closeError = e2;
-                              }
-                            }
-                          }
-                          openIters[j] = null;
-                        }
-                      }
                       allDone = true;
-                      if (closeError !== null) {
-                        throw closeError;
-                      }
+                      closeZipIterators(i);
                       return { value: undefined, done: true };
-                    } else if (mode === 'strict') {
-                      // In strict mode, when iterator at index i finishes:
-                      // - If i == 0, explicitly check all remaining iterators
-                      // - If i != 0, immediately close all open iterators and throw TypeError
+                    }
+
+                    if (mode === 'strict') {
                       if (i !== 0) {
-                        // Close all open iterators in reverse order (they're in openIters)
-                        // IteratorCloseAll with ThrowCompletion(TypeError)
                         allDone = true;
-                        for (let k = openIters.length - 1; k >= 0; k--) {
-                          if (openIters[k] !== null) {
-                            const iter = openIters[k];
-                            if (typeof iter.return === 'function') {
-                              try { iter.return.call(iter); } catch (e) {}
-                            }
-                            openIters[k] = null;
-                          }
-                        }
-                        throw new TypeError('Iterator.zip: iterators have different lengths (strict mode)');
+                        closeZipIterators(-1, new TypeError('Iterator.zip: iterators have different lengths (strict mode)'));
                       }
-                      
-                      // i == 0: For each k from 1 to iterCount-1, call next and verify done
                       for (let k = 1; k < iterCount; k++) {
-                        const kNextMethod = iters[k].nextMethod;
-                        if (typeof kNextMethod !== 'function') {
+                        const other = iters[k];
+                        if (typeof other.nextMethod !== 'function') {
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator next method is not callable');
+                          closeZipIterators(-1, new TypeError('Iterator next method is not callable'));
                         }
-                        
-                        let kResult;
+                        let otherResult;
                         try {
-                          kResult = kNextMethod.call(iters[k].iterator);
+                          otherResult = other.nextMethod.call(other.iterator);
                         } catch (e) {
-                          // Close remaining iterators, then rethrow
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (j !== k && openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e2) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw e;
+                          closeZipIterators(k, e);
                         }
-                        
-                        if (typeof kResult !== 'object' || kResult === null) {
+                        if (typeof otherResult !== 'object' || otherResult === null) {
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (j !== k && openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator result must be an object');
+                          closeZipIterators(k, new TypeError('Iterator result must be an object'));
                         }
-                        
-                        if (kResult.done) {
-                          iters[k].done = true;
+                        if (!!otherResult.done) {
+                          other.done = true;
                           openIters[k] = null;
                         } else {
-                          // Not done - close all remaining in reverse and throw TypeError
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator.zip: iterators have different lengths (strict mode)');
+                          closeZipIterators(-1, new TypeError('Iterator.zip: iterators have different lengths (strict mode)'));
                         }
                       }
-                      // All iterators finished at the same time - done
                       allDone = true;
                       return { value: undefined, done: true };
-                    } else {
-                      // longest mode
-                      results.push(padding[i]);
                     }
+
+                    results.push(padding[i]);
                   } else {
                     results.push(result.value);
                   }
                 }
-                
-                // In longest mode, check if ALL are done
+
                 if (mode === 'longest') {
-                  let allItersDone = true;
+                  let allIteratorsDone = true;
                   for (let i = 0; i < iterCount; i++) {
                     if (!iters[i].done) {
-                      allItersDone = false;
+                      allIteratorsDone = false;
                       break;
                     }
                   }
-                  if (allItersDone) {
+                  if (allIteratorsDone) {
                     allDone = true;
                     return { value: undefined, done: true };
                   }
                 }
-                
+
                 hasYielded = true;
                 return { value: results, done: false };
               } finally {
                 executing = false;
               }
             }
-            
+
             function returnImpl() {
               if (executing) {
                 throw new TypeError('Generator is already executing');
@@ -7650,71 +7658,37 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (allDone) {
                 return { value: undefined, done: true };
               }
-              
-              // Per spec:
-              // - If suspended-start (hasYielded is false): set state to completed, then close
-              // - If suspended-yield (hasYielded is true): set state to executing during close
               if (!hasYielded) {
-                // suspended-start: set to completed before close
                 allDone = true;
               } else {
-                // suspended-yield: set executing during close
                 executing = true;
               }
-              
               try {
-                // IteratorCloseAll with ReturnCompletion(undefined)
-                // Close all open iterators in reverse order, propagate first error
-                let closeError = null;
-                for (let i = openIters.length - 1; i >= 0; i--) {
-                  if (openIters[i] !== null) {
-                    const iter = openIters[i];
-                    if (typeof iter.return === 'function') {
-                      try { 
-                        const result = iter.return.call(iter);
-                        if (closeError === null && (typeof result !== 'object' || result === null)) {
-                          closeError = new TypeError('Iterator result must be an object');
-                        }
-                      } catch (e) {
-                        if (closeError === null) {
-                          closeError = e;
-                        }
-                      }
-                    }
-                    openIters[i] = null;
-                  }
-                }
+                closeZipIterators(-1);
                 allDone = true;
-                if (closeError !== null) {
-                  throw closeError;
-                }
                 return { value: undefined, done: true };
               } finally {
                 executing = false;
               }
             }
-            
+
             const helper = Object.create(IteratorHelperPrototype);
             defineNonConstructibleMethod(helper, 'next', nextImpl, 0);
             defineNonConstructibleMethod(helper, 'return', returnImpl, 0);
-            
+
             return helper;
           }, 1);
 
           // Iterator.zipKeyed static method (joint-iteration proposal)
           // https://tc39.es/proposal-joint-iteration/
           defineNonConstructibleMethod(Iterator, 'zipKeyed', function zipKeyed(iterables, options) {
-            // 1. If iterables is not an Object, throw a TypeError exception.
             if (typeof iterables !== 'object' || iterables === null) {
               throw new TypeError('Iterator.zipKeyed: iterables is not an object');
             }
-            
-            // 2. Let mode be "shortest".
+
             let mode = 'shortest';
-            // 3. Let paddingOption be undefined.
             let paddingOption = undefined;
-            
-            // 4. If options is not undefined, then
+
             if (options !== undefined) {
               if (typeof options !== 'object' || options === null) {
                 throw new TypeError('Iterator.zipKeyed: options is not an object');
@@ -7731,82 +7705,89 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                 paddingOption = options.padding;
               }
             }
-            
-            // Get the keys and iterators
-            const keys = Object.keys(iterables);
+
             const iters = [];
-            const padding = {};
             const openIters = [];
-            
-            for (const key of keys) {
-              const value = iterables[key];
-              // GetIteratorFlattenable(value, REJECT-STRINGS)
+            const keys = [];
+
+            function closeZipKeyedIterators(skipIndex, error) {
+              closeIteratorList(openIters, 0, skipIndex, error);
+            }
+
+            const allKeys = Reflect.ownKeys(iterables);
+            for (const key of allKeys) {
+              let desc;
+              try {
+                desc = Reflect.getOwnPropertyDescriptor(iterables, key);
+              } catch (e) {
+                closeZipKeyedIterators(-1, e);
+              }
+              if (desc === undefined || desc.enumerable !== true) {
+                continue;
+              }
+              let value;
+              try {
+                value = iterables[key];
+              } catch (e) {
+                closeZipKeyedIterators(-1, e);
+              }
+              if (value === undefined) {
+                continue;
+              }
               if (typeof value !== 'object' || value === null) {
-                // Close any already opened iterators in reverse
-                for (let j = iters.length - 1; j >= 0; j--) {
-                  const iter = iters[j].iterator;
-                  if (typeof iter.return === 'function') {
-                    try { iter.return.call(iter); } catch (e) {}
-                  }
-                }
-                throw new TypeError('Iterator.zipKeyed: iterable element is not an object');
+                closeZipKeyedIterators(-1, new TypeError('Iterator.zipKeyed: iterable element is not an object'));
               }
-              const iterMethod = value[Symbol.iterator];
-              let iter;
-              if (iterMethod === undefined || iterMethod === null) {
-                iter = value;
-              } else {
-                if (typeof iterMethod !== 'function') {
-                  for (let j = iters.length - 1; j >= 0; j--) {
-                    const it = iters[j].iterator;
-                    if (typeof it.return === 'function') {
-                      try { it.return.call(it); } catch (e) {}
-                    }
+              try {
+                const iterMethod = value[Symbol.iterator];
+                let iter;
+                if (iterMethod === undefined || iterMethod === null) {
+                  iter = value;
+                } else {
+                  if (typeof iterMethod !== 'function') {
+                    closeZipKeyedIterators(-1, new TypeError('Iterator.zipKeyed: @@iterator is not callable'));
                   }
-                  throw new TypeError('Iterator.zipKeyed: @@iterator is not callable');
-                }
-                iter = iterMethod.call(value);
-                if (typeof iter !== 'object' || iter === null) {
-                  for (let j = iters.length - 1; j >= 0; j--) {
-                    const it = iters[j].iterator;
-                    if (typeof it.return === 'function') {
-                      try { it.return.call(it); } catch (e) {}
-                    }
+                  iter = iterMethod.call(value);
+                  if (typeof iter !== 'object' || iter === null) {
+                    closeZipKeyedIterators(-1, new TypeError('Iterator.zipKeyed: iterator is not an object'));
                   }
-                  throw new TypeError('Iterator.zipKeyed: iterator is not an object');
                 }
+                const nextMethod = iter.next;
+                keys.push(key);
+                iters.push({ key, iterator: iter, nextMethod, done: false });
+                openIters.push(iter);
+              } catch (e) {
+                closeZipKeyedIterators(-1, e);
               }
-              const nextMethod = iter.next;
-              iters.push({ key, iterator: iter, nextMethod, done: false });
-              openIters.push(iter);
             }
-            
-            // Handle padding for longest mode
-            if (mode === 'longest') {
-              if (paddingOption === undefined) {
-                for (const key of keys) {
-                  padding[key] = undefined;
-                }
-              } else if (typeof paddingOption !== 'object' || paddingOption === null) {
-                for (let j = iters.length - 1; j >= 0; j--) {
-                  const iter = iters[j].iterator;
-                  if (typeof iter.return === 'function') {
-                    try { iter.return.call(iter); } catch (e) {}
-                  }
-                }
+
+            const paddingValues = Object.create(null);
+            if (mode === 'longest' && paddingOption !== undefined) {
+              if (typeof paddingOption !== 'object' || paddingOption === null) {
                 throw new TypeError('Iterator.zipKeyed: padding is not an object');
-              } else {
-                for (const key of keys) {
-                  padding[key] = paddingOption[key];
+              }
+              for (const key of keys) {
+                try {
+                  paddingValues[key] = paddingOption[key];
+                } catch (e) {
+                  closeZipKeyedIterators(-1, e);
                 }
               }
             }
-            
-            // Create the zipped iterator
+
+            function getPaddingValue(key) {
+              if (mode !== 'longest') {
+                return undefined;
+              }
+              if (paddingOption === undefined) {
+                return undefined;
+              }
+              return paddingValues[key];
+            }
+
             let executing = false;
             let allDone = iters.length === 0;
-            let hasYielded = false;  // Track if we've entered suspended-yield state
-            
+            let hasYielded = false;
+
             function nextImpl() {
               if (executing) {
                 throw new TypeError('Generator is already executing');
@@ -7814,194 +7795,94 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (allDone) {
                 return { value: undefined, done: true };
               }
-              
+
               executing = true;
               try {
                 const iterCount = iters.length;
                 const resultObj = Object.create(null);
-                
+
                 for (let i = 0; i < iterCount; i++) {
                   const { key, iterator, nextMethod } = iters[i];
-                  
+
                   if (iters[i].done) {
                     if (mode === 'longest') {
-                      resultObj[key] = padding[key];
+                      resultObj[key] = getPaddingValue(key);
                     }
                     continue;
                   }
-                  
+
                   if (typeof nextMethod !== 'function') {
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
                     allDone = true;
-                    throw new TypeError('Iterator next method is not callable');
+                    closeZipKeyedIterators(i, new TypeError('Iterator next method is not callable'));
                   }
-                  
+
                   let result;
                   try {
                     result = nextMethod.call(iterator);
                   } catch (e) {
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
                     allDone = true;
-                    throw e;
+                    closeZipKeyedIterators(i, e);
                   }
-                  
+
                   if (typeof result !== 'object' || result === null) {
-                    for (let j = iterCount - 1; j >= 0; j--) {
-                      if (j !== i && openIters[j] !== null) {
-                        const iter = openIters[j];
-                        if (typeof iter.return === 'function') {
-                          try { iter.return.call(iter); } catch (e2) {}
-                        }
-                        openIters[j] = null;
-                      }
-                    }
                     allDone = true;
-                    throw new TypeError('Iterator result must be an object');
+                    closeZipKeyedIterators(i, new TypeError('Iterator result must be an object'));
                   }
-                  
+
                   const done = !!result.done;
                   if (done) {
                     iters[i].done = true;
                     openIters[i] = null;
-                    
+
                     if (mode === 'shortest') {
-                      // IteratorCloseAll with ReturnCompletion(undefined)
-                      let closeError = null;
-                      for (let j = iterCount - 1; j >= 0; j--) {
-                        if (j !== i && openIters[j] !== null) {
-                          const iter = openIters[j];
-                          if (typeof iter.return === 'function') {
-                            try { 
-                              const result = iter.return.call(iter);
-                              if (closeError === null && (typeof result !== 'object' || result === null)) {
-                                closeError = new TypeError('Iterator result must be an object');
-                              }
-                            } catch (e2) {
-                              if (closeError === null) {
-                                closeError = e2;
-                              }
-                            }
-                          }
-                          openIters[j] = null;
-                        }
-                      }
                       allDone = true;
-                      if (closeError !== null) {
-                        throw closeError;
-                      }
+                      closeZipKeyedIterators(i);
                       return { value: undefined, done: true };
                     } else if (mode === 'strict') {
-                      // In strict mode, when iterator at index i finishes:
-                      // - If i == 0, explicitly check all remaining iterators
-                      // - If i != 0, immediately close all open iterators and throw TypeError
                       if (i !== 0) {
-                        // Close all open iterators in reverse order
                         allDone = true;
-                        for (let k = openIters.length - 1; k >= 0; k--) {
-                          if (openIters[k] !== null) {
-                            const iter = openIters[k];
-                            if (typeof iter.return === 'function') {
-                              try { iter.return.call(iter); } catch (e) {}
-                            }
-                            openIters[k] = null;
-                          }
-                        }
-                        throw new TypeError('Iterator.zipKeyed: iterators have different lengths (strict mode)');
+                        closeZipKeyedIterators(-1, new TypeError('Iterator.zipKeyed: iterators have different lengths (strict mode)'));
                       }
-                      
-                      // i == 0: For each k from 1 to iterCount-1, call next and verify done
+
                       for (let k = 1; k < iterCount; k++) {
                         const kNextMethod = iters[k].nextMethod;
                         if (typeof kNextMethod !== 'function') {
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator next method is not callable');
+                          closeZipKeyedIterators(-1, new TypeError('Iterator next method is not callable'));
                         }
-                        
+
                         let kResult;
                         try {
                           kResult = kNextMethod.call(iters[k].iterator);
                         } catch (e) {
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (j !== k && openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e2) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw e;
+                          closeZipKeyedIterators(k, e);
                         }
-                        
+
                         if (typeof kResult !== 'object' || kResult === null) {
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (j !== k && openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator result must be an object');
+                          closeZipKeyedIterators(k, new TypeError('Iterator result must be an object'));
                         }
-                        
+
                         if (kResult.done) {
                           iters[k].done = true;
                           openIters[k] = null;
                         } else {
-                          // Not done - close all remaining in reverse and throw TypeError
                           allDone = true;
-                          for (let j = openIters.length - 1; j >= 0; j--) {
-                            if (openIters[j] !== null) {
-                              const iter = openIters[j];
-                              if (typeof iter.return === 'function') {
-                                try { iter.return.call(iter); } catch (e) {}
-                              }
-                              openIters[j] = null;
-                            }
-                          }
-                          throw new TypeError('Iterator.zipKeyed: iterators have different lengths (strict mode)');
+                          closeZipKeyedIterators(-1, new TypeError('Iterator.zipKeyed: iterators have different lengths (strict mode)'));
                         }
                       }
-                      // All iterators finished at the same time - done
+
                       allDone = true;
                       return { value: undefined, done: true };
                     } else {
-                      resultObj[key] = padding[key];
+                      resultObj[key] = getPaddingValue(key);
                     }
                   } else {
                     resultObj[key] = result.value;
                   }
                 }
-                
+
                 if (mode === 'longest') {
                   let allItersDone = true;
                   for (let i = 0; i < iterCount; i++) {
@@ -8015,14 +7896,14 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
                     return { value: undefined, done: true };
                   }
                 }
-                
+
                 hasYielded = true;
                 return { value: resultObj, done: false };
               } finally {
                 executing = false;
               }
             }
-            
+
             function returnImpl() {
               if (executing) {
                 throw new TypeError('Generator is already executing');
@@ -8030,53 +7911,24 @@ fn install_iterator_helpers(context: &mut Context) -> JsResult<()> {
               if (allDone) {
                 return { value: undefined, done: true };
               }
-              
-              // Per spec:
-              // - If suspended-start (hasYielded is false): set state to completed, then close
-              // - If suspended-yield (hasYielded is true): set state to executing during close
               if (!hasYielded) {
-                // suspended-start: set to completed before close
                 allDone = true;
               } else {
-                // suspended-yield: set executing during close
                 executing = true;
               }
-              
               try {
-                // IteratorCloseAll with ReturnCompletion(undefined)
-                let closeError = null;
-                for (let i = openIters.length - 1; i >= 0; i--) {
-                  if (openIters[i] !== null) {
-                    const iter = openIters[i];
-                    if (typeof iter.return === 'function') {
-                      try { 
-                        const result = iter.return.call(iter);
-                        if (closeError === null && (typeof result !== 'object' || result === null)) {
-                          closeError = new TypeError('Iterator result must be an object');
-                        }
-                      } catch (e) {
-                        if (closeError === null) {
-                          closeError = e;
-                        }
-                      }
-                    }
-                    openIters[i] = null;
-                  }
-                }
+                closeZipKeyedIterators(-1);
                 allDone = true;
-                if (closeError !== null) {
-                  throw closeError;
-                }
                 return { value: undefined, done: true };
               } finally {
                 executing = false;
               }
             }
-            
+
             const helper = Object.create(IteratorHelperPrototype);
             defineNonConstructibleMethod(helper, 'next', nextImpl, 0);
             defineNonConstructibleMethod(helper, 'return', returnImpl, 0);
-            
+
             return helper;
           }, 1);
 
