@@ -1,5 +1,14 @@
 use crate::{TestAction, run_test_actions};
 
+#[cfg(feature = "float16")]
+#[test]
+fn f16round_rounds_smallest_non_zero_boundary() {
+    run_test_actions([
+        TestAction::assert_eq("Math.f16round(2.9802322387695312e-8)", 0.0),
+        TestAction::assert_eq("Math.f16round(2.980232238769532e-8)", 5.960_464_477_539_063e-8),
+    ]);
+}
+
 #[test]
 fn abs() {
     run_test_actions([

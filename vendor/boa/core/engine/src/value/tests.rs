@@ -8,6 +8,16 @@ use crate::{TestAction, js_string, run_test_actions};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
+#[cfg(feature = "float16")]
+#[test]
+fn to_f16_rounds_smallest_non_zero_boundary() {
+    let lower = f64_to_float16(2.9802322387695312e-8);
+    let upper = f64_to_float16(2.980232238769532e-8);
+
+    assert_eq!(lower.to_bits(), 0x0000);
+    assert_eq!(upper.to_bits(), 0x0001);
+}
+
 #[test]
 fn string_to_value() {
     let s = String::from("Hello");

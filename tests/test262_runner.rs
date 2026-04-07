@@ -134,9 +134,6 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     {
         return Some("unsupported feature: caller legacy semantics");
     }
-    if case_path.contains("/built-ins/DataView/prototype/setFloat16/") {
-        return Some("unsupported feature: DataView.setFloat16 precision");
-    }
     if case.metadata.has_feature("json-parse-with-source") {
         return Some("unsupported feature: json-parse-with-source");
     }
@@ -144,9 +141,6 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
         "/built-ins/Function/prototype/toString/built-in-function-object.js",
     ) {
         return Some("unsupported behavior: native Function#toString format");
-    }
-    if case_path.contains("/built-ins/Math/f16round/value-conversion.js") {
-        return Some("unsupported behavior: Math.f16round rounding edge");
     }
     if case_path.contains("/built-ins/Number/prototype/toExponential/return-values.js") {
         return Some("unsupported behavior: Number#toExponential rounding edge");

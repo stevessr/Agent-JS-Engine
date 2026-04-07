@@ -66,6 +66,94 @@ static TWO_E_63: LazyLock<BigInt> = LazyLock::new(|| {
     BigInt::from(TWO_E_63)
 });
 
+#[cfg(feature = "float16")]
+fn round_shift_right_ties_even(significand: u64, shift: i32) -> u64 {
+    if shift <= 0 {
+        return significand << (-shift as u32);
+    }
+
+    if shift > 53 {
+        return 0;
+    }
+
+    if shift == 53 {
+        return u64::from(significand > (1u64 << 52));
+    }
+
+    let shift = shift as u32;
+    let truncated = significand >> shift;
+    let round_bit = (significand >> (shift - 1)) & 1;
+    let sticky_mask = (1u64 << (shift - 1)) - 1;
+    let sticky = significand & sticky_mask;
+
+    if round_bit == 1 && (sticky != 0 || (truncated & 1) == 1) {
+        truncated + 1
+    } else {
+        truncated
+    }
+}
+
+#[cfg(feature = "float16")]
+pub(crate) fn f64_to_float16(value: f64) -> float16::f16 {
+    const F16_SIGN_MASK: u16 = 0x8000;
+    const F16_EXP_MASK: u16 = 0x7C00;
+    const F16_QUIET_NAN: u16 = 0x7E00;
+
+    let bits = value.to_bits();
+    let sign = if (bits >> 63) != 0 { F16_SIGN_MASK } else { 0 };
+    let exponent = ((bits >> 52) & 0x7FF) as i32;
+    let fraction = bits & ((1u64 << 52) - 1);
+
+    if exponent == 0x7FF {
+        if fraction == 0 {
+            return float16::f16::from_bits(sign | F16_EXP_MASK);
+        }
+
+        let payload = ((fraction >> 42) as u16) & 0x01FF;
+        return float16::f16::from_bits(sign | F16_QUIET_NAN | payload);
+    }
+
+    if exponent == 0 {
+        return float16::f16::from_bits(sign);
+    }
+
+    let unbiased_exponent = exponent - 1023;
+    let significand = (1u64 << 52) | fraction;
+
+    if unbiased_exponent < -14 {
+        let rounded = round_shift_right_ties_even(significand, 28 - unbiased_exponent) as u16;
+
+        if rounded == 0 {
+            return float16::f16::from_bits(sign);
+        }
+
+        if rounded == 1024 {
+            return float16::f16::from_bits(sign | (1 << 10));
+        }
+
+        return float16::f16::from_bits(sign | rounded);
+    }
+
+    if unbiased_exponent > 15 {
+        return float16::f16::from_bits(sign | F16_EXP_MASK);
+    }
+
+    let mut rounded = round_shift_right_ties_even(significand, 42) as u16;
+    let mut half_exponent = unbiased_exponent + 15;
+
+    if rounded == 2048 {
+        rounded = 1024;
+        half_exponent += 1;
+    }
+
+    if half_exponent >= 31 {
+        return float16::f16::from_bits(sign | F16_EXP_MASK);
+    }
+
+    float16::f16::from_bits(sign | ((half_exponent as u16) << 10) | (rounded - 1024))
+}
+
+
 /// The `js_value!` macro creates a `JsValue` instance based on a JSON-like DSL.
 ///
 /// ```
@@ -971,7 +1059,7 @@ impl JsValue {
     /// Converts a value to a 16-bit floating point.
     #[cfg(feature = "float16")]
     pub fn to_f16(&self, context: &mut Context) -> JsResult<float16::f16> {
-        self.to_number(context).map(float16::f16::from_f64)
+        self.to_number(context).map(f64_to_float16)
     }
 
     /// Converts a value to a 32 bit floating point.
