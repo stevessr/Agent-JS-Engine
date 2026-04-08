@@ -589,9 +589,9 @@ impl PlainYearMonth {
     /// [temporal_rs-docs]: https://docs.rs/temporal_rs/latest/temporal_rs/struct.PlainYearMonth.html#method.add
     fn add(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let duration_like = args.get_or_undefined(0);
-        let options = get_options_object(args.get_or_undefined(1))?;
+        let options = args.get_or_undefined(1);
 
-        add_or_subtract_duration(true, this, duration_like, &options, context)
+        add_or_subtract_duration(true, this, duration_like, options, context)
     }
 
     /// 9.3.15 `Temporal.PlainYearMonth.prototype.subtract ( temporalDurationLike [ , options ] )`
@@ -607,9 +607,9 @@ impl PlainYearMonth {
     /// [temporal_rs-docs]: https://docs.rs/temporal_rs/latest/temporal_rs/struct.PlainYearMonth.html#method.subtract
     fn subtract(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let duration_like = args.get_or_undefined(0);
-        let options = get_options_object(args.get_or_undefined(1))?;
+        let options = args.get_or_undefined(1);
 
-        add_or_subtract_duration(false, this, duration_like, &options, context)
+        add_or_subtract_duration(false, this, duration_like, options, context)
     }
 
     /// 9.3.16 `Temporal.PlainYearMonth.prototype.until ( other [ , options ] )`
@@ -962,7 +962,7 @@ fn add_or_subtract_duration(
     is_addition: bool,
     this: &JsValue,
     duration_like: &JsValue,
-    options: &JsObject,
+    options: &JsValue,
     context: &mut Context,
 ) -> JsResult<JsValue> {
     let duration: Duration = if duration_like.is_object() {
@@ -975,8 +975,9 @@ fn add_or_subtract_duration(
             .into());
     };
 
+    let options = get_options_object(options)?;
     let overflow =
-        get_option(options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
+        get_option(&options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
 
     let object = this.as_object();
     let year_month = object

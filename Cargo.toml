@@ -23,6 +23,7 @@ boa_engine = { path = "vendor/boa/core/engine" }
 boa_ast = { path = "vendor/boa/core/ast" }
 boa_interner = { path = "vendor/boa/core/interner" }
 boa_parser = { path = "vendor/boa/core/parser" }
+temporal_rs = { path = "vendor/temporal_rs" }
 [[bin]]
 name = "parse_error_stats"
 path = "parse_error_stats.rs"

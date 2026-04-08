@@ -1730,6 +1730,15 @@ fn to_partial_datetime(
 ) -> JsResult<PartialDateTime> {
     let calendar = get_temporal_calendar_slot_value_with_default(partial_object, context)?;
     let fields = to_date_time_fields(partial_object, &calendar, context)?;
+    if fields.calendar_fields.year.is_none() {
+        return Err(JsNativeError::typ().with_message("year is required.").into());
+    }
+    if fields.calendar_fields.month.is_none() && fields.calendar_fields.month_code.is_none() {
+        return Err(JsNativeError::typ().with_message("month or monthCode is required.").into());
+    }
+    if fields.calendar_fields.day.is_none() {
+        return Err(JsNativeError::typ().with_message("day is required.").into());
+    }
     Ok(PartialDateTime { fields, calendar })
 }
 

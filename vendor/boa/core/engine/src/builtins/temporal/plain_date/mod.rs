@@ -1398,6 +1398,15 @@ pub(crate) fn to_partial_date_record(
     let calendar = get_temporal_calendar_slot_value_with_default(partial_object, context)?;
     // TODO: Most likely need to use an iterator to handle.
     let calendar_fields = to_calendar_fields(partial_object, &calendar, context)?;
+    if calendar_fields.year.is_none() {
+        return Err(JsNativeError::typ().with_message("year is required.").into());
+    }
+    if calendar_fields.month.is_none() && calendar_fields.month_code.is_none() {
+        return Err(JsNativeError::typ().with_message("month or monthCode is required.").into());
+    }
+    if calendar_fields.day.is_none() {
+        return Err(JsNativeError::typ().with_message("day is required.").into());
+    }
     Ok(PartialDate {
         calendar_fields,
         calendar,
