@@ -29,6 +29,7 @@ const SAMPLE_LIMIT: usize = 12;
 const DEFAULT_CHUNK_SIZE: usize = 1_000;
 const DEFAULT_PARALLEL_CHUNKS: usize = 1;
 const SUMMARY_FILE_ENV: &str = "TEST262_SUMMARY_FILE";
+const FAILURES_FILE_ENV: &str = "TEST262_FAILURES_FILE";
 const QUIET_OUTPUT_ENV: &str = "TEST262_QUIET";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -110,6 +111,25 @@ impl Test262Metadata {
 
 fn quiet_output() -> bool {
     std::env::var(QUIET_OUTPUT_ENV).ok().as_deref() == Some("1")
+}
+
+fn append_failure_if_requested(case: &TestCase, reason: Option<&str>) {
+    let Some(path) = std::env::var_os(FAILURES_FILE_ENV) else {
+        return;
+    };
+
+    let mut line = case.path.display().to_string();
+    if let Some(reason) = reason {
+        line.push('\t');
+        line.push_str(reason);
+    }
+    line.push('\n');
+
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, line.as_bytes()));
 }
 
 fn unsupported_feature(_case: &TestCase) -> Option<&'static str> {
@@ -432,7 +452,7 @@ fn compute_chunk_specs_splits_tail_chunk() {
 }
 
 #[test]
-fn run_case_skips_unsupported_shadowrealm_feature() {
+fn run_case_runs_shadowrealm_feature_cases_directly() {
     let case = TestCase {
         path: PathBuf::from("sample.js"),
         metadata: Test262Metadata {
@@ -446,11 +466,7 @@ fn run_case_skips_unsupported_shadowrealm_feature() {
 
     let result = run_case(&case, &harness, Path::new("."));
 
-    assert_eq!(result.outcome, Outcome::Skipped);
-    assert_eq!(
-        result.reason.as_deref(),
-        Some("unsupported feature: ShadowRealm")
-    );
+    assert_eq!(result.outcome, Outcome::Failed);
 }
 
 #[derive(Debug, Clone)]
@@ -568,6 +584,7 @@ fn run_core_profile_once(
             }
             Outcome::Failed => {
                 summary.executed += 1;
+                append_failure_if_requested(case, result.reason.as_deref());
                 if summary.samples.len() < SAMPLE_LIMIT {
                     let detail = result.reason.unwrap_or_else(|| "failed".to_string());
                     summary

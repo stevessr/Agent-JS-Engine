@@ -338,12 +338,8 @@ impl RegExp {
         // 13. Let parseResult be ParsePattern(patternText, u, v).
         // 14. If parseResult is a non-empty List of SyntaxError objects, throw a SyntaxError exception.
         let regress_flags = Flags::from(flags);
-        let matcher = if regress_flags.unicode || regress_flags.unicode_sets {
-            Regex::from_unicode(p.code_points().map(CodePoint::as_u32), regress_flags)
-        } else {
-            Regex::from_unicode(p.iter().map(u32::from), regress_flags)
-        }
-        .map_err(|error| {
+        let matcher = Regex::from_unicode(p.code_points().map(CodePoint::as_u32), regress_flags)
+            .map_err(|error| {
             JsNativeError::syntax().with_message(format!("failed to create matcher: {}", error.text))
         })?;
 

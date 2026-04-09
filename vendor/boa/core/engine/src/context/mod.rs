@@ -526,6 +526,13 @@ impl Context {
         std::mem::replace(&mut self.vm.realm, realm)
     }
 
+    /// Marks the current realm's global declarative environment as poisoned so
+    /// subsequent identifier lookups re-check runtime global bindings.
+    #[inline]
+    pub fn poison_global_environment(&mut self) {
+        self.realm().environment().poison();
+    }
+
     /// Create a new Realm with the default global bindings.
     pub fn create_realm(&mut self) -> JsResult<Realm> {
         let realm = Realm::create(self.host_hooks.as_ref(), &self.root_shape)?;

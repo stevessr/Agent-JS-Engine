@@ -191,6 +191,8 @@ impl Scope {
                     self.inner.index.get(),
                     binding.index,
                     self.inner.unique_id,
+                    binding.is_mutable(),
+                    binding.is_strict(),
                 ),
                 binding.is_lex(),
                 binding.escapes(),
@@ -272,6 +274,8 @@ impl Scope {
                     self.inner.index.get(),
                     binding.index,
                     self.inner.unique_id,
+                    binding.is_mutable(),
+                    binding.is_strict(),
                 )
             })
     }
@@ -291,6 +295,8 @@ impl Scope {
                         self.inner.index.get(),
                         binding.index,
                         self.inner.unique_id,
+                        binding.is_mutable(),
+                        binding.is_strict(),
                     ),
                     binding.is_lex(),
                     binding.escapes(),
@@ -363,6 +369,8 @@ impl Scope {
                 self.inner.index.get(),
                 binding.index,
                 self.inner.unique_id,
+                binding.is_mutable(),
+                binding.is_strict(),
             );
         }
         let mut flags = BindingFlags::MUTABLE;
@@ -378,6 +386,8 @@ impl Scope {
             self.inner.index.get(),
             binding_index,
             self.inner.unique_id,
+            true,
+            false,
         )
     }
 
@@ -415,6 +425,8 @@ impl Scope {
                         self.inner.index.get(),
                         binding.index,
                         self.inner.unique_id,
+                        binding.is_mutable(),
+                        binding.is_strict(),
                     ),
                     binding.is_lex(),
                     binding.escapes(),
@@ -467,6 +479,8 @@ impl Scope {
                         self.inner.index.get(),
                         binding.index,
                         self.inner.unique_id,
+                        binding.is_mutable(),
+                        binding.is_strict(),
                     ),
                     binding.is_lex(),
                     binding.escapes(),
@@ -555,6 +569,8 @@ pub struct BindingLocator {
     binding_index: u32,
 
     unique_scope_id: u32,
+    mutable: bool,
+    strict: bool,
 }
 
 impl BindingLocator {
@@ -564,12 +580,16 @@ impl BindingLocator {
         scope_index: u32,
         binding_index: u32,
         unique_scope_id: u32,
+        mutable: bool,
+        strict: bool,
     ) -> Self {
         Self {
             name,
             scope: scope_index + 1,
             binding_index,
             unique_scope_id,
+            mutable,
+            strict,
         }
     }
 
@@ -580,6 +600,8 @@ impl BindingLocator {
             scope: 0,
             binding_index: 0,
             unique_scope_id: 0,
+            mutable: true,
+            strict: false,
         }
     }
 
@@ -618,6 +640,18 @@ impl BindingLocator {
     #[must_use]
     pub const fn binding_index(&self) -> u32 {
         self.binding_index
+    }
+
+    /// Returns whether the binding is mutable.
+    #[must_use]
+    pub const fn is_mutable(&self) -> bool {
+        self.mutable
+    }
+
+    /// Returns whether assigning to an immutable binding must throw.
+    #[must_use]
+    pub const fn is_strict(&self) -> bool {
+        self.strict
     }
 
     /// Sets the binding index of the binding.

@@ -1,5 +1,5 @@
 use crate::{
-    Context, JsResult, JsString, JsSymbol, JsValue,
+    Context, JsNativeError, JsResult, JsString, JsSymbol, JsValue,
     object::{JsObject, PrivateName},
 };
 use boa_ast::scope::{BindingLocator, BindingLocatorScope, Scope};
@@ -548,11 +548,27 @@ impl Context {
                 obj.set(key, value, strict, self)?;
             }
             BindingLocatorScope::GlobalDeclarative => {
+                if !locator.is_mutable() {
+                    if locator.is_strict() || strict {
+                        return Err(JsNativeError::typ()
+                            .with_message("cannot mutate immutable binding")
+                            .into());
+                    }
+                    return Ok(());
+                }
                 let env = self.vm.environments.global();
                 env.set(locator.binding_index(), value);
             }
             BindingLocatorScope::Stack(index) => match self.environment_expect(index) {
                 Environment::Declarative(decl) => {
+                    if !locator.is_mutable() {
+                        if locator.is_strict() || strict {
+                            return Err(JsNativeError::typ()
+                                .with_message("cannot mutate immutable binding")
+                                .into());
+                        }
+                        return Ok(());
+                    }
                     decl.set(locator.binding_index(), value);
                 }
                 Environment::Object(obj) => {

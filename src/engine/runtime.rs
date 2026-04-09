@@ -773,18 +773,32 @@ fn preprocess_compat_source(
 ) -> Result<String, EngineError> {
     validate_import_call_syntax(source)?;
 
-    let (source, rewrote_html_comments) = rewrite_annex_b_html_comments(source);
-    let (source, rewrote_annex_b_call_assignment) = rewrite_annex_b_call_assignment_targets(&source);
+    let (source, rewrote_html_comments) = if is_module {
+        (source.to_string(), false)
+    } else {
+        rewrite_annex_b_html_comments(source)
+    };
+    let (source, rewrote_annex_b_call_assignment) = if is_module {
+        (source, false)
+    } else {
+        rewrite_annex_b_call_assignment_targets(&source)
+    };
     let source = rewrite_static_import_attributes(&source);
     let (source, rewrote_dynamic_imports) = rewrite_dynamic_import_calls(&source);
     let (source, rewrote_import_defer_calls) = rewrite_dynamic_import_defer_calls(&source);
     let (source, rewrote_import_source_calls) = rewrite_dynamic_import_source_calls(&source);
     let (source, rewrote_static_source_imports) = rewrite_static_source_phase_imports(&source);
     let (source, rewrote_static_defer_imports) = rewrite_static_defer_namespace_imports(&source);
-    let (source, rewrote_annex_b_eval_catch) =
-        rewrite_annex_b_eval_catch_redeclarations(&source, source_path);
-    let (source, rewrote_annex_b_nested_block_fun_decl) =
-        rewrite_annex_b_nested_block_fun_decl(&source, source_path);
+    let (source, rewrote_annex_b_eval_catch) = if is_module {
+        (source, false)
+    } else {
+        rewrite_annex_b_eval_catch_redeclarations(&source, source_path)
+    };
+    let (source, rewrote_annex_b_nested_block_fun_decl) = if is_module {
+        (source, false)
+    } else {
+        rewrite_annex_b_nested_block_fun_decl(&source, source_path)
+    };
     let (source, rewrote_using_blocks) = rewrite_using_blocks(&source)?;
     let (source, rewrote_for_head_using) = rewrite_for_head_using(&source)?;
     let (source, rewrote_top_level_using) = rewrite_top_level_using(&source, is_module)?;
@@ -1523,8 +1537,7 @@ fn validate_import_keyword_usage(bytes: &[u8], start: usize) -> Result<(), Engin
             validate_single_import_call(bytes, cursor, ImportCallSyntaxKind::Dynamic)
         }
         b'.' => validate_import_dot_usage(bytes, start, cursor + 1),
-        byte if is_identifier_byte(byte) || matches!(byte, b'\'' | b'"' | b'{' | b'*') => Ok(()),
-        _ => Err(invalid_import_call_syntax_error()),
+        _ => Ok(()),
     }
 }
 
@@ -2759,31 +2772,14 @@ fn install_child_realm_host_globals(context: &mut Context) -> boa_engine::JsResu
         1,
         NativeFunction::from_fn_ptr(host_shadow_realm_can_parse_script),
     )?;
-    // Keep child realms minimal to avoid re-entering complex JS polyfills while
-    // a caller frame is active. The intrinsic realm already contains the core
-    // ECMAScript globals. Avoid JS-heavy host polyfills here because they can
-    // trip Boa VM environment bugs when a realm is created reentrantly through
-    // ShadowRealm / $262.createRealm().
-    if !context
-        .global_object()
-        .has_own_property(js_string!("FinalizationRegistry"), context)?
-    {
-        let constructor = build_builtin_function(
-            context,
-            js_string!("FinalizationRegistry"),
-            1,
-            NativeFunction::from_fn_ptr(host_shadowrealm_placeholder_finalization_registry),
-        );
-        context.global_object().define_property_or_throw(
-            js_string!("FinalizationRegistry"),
-            PropertyDescriptor::builder()
-                .value(constructor)
-                .writable(true)
-                .enumerable(false)
-                .configurable(true),
-            context,
-        )?;
-    }
+    // Child realms need the same observable realm-local constructors/prototypes
+    // for cross-realm Test262 coverage. Keep this list targeted to the built-ins
+    // whose constructors or statics are exercised through $262.createRealm().
+    install_disposable_stack_builtins(context)?;
+    install_finalization_registry_builtin(context)?;
+    install_reg_exp_escape(context)?;
+    install_error_is_error(context)?;
+    install_iterator_helpers(context)?;
     Ok(())
 }
 
@@ -11164,12 +11160,15 @@ fn eval_script_in_realm(
     context: &mut Context,
 ) -> JsResult<BoaValue> {
     let source = script_source_from_args(args, context)?;
-    let script = Script::parse(
-        Source::from_bytes(source.as_str()),
-        Some(target_realm.clone()),
-        context,
-    )?;
-    let result = script.evaluate(context)?;
+    let source = finalize_script_source(&source, false, None)
+        .map_err(|err| JsNativeError::syntax().with_message(err.message))?;
+    let result = with_realm(context, target_realm.clone(), |context| {
+        let result = context.eval(Source::from_bytes(source.as_str()));
+        if result.is_ok() {
+            context.poison_global_environment();
+        }
+        result
+    })?;
     context.run_jobs()?;
     Ok(result)
 }

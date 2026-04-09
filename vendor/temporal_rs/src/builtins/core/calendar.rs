@@ -7,6 +7,7 @@ use crate::{
     builtins::core::{
         duration::DateDuration, Duration, PlainDate, PlainDateTime, PlainMonthDay, PlainYearMonth,
     },
+    error::ErrorMessage,
     iso::IsoDate,
     options::{Overflow, Unit},
     parsers::parse_allowed_calendar_formats,
@@ -19,7 +20,8 @@ use icu_calendar::{
         Buddhist, Chinese, Coptic, Dangi, Ethiopian, EthiopianEraStyle, Hebrew, HijriSimulated,
         HijriTabular, HijriUmmAlQura, Indian, Japanese, JapaneseExtended, Persian, Roc,
     },
-    AnyCalendar, AnyCalendarKind, Calendar as IcuCalendar, Iso, Ref,
+    AnyCalendar, AnyCalendarKind, Calendar as IcuCalendar, Date as IcuDate,
+    DateDuration as IcuDateDuration, DateDurationUnit as IcuUnit, Iso, Ref,
 };
 use icu_calendar::{
     cal::{HijriTabularEpoch, HijriTabularLeapYears},
@@ -214,6 +216,50 @@ impl FromStr for Calendar {
             None => Calendar::try_from_utf8(s.as_bytes()),
         }
     }
+}
+
+impl TryFrom<Unit> for IcuUnit {
+    type Error = TemporalError;
+
+    fn try_from(other: Unit) -> TemporalResult<Self> {
+        Ok(match other {
+            Unit::Day => Self::Days,
+            Unit::Week => Self::Weeks,
+            Unit::Month => Self::Months,
+            Unit::Year => Self::Years,
+            _ => {
+                return Err(TemporalError::r#type()
+                    .with_message("Found time unit when computing CalendarDateUntil."))
+            }
+        })
+    }
+}
+
+/// Guard `icu_calendar` date arithmetic from obviously out-of-range intermediate durations.
+fn early_constrain_date_duration(duration: &DateDuration) -> TemporalResult<()> {
+    // Temporal range is approximately -271821-04-20 to +275760-09-13.
+    const TEMPORAL_MAX_ISO_YEAR_DURATION: u64 = (275_760 + 271_821) as u64;
+    const YEAR_DURATION: u64 = 2 * TEMPORAL_MAX_ISO_YEAR_DURATION;
+    const MONTH_DURATION: u64 = YEAR_DURATION * 13;
+    const DAY_DURATION: u64 = YEAR_DURATION * 390;
+    const WEEK_DURATION: u64 = DAY_DURATION / 7;
+
+    let err = TemporalError::range().with_enum(ErrorMessage::IntermediateDateTimeOutOfRange);
+
+    if duration.years.unsigned_abs() > YEAR_DURATION {
+        return Err(err);
+    }
+    if duration.months.unsigned_abs() > MONTH_DURATION {
+        return Err(err);
+    }
+    if duration.weeks.unsigned_abs() > WEEK_DURATION {
+        return Err(err);
+    }
+    if duration.days.unsigned_abs() > DAY_DURATION {
+        return Err(err);
+    }
+
+    Ok(())
 }
 
 // ==== Public `CalendarSlot` methods ====
@@ -448,7 +494,118 @@ impl Calendar {
             return PlainDate::try_new(result.year, result.month, result.day, self.clone());
         }
 
-        Err(TemporalError::range().with_message("Not yet implemented."))
+        early_constrain_date_duration(duration)?;
+
+        #[derive(Clone, Copy)]
+        struct CalendarDateRecord {
+            iso: IsoDate,
+            year: i32,
+            month: u8,
+            month_code: MonthCode,
+            day: u8,
+        }
+
+        impl CalendarDateRecord {
+            fn from_iso(calendar: &Calendar, iso: IsoDate) -> Self {
+                Self {
+                    iso,
+                    year: calendar.year(&iso),
+                    month: calendar.month(&iso),
+                    month_code: calendar.month_code(&iso),
+                    day: calendar.day(&iso),
+                }
+            }
+        }
+
+        let regulate_day = |record: &CalendarDateRecord, day: u8| -> TemporalResult<CalendarDateRecord> {
+            let fields = CalendarFields::new()
+                .with_year(record.year)
+                .with_month_code(record.month_code)
+                .with_day(day);
+            let regulated = self.date_from_fields(fields, Overflow::Constrain)?;
+            Ok(CalendarDateRecord::from_iso(self, regulated.iso))
+        };
+        let adjust_calendar_date =
+            |year: i32, month_code: MonthCode, day: u8| -> TemporalResult<CalendarDateRecord> {
+                let fields = CalendarFields::new()
+                    .with_year(year)
+                    .with_month_code(month_code)
+                    .with_day(day);
+                let adjusted = self.date_from_fields(fields, Overflow::Constrain)?;
+                Ok(CalendarDateRecord::from_iso(self, adjusted.iso))
+            };
+        let add_days_calendar =
+            |record: &CalendarDateRecord, days: i64| -> TemporalResult<CalendarDateRecord> {
+                let added = IsoDate::try_balance(
+                    record.iso.year,
+                    i32::from(record.iso.month),
+                    i64::from(record.iso.day) + days,
+                )?;
+                Ok(CalendarDateRecord::from_iso(self, added))
+            };
+        let days_in_previous_month = |record: &CalendarDateRecord| -> TemporalResult<u8> {
+            let first_of_month = regulate_day(record, 1)?;
+            let previous = add_days_calendar(&first_of_month, -1)?;
+            Ok(previous.day)
+        };
+        let add_months_calendar =
+            |record: &CalendarDateRecord, months: i64, overflow: Overflow| -> TemporalResult<CalendarDateRecord> {
+                let original_day = record.day;
+                let mut calendar_date = *record;
+
+                for _ in 0..months.unsigned_abs() {
+                    let month = calendar_date.month;
+                    let old_calendar_date = calendar_date;
+                    let days = if months < 0 {
+                        -i64::from(original_day.max(days_in_previous_month(&calendar_date)?))
+                    } else {
+                        i64::from(self.days_in_month(&calendar_date.iso))
+                    };
+
+                    calendar_date = add_days_calendar(&calendar_date, days)?;
+
+                    if months > 0 {
+                        let months_in_old_year = self.months_in_year(&old_calendar_date.iso);
+                        while calendar_date.month - 1 != month % months_in_old_year as u8 {
+                            calendar_date = add_days_calendar(&calendar_date, -1)?;
+                        }
+                    }
+
+                    if calendar_date.day != original_day {
+                        calendar_date = regulate_day(&calendar_date, original_day)?;
+                    }
+                }
+
+                if overflow == Overflow::Reject && calendar_date.day != original_day {
+                    return Err(TemporalError::range()
+                        .with_message("Day does not exist in resulting calendar month."));
+                }
+
+                Ok(calendar_date)
+            };
+
+        let record = CalendarDateRecord::from_iso(self, *date);
+        let added_years = if duration.years != 0 {
+            let years = i32::try_from(duration.years)
+                .map_err(|_| TemporalError::range().with_enum(ErrorMessage::IntermediateDateTimeOutOfRange))?;
+            let year = record
+                .year
+                .checked_add(years)
+                .ok_or_else(|| TemporalError::range().with_enum(ErrorMessage::IntermediateDateTimeOutOfRange))?;
+            adjust_calendar_date(year, record.month_code, record.day)?
+        } else {
+            record
+        };
+        let added_months = add_months_calendar(&added_years, duration.months, overflow)?;
+        let added_days = add_days_calendar(&added_months, duration.days + 7 * duration.weeks)?;
+
+        PlainDate::new_with_overflow(
+            added_days.iso.year,
+            added_days.iso.month,
+            added_days.iso.day,
+            self.clone(),
+            overflow,
+        )
     }
 
     /// `CalendarDateUntil`
@@ -462,7 +619,193 @@ impl Calendar {
             let date_duration = one.diff_iso_date(two, largest_unit)?;
             return Ok(Duration::from(date_duration));
         }
-        Err(TemporalError::range().with_message("Not yet implemented."))
+
+        #[derive(Clone, Copy)]
+        struct CalendarDateRecord {
+            iso: IsoDate,
+            year: i32,
+            month: u8,
+            month_code: MonthCode,
+            day: u8,
+        }
+
+        impl CalendarDateRecord {
+            fn from_iso(calendar: &Calendar, iso: IsoDate) -> Self {
+                Self {
+                    iso,
+                    year: calendar.year(&iso),
+                    month: calendar.month(&iso),
+                    month_code: calendar.month_code(&iso),
+                    day: calendar.day(&iso),
+                }
+            }
+        }
+
+        let compare = |a: &CalendarDateRecord, b: &CalendarDateRecord| {
+            match a
+                .year
+                .cmp(&b.year)
+                .then_with(|| a.month.cmp(&b.month))
+                .then_with(|| a.day.cmp(&b.day))
+            {
+                core::cmp::Ordering::Less => -1,
+                core::cmp::Ordering::Equal => 0,
+                core::cmp::Ordering::Greater => 1,
+            }
+        };
+        let calendar_days_until =
+            |a: &CalendarDateRecord, b: &CalendarDateRecord| b.iso.to_epoch_days() - a.iso.to_epoch_days();
+        let regulate_day = |record: &CalendarDateRecord, day: u8| -> TemporalResult<CalendarDateRecord> {
+            let fields = CalendarFields::new()
+                .with_year(record.year)
+                .with_month_code(record.month_code)
+                .with_day(day);
+            let regulated = self.date_from_fields(fields, Overflow::Constrain)?;
+            Ok(CalendarDateRecord::from_iso(self, regulated.iso))
+        };
+        let adjust_calendar_date = |year: i32,
+                                    month: u8,
+                                    month_code: MonthCode,
+                                    day: u8|
+         -> TemporalResult<CalendarDateRecord> {
+            let fields = CalendarFields::new()
+                .with_year(year)
+                .with_month_code(month_code)
+                .with_day(day);
+            let adjusted = self.date_from_fields(fields, Overflow::Constrain)?;
+            Ok(CalendarDateRecord::from_iso(self, adjusted.iso))
+        };
+        let add_days_calendar =
+            |record: &CalendarDateRecord, days: i64| -> TemporalResult<CalendarDateRecord> {
+                let added = IsoDate::try_balance(
+                    record.iso.year,
+                    i32::from(record.iso.month),
+                    i64::from(record.iso.day) + days,
+                )?;
+                Ok(CalendarDateRecord::from_iso(self, added))
+            };
+        let days_in_previous_month = |record: &CalendarDateRecord| -> TemporalResult<u8> {
+            let first_of_month = regulate_day(record, 1)?;
+            let previous = add_days_calendar(&first_of_month, -1)?;
+            Ok(previous.day)
+        };
+        let add_months_calendar =
+            |record: &CalendarDateRecord, months: i64, overflow: Overflow| -> TemporalResult<CalendarDateRecord> {
+                let original_day = record.day;
+                let mut calendar_date = *record;
+
+                for _ in 0..months.unsigned_abs() {
+                    let month = calendar_date.month;
+                    let old_calendar_date = calendar_date;
+                    let days = if months < 0 {
+                        -i64::from(original_day.max(days_in_previous_month(&calendar_date)?))
+                    } else {
+                        i64::from(self.days_in_month(&calendar_date.iso))
+                    };
+
+                    calendar_date = add_days_calendar(&calendar_date, days)?;
+
+                    if months > 0 {
+                        let months_in_old_year = self.months_in_year(&old_calendar_date.iso);
+                        while calendar_date.month - 1 != month % months_in_old_year as u8 {
+                            calendar_date = add_days_calendar(&calendar_date, -1)?;
+                        }
+                    }
+
+                    if calendar_date.day != original_day {
+                        calendar_date = regulate_day(&calendar_date, original_day)?;
+                    }
+                }
+
+                if overflow == Overflow::Reject && calendar_date.day != original_day {
+                    return Err(TemporalError::range()
+                        .with_message("Day does not exist in resulting calendar month."));
+                }
+
+                Ok(calendar_date)
+            };
+
+        let calendar_one = CalendarDateRecord::from_iso(self, *one);
+        let calendar_two = CalendarDateRecord::from_iso(self, *two);
+
+        let result = match largest_unit {
+            Unit::Day => DateDuration::new(0, 0, 0, calendar_days_until(&calendar_one, &calendar_two))?,
+            Unit::Week => {
+                let total_days = calendar_days_until(&calendar_one, &calendar_two);
+                let days = total_days % 7;
+                let weeks = (total_days - days) / 7;
+                DateDuration::new(0, 0, weeks, days)?
+            }
+            Unit::Month | Unit::Year => {
+                let sign = compare(&calendar_two, &calendar_one);
+                if sign == 0 {
+                    DateDuration::default()
+                } else {
+                    let mut years = 0i64;
+                    let mut months = 0i64;
+
+                    let diff_years = i64::from(calendar_two.year - calendar_one.year);
+                    let diff_days = i32::from(calendar_two.day) - i32::from(calendar_one.day);
+
+                    if largest_unit == Unit::Year && diff_years != 0 {
+                        let diff_in_year_sign = match calendar_two.month_code.0.cmp(&calendar_one.month_code.0) {
+                            core::cmp::Ordering::Greater => 1,
+                            core::cmp::Ordering::Less => -1,
+                            core::cmp::Ordering::Equal => diff_days.signum(),
+                        };
+                        let is_one_further_in_year = diff_in_year_sign * sign < 0;
+                        years = if is_one_further_in_year {
+                            diff_years - i64::from(sign)
+                        } else {
+                            diff_years
+                        };
+                    }
+
+                    let years_added = if years != 0 {
+                        adjust_calendar_date(
+                            calendar_one.year + years as i32,
+                            calendar_one.month,
+                            calendar_one.month_code,
+                            calendar_one.day,
+                        )?
+                    } else {
+                        calendar_one
+                    };
+
+                    let mut current = years_added;
+                    let mut next = years_added;
+                    loop {
+                        months += i64::from(sign);
+                        current = next;
+                        next = add_months_calendar(&current, i64::from(sign), Overflow::Constrain)?;
+                        if next.day != calendar_one.day {
+                            next = regulate_day(&next, calendar_one.day)?;
+                        }
+                        if compare(&calendar_two, &next) * sign < 0 {
+                            months -= i64::from(sign);
+                            break;
+                        }
+                    }
+
+                    let remaining_days = calendar_days_until(&current, &calendar_two);
+                    DateDuration::new(years, months, 0, remaining_days)?
+                }
+            }
+            _ => {
+                let calendar_date1 = IcuDate::new_from_iso(one.to_icu4x(), self.0.clone());
+                let calendar_date2 = IcuDate::new_from_iso(two.to_icu4x(), self.0.clone());
+                let diff =
+                    calendar_date2.until(&calendar_date1, largest_unit.try_into()?, IcuUnit::Days);
+                DateDuration::new(
+                    i64::from(diff.years),
+                    i64::from(diff.months),
+                    i64::from(diff.weeks),
+                    i64::from(diff.days),
+                )?
+            }
+        };
+
+        Ok(Duration::from(result))
     }
 
     /// `CalendarEra`
