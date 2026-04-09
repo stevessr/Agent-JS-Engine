@@ -182,7 +182,12 @@ impl EraYear {
                 })
             }
             (Some(year), None, None) => Ok(Self {
-                era: calendar.get_calendar_default_era().map(|e| Era(e.name)),
+                // An explicit `year` field is an arithmetic/proleptic year, not
+                // a year in the calendar's default era. Using the default era
+                // here breaks crossings like Gregorian/ROC/Japanese additions
+                // through era boundaries because year 0 and negative years are
+                // valid arithmetic years but invalid era years.
+                era: None,
                 year,
                 arithmetic_year: year,
             }),
