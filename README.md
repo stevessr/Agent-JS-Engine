@@ -28,8 +28,37 @@ cargo run -- examples/async-generators.js
 cargo run -- --eval "1 + 2"
 cargo run -- --eval "const x = 1_000_000n; print(x)"
 
-# 拉取并运行 test262 core profile
+# 查看 test262 脚本帮助
+./run_test262.sh --help
+
+# 拉取并运行 test262 core profile（前台半实时进度输出）
 ./run_test262.sh
+
+# 默认 cargo test 里的 test262 runner 只跑一个稳定 smoke case
+cargo test --test test262_runner test262_core_profile
+
+# 显式请求完整 sweep / 过滤回归
+TEST262_FULL=1 cargo test --test test262_runner test262_core_profile -- --nocapture
+TEST262_FULL=1 TEST262_FILTER='Temporal' cargo test --test test262_runner -- --exact test262_core_profile
+```
+
+### run_test262.sh 参数
+
+`run_test262.sh` 只接受 `--help` 参数；实际跑测范围和并发度通过环境变量控制：
+
+- `TEST262_DIR`: 覆盖本地 `test262` checkout 目录
+- `TEST262_FILTER`: 仅运行路径里包含该子串的 case
+- `TEST262_MAX_CASES`: 限制发现到的 case 数量
+- `TEST262_OFFSET`: 跳过前 N 个发现到的 case
+- `TEST262_CHUNK_SIZE`: 完整跑测时每个 chunk 包含的 case 数量
+- `TEST262_PARALLEL_CHUNKS`: 同时并行执行的 chunk 数量
+
+示例：
+
+```bash
+TEST262_FILTER='Temporal' ./run_test262.sh
+TEST262_MAX_CASES=200 TEST262_CHUNK_SIZE=50 ./run_test262.sh
+TEST262_FILTER='import-defer' TEST262_PARALLEL_CHUNKS=2 ./run_test262.sh
 ```
 
 ## 语法支持

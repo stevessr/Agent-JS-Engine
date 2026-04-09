@@ -1,8 +1,11 @@
 use boa_gc::{Finalize, Trace, WeakGc};
 
 use crate::{
-    Context, JsArgs, JsNativeError, JsResult, JsString, JsValue,
-    builtins::{BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject},
+    Context, JsArgs, JsData, JsNativeError, JsResult, JsString, JsValue,
+    builtins::{
+        BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
+        symbol::is_registered_symbol,
+    },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
     object::{ErasedVTableObject, JsObject, internal_methods::get_prototype_from_constructor},
@@ -22,8 +25,14 @@ use crate::{
 ///  - [ECMAScript Reference][spec]
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-weak-ref-objects
-#[derive(Debug, Clone, Trace, Finalize)]
+#[derive(Clone, Trace, Finalize, JsData)]
 pub(crate) struct WeakRef;
+
+#[derive(Clone, Trace, Finalize, JsData)]
+enum WeakRefTarget {
+    Object(WeakGc<ErasedVTableObject>),
+    Symbol(#[unsafe_ignore_trace] JsSymbol),
+}
 
 impl IntrinsicObject for WeakRef {
     fn get(intrinsics: &Intrinsics) -> JsObject {
@@ -73,12 +82,23 @@ impl BuiltInConstructor for WeakRef {
         }
 
         // 2. If target is not an Object, throw a TypeError exception.
-        let target = args.first().and_then(JsValue::as_object).ok_or_else(|| {
-            JsNativeError::typ().with_message(format!(
-                "WeakRef: expected target argument of type `object`, got target of type `{}`",
-                args.get_or_undefined(0).type_of()
-            ))
-        })?;
+        let (target, kept_alive_target) =
+            if let Some(target) = args.first().and_then(JsValue::as_object) {
+                (WeakRefTarget::Object(WeakGc::new(target.inner())), Some(target))
+            } else if let Some(symbol) = args
+                .first()
+                .and_then(JsValue::as_symbol)
+                .filter(|symbol| !is_registered_symbol(symbol))
+            {
+                (WeakRefTarget::Symbol(symbol), None)
+            } else {
+                return Err(JsNativeError::typ()
+                    .with_message(format!(
+                        "WeakRef: expected target argument of type `object` or `symbol`, got target of type `{}`",
+                        args.get_or_undefined(0).type_of()
+                    ))
+                    .into());
+            };
 
         // 3. Let weakRef be ? OrdinaryCreateFromConstructor(NewTarget, "%WeakRef.prototype%", « [[WeakRefTarget]] »).
         // 5. Set weakRef.[[WeakRefTarget]] to target.
@@ -87,11 +107,13 @@ impl BuiltInConstructor for WeakRef {
         let weak_ref = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
-            WeakGc::new(target.inner()),
+            target.clone(),
         );
 
         // 4. Perform AddToKeptObjects(target).
-        context.kept_alive.push(target.clone());
+        if let Some(target) = kept_alive_target {
+            context.kept_alive.push(target);
+        }
 
         // 6. Return weakRef.
         Ok(weak_ref.into())
@@ -111,7 +133,7 @@ impl WeakRef {
         let object = this.as_object();
         let weak_ref = object
             .as_ref()
-            .and_then(JsObject::downcast_ref::<WeakGc<ErasedVTableObject>>)
+            .and_then(JsObject::downcast_ref::<WeakRefTarget>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message(
                     "WeakRef.prototype.deref: expected `this` to be a `WeakRef` object",
@@ -124,17 +146,19 @@ impl WeakRef {
         // https://tc39.es/ecma262/multipage/managing-memory.html#sec-weakrefderef
         // 1. Let target be weakRef.[[WeakRefTarget]].
         // 2. If target is not empty, then
-        if let Some(object) = weak_ref.upgrade() {
-            let object = JsObject::from(object);
-
-            // a. Perform AddToKeptObjects(target).
-            context.kept_alive.push(object.clone());
-
-            // b. Return target.
-            Ok(object.into())
-        } else {
-            // 3. Return undefined.
-            Ok(JsValue::undefined())
+        match &*weak_ref {
+            WeakRefTarget::Object(weak_ref) => {
+                if let Some(object) = weak_ref.upgrade() {
+                    let object = JsObject::from(object);
+                    context.kept_alive.push(object.clone());
+                    Ok(object.into())
+                } else {
+                    Ok(JsValue::undefined())
+                }
+            }
+            WeakRefTarget::Symbol(symbol) => {
+                Ok(symbol.clone().into())
+            }
         }
     }
 }

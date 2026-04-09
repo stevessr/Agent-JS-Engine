@@ -313,7 +313,12 @@ fn make_alt(nodes: ir::NodeList) -> ir::Node {
 
 /// \return a CodePointSet for a given character escape (positive or negative).
 /// See ES9 21.2.2.12.
-fn codepoints_from_class(ct: CharacterClassType, positive: bool) -> CodePointSet {
+fn codepoints_from_class(
+    ct: CharacterClassType,
+    positive: bool,
+    icase: bool,
+    unicode: bool,
+) -> CodePointSet {
     let mut cps;
     match ct {
         CharacterClassType::Digits => {
@@ -329,17 +334,27 @@ fn codepoints_from_class(ct: CharacterClassType, positive: bool) -> CodePointSet
             }
         }
     };
+    if matches!(ct, CharacterClassType::Words) && icase && (unicode || matches!(ct, CharacterClassType::Words)) {
+        cps = unicode::add_icase_code_points(cps);
+        if !positive {
+            cps = cps.inverted();
+        }
+        return cps;
+    }
     if !positive {
         cps = cps.inverted()
+    }
+    if icase && unicode {
+        cps = unicode::add_icase_code_points(cps);
     }
     cps
 }
 
 /// \return a Bracket for a given character escape (positive or negative).
-fn make_bracket_class(ct: CharacterClassType, positive: bool) -> ir::Node {
+fn make_bracket_class(ct: CharacterClassType, positive: bool, icase: bool, unicode: bool) -> ir::Node {
     ir::Node::Bracket(BracketContents {
         invert: false,
-        cps: codepoints_from_class(ct, positive),
+        cps: codepoints_from_class(ct, positive, icase, unicode),
     })
 }
 
@@ -350,7 +365,7 @@ fn add_class_atom(bc: &mut BracketContents, atom: ClassAtom) {
             class_type,
             positive,
         } => {
-            bc.cps.add_set(codepoints_from_class(class_type, positive));
+            bc.cps.add_set(codepoints_from_class(class_type, positive, false, false));
         }
         ClassAtom::Range { iv, negate } => {
             if negate {
@@ -517,12 +532,18 @@ where
                         // Term :: Assertion :: \b
                         'b' => {
                             self.consume('b');
-                            result.push(ir::Node::WordBoundary { invert: false });
+                            result.push(ir::Node::WordBoundary {
+                                invert: false,
+                                icase: self.flags.icase,
+                            });
                         }
                         // Term :: Assertion :: \B
                         'B' => {
                             self.consume('B');
-                            result.push(ir::Node::WordBoundary { invert: true });
+                            result.push(ir::Node::WordBoundary {
+                                invert: true,
+                                icase: self.flags.icase,
+                            });
                         }
                         // Term :: Atom :: \ AtomEscape :: CharacterEscape :: c AsciiLetter
                         // Term :: ExtendedAtom :: \ [lookahead = c]
@@ -1195,32 +1216,62 @@ where
                     // CharacterClassEscape :: d
                     0x64 /* d */ => {
                         self.consume('d');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Digits, true)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Digits,
+                            true,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: D
                     0x44 /* D */ => {
                         self.consume('D');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Digits, false)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Digits,
+                            false,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: s
                     0x73 /* s */ => {
                         self.consume('s');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Spaces, true)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Spaces,
+                            true,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: S
                     0x53 /* S */ => {
                         self.consume('S');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Spaces, false)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Spaces,
+                            false,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: w
                     0x77 /* w */ => {
                         self.consume('w');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Words, true)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Words,
+                            true,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: W
                     0x57 /* W */ => {
                         self.consume('W');
-                        Ok(CharacterClassEscape(codepoints_from_class(CharacterClassType::Words, false)))
+                        Ok(CharacterClassEscape(codepoints_from_class(
+                            CharacterClassType::Words,
+                            false,
+                            self.flags.icase,
+                            self.flags.unicode || self.flags.unicode_sets,
+                        )))
                     }
                     // CharacterClassEscape :: [+UnicodeMode] p{ UnicodePropertyValueExpression }
                     0x70 /* p */ => {
@@ -1550,6 +1601,8 @@ where
                 Ok(make_bracket_class(
                     CharacterClassType::Digits,
                     c == 'd' as u32,
+                    self.flags.icase,
+                    self.flags.unicode || self.flags.unicode_sets,
                 ))
             }
 
@@ -1558,6 +1611,8 @@ where
                 Ok(make_bracket_class(
                     CharacterClassType::Spaces,
                     c == 's' as u32,
+                    self.flags.icase,
+                    self.flags.unicode || self.flags.unicode_sets,
                 ))
             }
 
@@ -1566,6 +1621,8 @@ where
                 Ok(make_bracket_class(
                     CharacterClassType::Words,
                     c == 'w' as u32,
+                    self.flags.icase,
+                    self.flags.unicode || self.flags.unicode_sets,
                 ))
             }
 
@@ -1577,10 +1634,14 @@ where
                 let property_escape = self.try_consume_unicode_property_escape()?;
                 match property_escape {
                     PropertyEscapeKind::CharacterClass(s) => {
-                        Ok(ir::Node::Bracket(BracketContents {
-                            invert: negate,
-                            cps: CodePointSet::from_sorted_disjoint_intervals(s.to_vec()),
-                        }))
+                        let mut cps = CodePointSet::from_sorted_disjoint_intervals(s.to_vec());
+                        if negate {
+                            cps = cps.inverted();
+                        }
+                        if self.flags.icase {
+                            cps = unicode::add_icase_code_points(cps);
+                        }
+                        Ok(ir::Node::Bracket(BracketContents { invert: false, cps }))
                     }
                     PropertyEscapeKind::StringSet(_) if negate => error("Invalid character escape"),
                     PropertyEscapeKind::StringSet(strings) => Ok(make_alt(
@@ -1606,7 +1667,10 @@ where
             '1'..='9' if self.flags.unicode => {
                 let group = self.try_consume_decimal_integer_literal().unwrap();
                 if group <= self.group_count_max as usize {
-                    Ok(ir::Node::BackRef(vec![group as u32]))
+                    Ok(ir::Node::BackRef {
+                        groups: vec![group as u32],
+                        icase: self.flags.icase,
+                    })
                 } else {
                     error("Invalid character escape")
                 }
@@ -1620,7 +1684,10 @@ where
                 let group = self.try_consume_decimal_integer_literal().unwrap();
 
                 if group <= self.group_count_max as usize {
-                    Ok(ir::Node::BackRef(vec![group as u32]))
+                    Ok(ir::Node::BackRef {
+                        groups: vec![group as u32],
+                        icase: self.flags.icase,
+                    })
                 } else {
                     self.input = input;
                     let c = self.consume_character_escape()?;
@@ -1638,7 +1705,10 @@ where
                 // The sequence `\k` must be the start of a backreference to a named capture group.
                 if let Some(group_name) = self.try_consume_named_capture_group_name() {
                     if let Some(indices) = self.named_group_indices.get(&group_name) {
-                        Ok(ir::Node::BackRef(indices.iter().map(|index| index + 1).collect()))
+                        Ok(ir::Node::BackRef {
+                            groups: indices.iter().map(|index| index + 1).collect(),
+                            icase: self.flags.icase,
+                        })
                     } else {
                         error(format!(
                             "Backreference to invalid named capture group: {}",

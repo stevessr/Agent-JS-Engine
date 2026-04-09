@@ -241,12 +241,15 @@ fn try_match_state<Input: InputIndexer, Dir: Direction>(
             nextinsn_or_fail!(true)
         }
 
-        Insn::BackRef(group_idx) => {
+        Insn::BackRef {
+            groups: group_idx,
+            icase,
+        } => {
             let matched;
-            let group = resolved_backref_group(&mut s.groups, &group_idx)
+            let group = resolved_backref_group(&mut s.groups, group_idx)
                 .expect("Backreference should reference at least one group");
             if let Some(orig_range) = group.as_range() {
-                if re.flags.icase {
+                if *icase {
                     matched = matchers::backref_icase(input, dir, orig_range, &mut s.pos);
                 } else {
                     matched = matchers::backref(input, dir, orig_range, &mut s.pos)
@@ -326,13 +329,13 @@ fn try_match_state<Input: InputIndexer, Dir: Direction>(
             nextinsn_or_fail!(scm::MatchByteArraySet(bytes).matches(input, dir, &mut s.pos))
         }
 
-        &Insn::WordBoundary { invert } => {
+        &Insn::WordBoundary { invert, icase } => {
             let prev_wordchar = input
                 .peek_left(s.pos)
-                .is_some_and(Input::CharProps::is_word_char);
+                .is_some_and(|c| Input::CharProps::is_word_char_mod(c, input.unicode(), icase));
             let curr_wordchar = input
                 .peek_right(s.pos)
-                .is_some_and(Input::CharProps::is_word_char);
+                .is_some_and(|c| Input::CharProps::is_word_char_mod(c, input.unicode(), icase));
             let is_boundary = prev_wordchar != curr_wordchar;
             nextinsn_or_fail!(is_boundary != invert)
         }
@@ -411,7 +414,7 @@ impl<'r, 't> exec::Executor<'r, 't> for PikeVMExecutor<'r, Utf8Input<'t>> {
     type AsAscii = PikeVMExecutor<'r, AsciiInput<'t>>;
 
     fn new(re: &'r CompiledRegex, text: &'t str) -> Self {
-        let input = Utf8Input::new(text, re.flags.unicode);
+        let input = Utf8Input::new(text, re.flags.unicode || re.flags.unicode_sets);
         Self {
             input,
             matcher: MatchAttempter::new(re),

@@ -1,7 +1,7 @@
 use boa_engine::module::SyntheticModuleInitializer;
 use boa_engine::{
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol,
-    JsValue as BoaValue, Module, NativeFunction, Source, Trace,
+    JsValue as BoaValue, Module, NativeFunction, Script, Source, Trace,
     builtins::array_buffer::SharedArrayBuffer,
     builtins::error::Error as BoaBuiltinError,
     builtins::promise::PromiseState,
@@ -16,7 +16,7 @@ use boa_engine::{
     realm::Realm,
 };
 use regex::{Captures, Regex};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::io::Cursor;
@@ -345,6 +345,8 @@ struct HostHooksContext {
     data_view_originals: HashMap<&'static str, JsSymbol>,
     promise_then_original: JsSymbol,
     array_flat_original: JsSymbol,
+    shadow_realm_next_callable_id: Cell<u64>,
+    shadow_realm_callables: RefCell<HashMap<u64, BoaValue>>,
 }
 
 impl HostHooksContext {
@@ -418,15 +420,22 @@ impl HostHooksContext {
             ]),
             promise_then_original: hidden_symbol("agentjs.original.Promise.then"),
             array_flat_original: hidden_symbol("agentjs.original.Array.prototype.flat"),
+            shadow_realm_next_callable_id: Cell::new(0),
+            shadow_realm_callables: RefCell::new(HashMap::new()),
         }
     }
 }
 
 impl Finalize for HostHooksContext {}
 
-// SAFETY: Context data stores only `JsSymbol`s and Rust collections that do not reference GC values.
+// SAFETY: Context data stores `JsSymbol`s and registered `JsValue`s rooted by the context data.
 unsafe impl Trace for HostHooksContext {
-    unsafe fn trace(&self, _tracer: &mut Tracer) {}
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        for value in self.shadow_realm_callables.borrow().values() {
+            // SAFETY: values stored in the host registry must remain reachable.
+            unsafe { value.trace(tracer) };
+        }
+    }
 
     unsafe fn trace_non_roots(&self) {}
 
@@ -436,6 +445,30 @@ unsafe impl Trace for HostHooksContext {
 }
 
 impl JsData for HostHooksContext {}
+
+#[derive(Debug, Clone)]
+struct ShadowRealmWrappedFunctionCapture {
+    callable_id: u64,
+    foreign_realm: Realm,
+}
+
+impl Finalize for ShadowRealmWrappedFunctionCapture {}
+
+// SAFETY: capture stores a traced realm plus a plain integer id.
+unsafe impl Trace for ShadowRealmWrappedFunctionCapture {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        // SAFETY: the captured realm must stay reachable while the wrapper exists.
+        unsafe { self.foreign_realm.trace(tracer) };
+    }
+
+    unsafe fn trace_non_roots(&self) {}
+
+    fn run_finalizer(&self) {
+        self.finalize();
+    }
+}
+
+impl JsData for ShadowRealmWrappedFunctionCapture {}
 
 #[derive(Debug, Clone)]
 pub struct EvalOptions {
@@ -502,7 +535,7 @@ impl ReplSession {
 
         if options.bootstrap_test262 {
             ensure_agent_runtime(&mut context);
-            install_test262_globals(&mut context)
+            install_test262_globals(&mut context, true)
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
@@ -568,7 +601,7 @@ impl JsEngine {
 
         if options.bootstrap_test262 {
             ensure_agent_runtime(&mut context);
-            install_test262_globals(&mut context)
+            install_test262_globals(&mut context, true)
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
@@ -611,7 +644,7 @@ impl JsEngine {
 
         if options.bootstrap_test262 {
             ensure_agent_runtime(&mut context);
-            install_test262_globals(&mut context)
+            install_test262_globals(&mut context, true)
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
@@ -659,7 +692,7 @@ impl JsEngine {
 
         if options.bootstrap_test262 {
             ensure_agent_runtime(&mut context);
-            install_test262_globals(&mut context)
+            install_test262_globals(&mut context, true)
                 .map_err(|err| convert_error(err, &mut context))?;
         }
 
@@ -2643,8 +2676,34 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         2,
         NativeFunction::from_fn_ptr(host_dynamic_import_defer),
     )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_register_callable__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_register_callable),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_invoke__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_invoke),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_wrap_callable__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_wrap_callable),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_dynamic_import__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_dynamic_import),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_can_parse_script__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_can_parse_script),
+    )?;
     install_console_object(context)?;
     install_disposable_stack_builtins(context)?;
+    install_finalization_registry_builtin(context)?;
     install_array_buffer_detached_getter(context)?;
     install_array_buffer_immutable_hooks(context)?;
     install_data_view_immutable_hooks(context)?;
@@ -2656,17 +2715,75 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_reg_exp_escape(context)?;
     install_array_from_async_builtin(context)?;
     install_array_flat_undefined_fix(context)?;
+    install_uint8array_base_encoding_builtins(context)?;
     install_atomics_pause(context)?;
     install_error_is_error(context)?;
     install_promise_keyed_builtins(context)?;
     install_bigint_to_locale_string(context)?;
     install_intl_display_names_builtin(context)?;
     install_intl_date_time_format_polyfill(context)?;
+    install_temporal_locale_string_polyfill(context)?;
     install_date_locale_methods(context)?;
     install_intl_relative_time_format_polyfill(context)?;
     install_intl_duration_format_polyfill(context)?;
     install_intl_supported_values_of(context)?;
     install_iterator_helpers(context)?;
+    normalize_builtin_function_to_string(context)?;
+    Ok(())
+}
+
+fn install_child_realm_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
+    ensure_host_hooks_context(context);
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_register_callable__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_register_callable),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_invoke__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_invoke),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_wrap_callable__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_wrap_callable),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_dynamic_import__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_dynamic_import),
+    )?;
+    context.register_global_builtin_callable(
+        js_string!("__agentjs_shadowrealm_can_parse_script__"),
+        1,
+        NativeFunction::from_fn_ptr(host_shadow_realm_can_parse_script),
+    )?;
+    // Keep child realms minimal to avoid re-entering complex JS polyfills while
+    // a caller frame is active. The intrinsic realm already contains the core
+    // ECMAScript globals. Avoid JS-heavy host polyfills here because they can
+    // trip Boa VM environment bugs when a realm is created reentrantly through
+    // ShadowRealm / $262.createRealm().
+    if !context
+        .global_object()
+        .has_own_property(js_string!("FinalizationRegistry"), context)?
+    {
+        let constructor = build_builtin_function(
+            context,
+            js_string!("FinalizationRegistry"),
+            1,
+            NativeFunction::from_fn_ptr(host_shadowrealm_placeholder_finalization_registry),
+        );
+        context.global_object().define_property_or_throw(
+            js_string!("FinalizationRegistry"),
+            PropertyDescriptor::builder()
+                .value(constructor)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
     Ok(())
 }
 
@@ -3224,6 +3341,497 @@ fn install_array_from_async_builtin(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
+fn install_uint8array_base_encoding_builtins(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r###"
+        (() => {
+          const Uint8ArrayCtor = globalThis.Uint8Array;
+          if (typeof Uint8ArrayCtor !== 'function') {
+            return;
+          }
+
+          const objectToString = Object.prototype.toString;
+          const base64Tables = {
+            base64: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/',
+            base64url: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_',
+          };
+          const base64DecodeTables = {
+            base64: Object.create(null),
+            base64url: Object.create(null),
+          };
+
+          for (const name of Object.keys(base64Tables)) {
+            const table = base64Tables[name];
+            const decodeTable = base64DecodeTables[name];
+            for (let i = 0; i < table.length; i++) {
+              decodeTable[table[i]] = i;
+            }
+          }
+
+          function isAsciiWhitespace(ch) {
+            return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\f' || ch === '\r';
+          }
+
+          function requireString(value, name) {
+            if (typeof value !== 'string') {
+              throw new TypeError(name + ' requires a string');
+            }
+            return value;
+          }
+
+          function requireUint8Array(value, name) {
+            if (objectToString.call(value) !== '[object Uint8Array]') {
+              throw new TypeError(name + ' requires a Uint8Array receiver');
+            }
+            return value;
+          }
+
+          function requireAttachedUint8Array(value, name) {
+            const view = requireUint8Array(value, name);
+            if (view.buffer.detached) {
+              throw new TypeError(name + ' called on detached ArrayBuffer');
+            }
+            return view;
+          }
+
+          function getBase64Alphabet(options) {
+            let alphabet = 'base64';
+            if (options !== undefined) {
+              const candidate = options.alphabet;
+              if (candidate !== undefined) {
+                if (typeof candidate !== 'string') {
+                  throw new TypeError('alphabet option must be a string');
+                }
+                if (candidate !== 'base64' && candidate !== 'base64url') {
+                  throw new TypeError('alphabet option must be "base64" or "base64url"');
+                }
+                alphabet = candidate;
+              }
+            }
+            return alphabet;
+          }
+
+          function getBase64LastChunkHandling(options) {
+            let handling = 'loose';
+            if (options !== undefined) {
+              const candidate = options.lastChunkHandling;
+              if (candidate !== undefined) {
+                if (typeof candidate !== 'string') {
+                  throw new TypeError('lastChunkHandling option must be a string');
+                }
+                if (candidate !== 'loose' && candidate !== 'strict' && candidate !== 'stop-before-partial') {
+                  throw new TypeError('invalid lastChunkHandling option');
+                }
+                handling = candidate;
+              }
+            }
+            return handling;
+          }
+
+          function getToBase64Options(options) {
+            const alphabet = getBase64Alphabet(options);
+            let omitPadding = false;
+            if (options !== undefined) {
+              omitPadding = Boolean(options.omitPadding);
+            }
+            return { alphabet, omitPadding };
+          }
+
+          function readBase64Value(ch, decodeTable) {
+            const value = decodeTable[ch];
+            if (value === undefined) {
+              throw new SyntaxError('invalid base64 string');
+            }
+            return value;
+          }
+
+          function decodeBase64Quartet(chunk, decodeTable, strict) {
+            const q0 = chunk[0];
+            const q1 = chunk[1];
+            const q2 = chunk[2];
+            const q3 = chunk[3];
+
+            if (q2 === '=') {
+              if (q3 !== '=') {
+                throw new SyntaxError('invalid base64 string');
+              }
+              const a = readBase64Value(q0, decodeTable);
+              const b = readBase64Value(q1, decodeTable);
+              if (strict && (b & 0x0F) !== 0) {
+                throw new SyntaxError('invalid base64 padding bits');
+              }
+              return [((a << 2) | (b >> 4)) & 0xFF];
+            }
+
+            if (q3 === '=') {
+              const a = readBase64Value(q0, decodeTable);
+              const b = readBase64Value(q1, decodeTable);
+              const c = readBase64Value(q2, decodeTable);
+              if (strict && (c & 0x03) !== 0) {
+                throw new SyntaxError('invalid base64 padding bits');
+              }
+              return [
+                ((a << 2) | (b >> 4)) & 0xFF,
+                ((b << 4) | (c >> 2)) & 0xFF,
+              ];
+            }
+
+            const a = readBase64Value(q0, decodeTable);
+            const b = readBase64Value(q1, decodeTable);
+            const c = readBase64Value(q2, decodeTable);
+            const d = readBase64Value(q3, decodeTable);
+            return [
+              ((a << 2) | (b >> 4)) & 0xFF,
+              ((b << 4) | (c >> 2)) & 0xFF,
+              ((c << 6) | d) & 0xFF,
+            ];
+          }
+
+          function canSkipPartialBase64Chunk(chunk, decodeTable) {
+            if (chunk.length === 0) {
+              return true;
+            }
+            if (chunk.length === 1) {
+              return decodeTable[chunk[0]] !== undefined;
+            }
+            if (chunk.length === 2) {
+              return decodeTable[chunk[0]] !== undefined && decodeTable[chunk[1]] !== undefined;
+            }
+            if (chunk.length === 3) {
+              if (chunk[2] === '=') {
+                return decodeTable[chunk[0]] !== undefined && decodeTable[chunk[1]] !== undefined;
+              }
+              return (
+                decodeTable[chunk[0]] !== undefined &&
+                decodeTable[chunk[1]] !== undefined &&
+                decodeTable[chunk[2]] !== undefined
+              );
+            }
+            return false;
+          }
+
+          function decodeLooseFinalBase64Chunk(chunk, decodeTable) {
+            if (chunk.length === 2) {
+              if (chunk[0] === '=' || chunk[1] === '=') {
+                throw new SyntaxError('invalid base64 string');
+              }
+              const a = readBase64Value(chunk[0], decodeTable);
+              const b = readBase64Value(chunk[1], decodeTable);
+              return [((a << 2) | (b >> 4)) & 0xFF];
+            }
+            if (chunk.length === 3) {
+              if (chunk[0] === '=' || chunk[1] === '=' || chunk[2] === '=') {
+                throw new SyntaxError('invalid base64 string');
+              }
+              const a = readBase64Value(chunk[0], decodeTable);
+              const b = readBase64Value(chunk[1], decodeTable);
+              const c = readBase64Value(chunk[2], decodeTable);
+              return [
+                ((a << 2) | (b >> 4)) & 0xFF,
+                ((b << 4) | (c >> 2)) & 0xFF,
+              ];
+            }
+            throw new SyntaxError('invalid base64 string');
+          }
+
+          function decodeBase64Into(string, alphabet, lastChunkHandling, maxLength, emitByte) {
+            if (maxLength === 0) {
+              return { read: 0, written: 0 };
+            }
+
+            const decodeTable = base64DecodeTables[alphabet];
+            const chunk = [];
+            const chunkEnds = [];
+            let readBeforeChunk = 0;
+            let written = 0;
+            let sawPaddingQuartet = false;
+            let pendingBytes = null;
+
+            for (let i = 0; i < string.length; i++) {
+              const ch = string[i];
+              if (isAsciiWhitespace(ch)) {
+                continue;
+              }
+              if (sawPaddingQuartet) {
+                throw new SyntaxError('invalid base64 string');
+              }
+
+              chunk.push(ch);
+              chunkEnds.push(i + 1);
+
+              if (chunk.length === 4) {
+                const bytes = decodeBase64Quartet(chunk, decodeTable, lastChunkHandling === 'strict');
+                const paddedQuartet = chunk[2] === '=' || chunk[3] === '=';
+                if (written + bytes.length > maxLength) {
+                  return { read: readBeforeChunk, written };
+                }
+                if (paddedQuartet && written + bytes.length !== maxLength) {
+                  pendingBytes = bytes;
+                  readBeforeChunk = chunkEnds[3];
+                  sawPaddingQuartet = true;
+                } else {
+                  for (let j = 0; j < bytes.length; j++) {
+                    emitByte(bytes[j], written + j);
+                  }
+                  written += bytes.length;
+                  readBeforeChunk = chunkEnds[3];
+                }
+                chunk.length = 0;
+                chunkEnds.length = 0;
+
+                if (written === maxLength) {
+                  return { read: readBeforeChunk, written };
+                }
+              }
+            }
+
+            if (chunk.length === 0) {
+              if (pendingBytes !== null) {
+                for (let j = 0; j < pendingBytes.length; j++) {
+                  emitByte(pendingBytes[j], written + j);
+                }
+                written += pendingBytes.length;
+              }
+              return { read: string.length, written };
+            }
+
+            if (lastChunkHandling === 'stop-before-partial') {
+              if (!canSkipPartialBase64Chunk(chunk, decodeTable)) {
+                throw new SyntaxError('invalid base64 string');
+              }
+              return { read: readBeforeChunk, written };
+            }
+
+            if (lastChunkHandling === 'strict') {
+              throw new SyntaxError('invalid base64 string');
+            }
+
+            const bytes = decodeLooseFinalBase64Chunk(chunk, decodeTable);
+            if (written + bytes.length > maxLength) {
+              return { read: readBeforeChunk, written };
+            }
+            for (let j = 0; j < bytes.length; j++) {
+              emitByte(bytes[j], written + j);
+            }
+            written += bytes.length;
+            return { read: string.length, written };
+          }
+
+          function hexValue(ch) {
+            const code = ch.charCodeAt(0);
+            if (code >= 0x30 && code <= 0x39) {
+              return code - 0x30;
+            }
+            if (code >= 0x41 && code <= 0x46) {
+              return code - 0x41 + 10;
+            }
+            if (code >= 0x61 && code <= 0x66) {
+              return code - 0x61 + 10;
+            }
+            return -1;
+          }
+
+          function decodeHexInto(string, maxLength, emitByte) {
+            if ((string.length & 1) !== 0) {
+              throw new SyntaxError('hex string must have even length');
+            }
+
+            let written = 0;
+            for (let i = 0; i < string.length; i += 2) {
+              if (written === maxLength) {
+                return { read: i, written };
+              }
+              const hi = hexValue(string[i]);
+              const lo = hexValue(string[i + 1]);
+              if (hi < 0 || lo < 0) {
+                throw new SyntaxError('invalid hex string');
+              }
+              emitByte((hi << 4) | lo, written);
+              written += 1;
+            }
+            return { read: string.length, written };
+          }
+
+          function encodeBase64(view, options) {
+            const table = base64Tables[options.alphabet];
+            let result = '';
+            let i = 0;
+            while (i + 2 < view.length) {
+              const a = view[i++];
+              const b = view[i++];
+              const c = view[i++];
+              result += table[a >> 2];
+              result += table[((a & 0x03) << 4) | (b >> 4)];
+              result += table[((b & 0x0F) << 2) | (c >> 6)];
+              result += table[c & 0x3F];
+            }
+
+            const remaining = view.length - i;
+            if (remaining === 1) {
+              const a = view[i];
+              result += table[a >> 2];
+              result += table[(a & 0x03) << 4];
+              if (!options.omitPadding) {
+                result += '==';
+              }
+            } else if (remaining === 2) {
+              const a = view[i++];
+              const b = view[i];
+              result += table[a >> 2];
+              result += table[((a & 0x03) << 4) | (b >> 4)];
+              result += table[(b & 0x0F) << 2];
+              if (!options.omitPadding) {
+                result += '=';
+              }
+            }
+
+            return result;
+          }
+
+          const staticMethods = {
+            fromBase64(string, options) {
+              requireString(string, 'Uint8Array.fromBase64');
+              const alphabet = getBase64Alphabet(options);
+              const lastChunkHandling = getBase64LastChunkHandling(options);
+              const bytes = [];
+              decodeBase64Into(string, alphabet, lastChunkHandling, Infinity, (byte) => {
+                bytes.push(byte);
+              });
+              return new Uint8ArrayCtor(bytes);
+            },
+
+            fromHex(string) {
+              requireString(string, 'Uint8Array.fromHex');
+              const bytes = [];
+              decodeHexInto(string, Infinity, (byte) => {
+                bytes.push(byte);
+              });
+              return new Uint8ArrayCtor(bytes);
+            },
+          };
+
+          const prototypeMethods = {
+            setFromBase64(string, options) {
+              const view = requireUint8Array(this, 'Uint8Array.prototype.setFromBase64');
+              requireString(string, 'Uint8Array.prototype.setFromBase64');
+              const alphabet = getBase64Alphabet(options);
+              const lastChunkHandling = getBase64LastChunkHandling(options);
+              if (view.buffer.detached) {
+                throw new TypeError('Uint8Array.prototype.setFromBase64 called on detached ArrayBuffer');
+              }
+              return decodeBase64Into(string, alphabet, lastChunkHandling, view.length, (byte, index) => {
+                view[index] = byte;
+              });
+            },
+
+            setFromHex(string) {
+              const view = requireAttachedUint8Array(this, 'Uint8Array.prototype.setFromHex');
+              requireString(string, 'Uint8Array.prototype.setFromHex');
+              return decodeHexInto(string, view.length, (byte, index) => {
+                view[index] = byte;
+              });
+            },
+
+            toBase64(options) {
+              const view = requireUint8Array(this, 'Uint8Array.prototype.toBase64');
+              const encodeOptions = getToBase64Options(options);
+              if (view.buffer.detached) {
+                throw new TypeError('Uint8Array.prototype.toBase64 called on detached ArrayBuffer');
+              }
+              return encodeBase64(view, encodeOptions);
+            },
+
+            toHex() {
+              const view = requireAttachedUint8Array(this, 'Uint8Array.prototype.toHex');
+              let result = '';
+              for (let i = 0; i < view.length; i++) {
+                const byte = view[i];
+                result += (byte < 16 ? '0' : '') + byte.toString(16);
+              }
+              return result;
+            },
+          };
+
+          Object.defineProperty(staticMethods.fromBase64, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(staticMethods.fromHex, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(prototypeMethods.setFromBase64, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(prototypeMethods.setFromHex, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(prototypeMethods.toBase64, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(prototypeMethods.toHex, 'length', {
+            value: 0,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(Uint8ArrayCtor, 'fromBase64', {
+            value: staticMethods.fromBase64,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(Uint8ArrayCtor, 'fromHex', {
+            value: staticMethods.fromHex,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(Uint8ArrayCtor.prototype, 'setFromBase64', {
+            value: prototypeMethods.setFromBase64,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(Uint8ArrayCtor.prototype, 'setFromHex', {
+            value: prototypeMethods.setFromHex,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(Uint8ArrayCtor.prototype, 'toBase64', {
+            value: prototypeMethods.toBase64,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(Uint8ArrayCtor.prototype, 'toHex', {
+            value: prototypeMethods.toHex,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "###,
+    ))?;
+    Ok(())
+}
+
 fn install_array_flat_undefined_fix(context: &mut Context) -> JsResult<()> {
     let prototype = context.intrinsics().constructors().array().prototype();
     let original_symbol = array_flat_original_symbol(context)?;
@@ -3280,8 +3888,7 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
         r#"
         (() => {
           if (typeof Atomics === 'object' && typeof Atomics.pause !== 'function') {
-            // Use arrow function syntax to prevent being a constructor
-            const pauseFn = (iterationNumber) => {
+            const pauseImpl = (iterationNumber) => {
               // This is a hint to the CPU that the thread is in a spin-wait loop.
               // In JavaScript, we can't actually hint the CPU, so this is a no-op.
               if (iterationNumber !== undefined) {
@@ -3293,6 +3900,11 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
                 }
               }
             };
+            const pauseFn = new Proxy(() => {}, {
+              apply(_target, thisArg, args) {
+                return pauseImpl.apply(thisArg, args);
+              }
+            });
             Object.defineProperty(pauseFn, 'length', {
               value: 0,
               writable: false,
@@ -4073,9 +4685,14 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
             const asyncGenProto = Object.getPrototypeOf(asyncGen.prototype);
             const AsyncIteratorPrototype = Object.getPrototypeOf(asyncGenProto);
             if (AsyncIteratorPrototype && !AsyncIteratorPrototype[Symbol.asyncDispose]) {
-              const asyncDisposeFn = async function() {
+              const asyncDisposeImpl = async function() {
                 return this.return?.();
               };
+              const asyncDisposeFn = new Proxy(async () => {}, {
+                apply(_target, thisArg, args) {
+                  return asyncDisposeImpl.apply(thisArg, args);
+                }
+              });
               Object.defineProperty(asyncDisposeFn, 'name', {
                 value: '[Symbol.asyncDispose]',
                 writable: false,
@@ -4120,6 +4737,164 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
+fn install_finalization_registry_builtin(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r###"
+        (() => {
+          if (typeof globalThis.FinalizationRegistry === 'function') {
+            return;
+          }
+
+          const registryState = new WeakMap();
+          const emptyToken = Symbol('empty FinalizationRegistry unregister token');
+
+          function canBeHeldWeakly(value) {
+            if ((typeof value === 'object' && value !== null) || typeof value === 'function') {
+              return true;
+            }
+            return typeof value === 'symbol' && Symbol.keyFor(value) === undefined;
+          }
+
+          function getIntrinsicFinalizationRegistryPrototype(newTarget) {
+            if (newTarget === undefined || newTarget === FinalizationRegistry) {
+              return FinalizationRegistry.prototype;
+            }
+            const proto = newTarget.prototype;
+            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
+              return proto;
+            }
+            try {
+              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+              const otherFinalizationRegistry = otherGlobal && otherGlobal.FinalizationRegistry;
+              const otherProto = otherFinalizationRegistry && otherFinalizationRegistry.prototype;
+              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
+                return otherProto;
+              }
+            } catch {}
+            return FinalizationRegistry.prototype;
+          }
+
+          function requireFinalizationRegistry(value, name) {
+            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !registryState.has(value)) {
+              throw new TypeError(name + ' called on incompatible receiver');
+            }
+            return registryState.get(value);
+          }
+
+          function FinalizationRegistry(cleanupCallback) {
+            if (new.target === undefined) {
+              throw new TypeError('Constructor FinalizationRegistry requires new');
+            }
+            if (typeof cleanupCallback !== 'function') {
+              throw new TypeError('FinalizationRegistry cleanup callback must be callable');
+            }
+
+            const registry = Object.create(getIntrinsicFinalizationRegistryPrototype(new.target));
+            registryState.set(registry, {
+              cleanupCallback,
+              cells: [],
+              active: false,
+            });
+            return registry;
+          }
+
+          const finalizationRegistryMethods = {
+            register(target, holdings, unregisterToken) {
+              const state = requireFinalizationRegistry(this, 'FinalizationRegistry.prototype.register');
+              if (!canBeHeldWeakly(target)) {
+                throw new TypeError('FinalizationRegistry.prototype.register target must be weakly holdable');
+              }
+              if (Object.is(target, holdings)) {
+                throw new TypeError('FinalizationRegistry target and holdings must not be the same');
+              }
+              if (unregisterToken !== undefined && !canBeHeldWeakly(unregisterToken)) {
+                throw new TypeError('FinalizationRegistry unregisterToken must be weakly holdable');
+              }
+              state.cells.push({
+                target,
+                holdings,
+                unregisterToken: unregisterToken === undefined ? emptyToken : unregisterToken,
+              });
+              return undefined;
+            },
+
+            unregister(unregisterToken) {
+              const state = requireFinalizationRegistry(this, 'FinalizationRegistry.prototype.unregister');
+              if (!canBeHeldWeakly(unregisterToken)) {
+                throw new TypeError('FinalizationRegistry unregisterToken must be weakly holdable');
+              }
+              let removed = false;
+              state.cells = state.cells.filter((cell) => {
+                if (cell.unregisterToken !== emptyToken && Object.is(cell.unregisterToken, unregisterToken)) {
+                  removed = true;
+                  return false;
+                }
+                return true;
+              });
+              return removed;
+            },
+          };
+
+          Object.defineProperty(finalizationRegistryMethods.register, 'length', {
+            value: 2,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(finalizationRegistryMethods.unregister, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const finalizationRegistryPrototype = Object.create(Object.prototype);
+          Object.defineProperties(finalizationRegistryPrototype, {
+            constructor: {
+              value: FinalizationRegistry,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            register: {
+              value: finalizationRegistryMethods.register,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            unregister: {
+              value: finalizationRegistryMethods.unregister,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+          });
+          Object.defineProperty(finalizationRegistryPrototype, Symbol.toStringTag, {
+            value: 'FinalizationRegistry',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(FinalizationRegistry, 'prototype', {
+            value: finalizationRegistryPrototype,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          Object.defineProperty(globalThis, 'FinalizationRegistry', {
+            value: FinalizationRegistry,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "###,
+    ))?;
+    Ok(())
+}
+
 fn install_bigint_to_locale_string(context: &mut Context) -> JsResult<()> {
     context.eval(Source::from_bytes(
         r#"
@@ -4156,27 +4931,6 @@ fn install_bigint_to_locale_string(context: &mut Context) -> JsResult<()> {
 
               const locales = args.length > 0 ? args[0] : undefined;
               const options = args.length > 1 ? args[1] : undefined;
-              const style =
-                options !== null &&
-                typeof options === 'object' &&
-                Object.prototype.hasOwnProperty.call(options, 'style')
-                  ? options.style
-                  : undefined;
-
-              if (style === 'percent') {
-                const numberFormatOptions = Object.assign({}, options);
-                delete numberFormatOptions.style;
-                const formatter = new IntrinsicNumberFormat(locales, numberFormatOptions);
-                const scaledValue = value * 100n;
-                const formatted = formatter.format(scaledValue);
-                const resolvedLocale =
-                  typeof formatter.resolvedOptions === 'function'
-                    ? formatter.resolvedOptions().locale
-                    : '';
-                const separator = /^de(?:-|$)/i.test(String(resolvedLocale)) ? '\u00A0' : '';
-                return `${formatted}${separator}%`;
-              }
-
               return new IntrinsicNumberFormat(locales, options).format(value);
             },
           });
@@ -4200,6 +4954,130 @@ fn install_bigint_to_locale_string(context: &mut Context) -> JsResult<()> {
             enumerable: false,
             configurable: true,
           });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn normalize_builtin_function_to_string(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          const originalFunctionToString = Function.prototype.toString;
+
+          const isLikelyNativeSource = (source) =>
+            typeof source === 'string' && source.includes('[native code]');
+
+          const isSimpleIdentifierName = (name) =>
+            typeof name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
+
+          const nativeSourceFor = (fn) => {
+            const name = typeof fn.name === 'string' ? fn.name : '';
+            if (isSimpleIdentifierName(name)) {
+              return `function ${name}() { [native code] }`;
+            }
+            return 'function () { [native code] }';
+          };
+
+          const installNativeLikeToString = (fn) => {
+            if (typeof fn !== 'function') {
+              return;
+            }
+
+            let source;
+            try {
+              source = originalFunctionToString.call(fn);
+            } catch {
+              return;
+            }
+
+            if (isLikelyNativeSource(source)) {
+              return;
+            }
+
+            const nativeSource = nativeSourceFor(fn);
+            const nativeToString = new Proxy(() => {}, {
+              apply() {
+                return nativeSource;
+              }
+            });
+
+            try {
+              Object.defineProperty(nativeToString, 'name', {
+                value: 'toString',
+                writable: false,
+                enumerable: false,
+                configurable: true,
+              });
+              Object.defineProperty(nativeToString, 'length', {
+                value: 0,
+                writable: false,
+                enumerable: false,
+                configurable: true,
+              });
+              Object.defineProperty(fn, 'toString', {
+                value: nativeToString,
+                writable: true,
+                enumerable: false,
+                configurable: true,
+              });
+            } catch {
+              // Ignore non-configurable or non-extensible functions.
+            }
+          };
+
+          const seen = new Set();
+          const visit = (value) => {
+            if (value === null) {
+              return;
+            }
+            const type = typeof value;
+            if (type !== 'object' && type !== 'function') {
+              return;
+            }
+            if (seen.has(value)) {
+              return;
+            }
+            seen.add(value);
+
+            if (type === 'function') {
+              installNativeLikeToString(value);
+            }
+
+            let descriptors;
+            try {
+              descriptors = Object.getOwnPropertyDescriptors(value);
+            } catch {
+              return;
+            }
+
+            for (const key of Reflect.ownKeys(descriptors)) {
+              const desc = descriptors[key];
+              if ('value' in desc) {
+                visit(desc.value);
+              } else {
+                visit(desc.get);
+                visit(desc.set);
+              }
+            }
+
+            try {
+              visit(Object.getPrototypeOf(value));
+            } catch {
+              // Ignore exotic prototype lookups.
+            }
+          };
+
+          visit(globalThis);
+
+          // Ensure important intrinsic-only prototypes are also reached even if not
+          // directly enumerable from the global object graph.
+          try {
+            async function* __agentjs_async_gen__() {}
+            const asyncGenProto = Object.getPrototypeOf(__agentjs_async_gen__.prototype);
+            visit(Object.getPrototypeOf(asyncGenProto));
+          } catch {}
         })();
         "#,
     ))?;
@@ -4832,10 +5710,16 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               resolvedDay = 'numeric';
             }
 
+            const localeCalendarMatch = typeof locale === 'string'
+              ? locale.match(/-u(?:-[a-z0-9]{2,8})*-ca-([a-z0-9-]+)/i)
+              : null;
+            const resolvedCalendar = calendar ||
+              (localeCalendarMatch ? canonicalizeCalendar(localeCalendarMatch[1]) : 'gregory');
+
             // Store resolved options
             const resolvedOpts = {
               locale: locale,
-              calendar: calendar || 'gregory',
+              calendar: resolvedCalendar,
               numberingSystem: numberingSystem ? String(numberingSystem).toLowerCase() : 'latn',
               timeZone: timeZone || 'UTC',
               hourCycle: hourCycle,
@@ -4865,7 +5749,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               }
             }
 
-            dtfSlots.set(this, { instance, resolvedOpts });
+            dtfSlots.set(this, { instance, resolvedOpts, needsDefault });
 
             return this;
           };
@@ -4874,12 +5758,61 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           Object.defineProperty(WrappedDTF, 'length', { value: 0, configurable: true });
           Object.defineProperty(WrappedDTF, 'name', { value: 'DateTimeFormat', configurable: true });
 
-          if (typeof DTF.supportedLocalesOf === 'function') {
-            WrappedDTF.supportedLocalesOf = function supportedLocalesOf(locales, options) {
+          const supportedLocalesOf = (locales, options) => {
+            if (typeof DTF.supportedLocalesOf === 'function') {
               return DTF.supportedLocalesOf(locales, options);
-            };
-            Object.defineProperty(WrappedDTF.supportedLocalesOf, 'length', { value: 1, configurable: true });
-          }
+            }
+            if (typeof Intl.NumberFormat === 'function' &&
+                typeof Intl.NumberFormat.supportedLocalesOf === 'function') {
+              return Intl.NumberFormat.supportedLocalesOf(locales, options);
+            }
+
+            if (options !== undefined) {
+              if (options === null) {
+                throw new TypeError('Cannot convert null to object');
+              }
+              const opts = Object(options);
+              const matcher = opts.localeMatcher;
+              if (matcher !== undefined) {
+                const matcherStr = String(matcher);
+                if (!VALID_LOCALE_MATCHERS.includes(matcherStr)) {
+                  throw new RangeError('Invalid localeMatcher');
+                }
+              }
+            }
+
+            if (locales === undefined) return [];
+            const requestedLocales = Array.isArray(locales) ? locales : [String(locales)];
+            const canonicalized = Intl.getCanonicalLocales(requestedLocales);
+            const defaultLocale = (() => {
+              try {
+                return new Intl.NumberFormat().resolvedOptions().locale || 'en-US';
+              } catch (e) {
+                return 'en-US';
+              }
+            })();
+            return canonicalized.filter((locale, index, array) =>
+              array.indexOf(locale) === index && locale === defaultLocale
+            );
+          };
+          Object.defineProperty(supportedLocalesOf, 'name', {
+            value: 'supportedLocalesOf',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(supportedLocalesOf, 'length', {
+            value: 1,
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+          Object.defineProperty(WrappedDTF, 'supportedLocalesOf', {
+            value: supportedLocalesOf,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
 
           // Create new prototype
           const newProto = Object.create(Object.prototype);
@@ -4920,152 +5853,389 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             configurable: true
           });
 
+          function resolveCalendarId(opts) {
+            if (opts.calendar !== undefined) {
+              return String(opts.calendar).toLowerCase();
+            }
+            const locale = typeof opts.locale === 'string' ? opts.locale : '';
+            const match = locale.match(/-u(?:-[a-z0-9]{2,8})*-ca-([a-z0-9-]+)/i);
+            return match ? match[1].toLowerCase() : 'gregory';
+          }
+
+          function getDateTimeFields(d, opts) {
+            const calendar = resolveCalendarId(opts);
+            if (opts.timeZone !== undefined &&
+                typeof Temporal === 'object' &&
+                Temporal !== null &&
+                typeof Temporal.Instant === 'function') {
+              try {
+                const instant = new Temporal.Instant(BigInt(d.getTime()) * 1000000n);
+                const zoned = instant.toZonedDateTimeISO(opts.timeZone);
+                const weekday = zoned.dayOfWeek % 7;
+                let calendarYear = zoned.year;
+                let calendarMonth = zoned.month;
+                let calendarDay = zoned.day;
+                let calendarMonthCode = zoned.monthCode;
+                if (calendar !== 'gregory' && calendar !== 'iso8601') {
+                  try {
+                    const calendarZoned = zoned.withCalendar(calendar);
+                    calendarYear = calendarZoned.year;
+                    calendarMonth = calendarZoned.month;
+                    calendarDay = calendarZoned.day;
+                    calendarMonthCode = calendarZoned.monthCode;
+                  } catch (_calendarError) {
+                    // Leave ISO fields in place.
+                  }
+                }
+                return {
+                  year: zoned.year,
+                  month: zoned.month,
+                  day: zoned.day,
+                  hour: zoned.hour,
+                  minute: zoned.minute,
+                  second: zoned.second,
+                  millisecond: zoned.millisecond,
+                  weekday,
+                  calendar,
+                  calendarYear,
+                  calendarMonth,
+                  calendarDay,
+                  calendarMonthCode,
+                };
+              } catch (_err) {
+                // Fall back to local fields below.
+              }
+            }
+
+            return {
+              year: d.getFullYear(),
+              month: d.getMonth() + 1,
+              day: d.getDate(),
+              hour: d.getHours(),
+              minute: d.getMinutes(),
+              second: d.getSeconds(),
+              millisecond: d.getMilliseconds(),
+              weekday: d.getDay(),
+              calendar,
+              calendarYear: d.getFullYear(),
+              calendarMonth: d.getMonth() + 1,
+              calendarDay: d.getDate(),
+              calendarMonthCode: 'M' + String(d.getMonth() + 1).padStart(2, '0'),
+            };
+          }
+
+          function localeUses24Hour(locale) {
+            const lower = (locale || 'en-US').toLowerCase();
+            return lower.startsWith('zh') || lower.startsWith('ja') ||
+              lower.startsWith('ko') || lower.startsWith('de') || lower.startsWith('ru') ||
+              lower.startsWith('pl') || lower.startsWith('it') || lower.startsWith('pt') ||
+              lower.startsWith('nl') || lower.startsWith('sv') || lower.startsWith('fi') ||
+              lower.startsWith('da') || lower.startsWith('nb') || lower.startsWith('cs') ||
+              lower.startsWith('hu') || lower.startsWith('ro') || lower.startsWith('sk') ||
+              lower.startsWith('uk') || lower.startsWith('hr') || lower.startsWith('bg') ||
+              lower.startsWith('el') || lower.startsWith('tr') || lower.startsWith('vi') ||
+              lower.startsWith('th') || lower.startsWith('id');
+          }
+
+          function applyDateTimeStyleDefaults(opts) {
+            const adjusted = Object.assign({}, opts);
+            if (opts.dateStyle !== undefined) {
+              adjusted.year ??= 'numeric';
+              adjusted.month ??= opts.dateStyle === 'short' ? 'numeric' : (opts.dateStyle === 'medium' ? 'short' : 'long');
+              adjusted.day ??= 'numeric';
+              if (opts.dateStyle === 'full') {
+                adjusted.weekday ??= 'long';
+              }
+            }
+            if (opts.timeStyle !== undefined) {
+              adjusted.hour ??= 'numeric';
+              adjusted.minute ??= 'numeric';
+              adjusted.second ??= 'numeric';
+              if (opts.timeStyle === 'full' || opts.timeStyle === 'long') {
+                adjusted.timeZoneName ??= 'short';
+              }
+            }
+            return adjusted;
+          }
+
+          function formatDateWithOptionsToParts(d, opts) {
+            const normalized = applyDateTimeStyleDefaults(opts);
+            const fields = getDateTimeFields(d, normalized);
+            const hasDateComponent = normalized.year !== undefined || normalized.month !== undefined ||
+              normalized.day !== undefined || normalized.weekday !== undefined || normalized.era !== undefined;
+            const hasTimeComponent = normalized.hour !== undefined || normalized.minute !== undefined ||
+              normalized.second !== undefined || normalized.dayPeriod !== undefined ||
+              normalized.fractionalSecondDigits !== undefined || normalized.timeZoneName !== undefined;
+            const parts = [];
+
+            function pushLiteral(value) {
+              if (value) {
+                parts.push({ type: 'literal', value });
+              }
+            }
+
+            function monthName(month, style, calendar) {
+              const gregLong = ['January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December'];
+              const gregShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+              const gregNarrow = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+              const islamicLong = ['Muharram', 'Safar', 'Rabiʻ I', 'Rabiʻ II', 'Jumada I', 'Jumada II',
+                'Rajab', 'Shaʻban', 'Ramadan', 'Shawwal', 'Dhuʻl-Qiʻdah', 'Dhuʻl-Hijjah'];
+              const islamicShort = ['Muh.', 'Saf.', 'Rab. I', 'Rab. II', 'Jum. I', 'Jum. II',
+                'Raj.', 'Sha.', 'Ram.', 'Shaw.', 'Dhuʻl-Q.', 'Dhuʻl-H.'];
+              const lowerCalendar = String(calendar || 'gregory').toLowerCase();
+              const isIslamic = lowerCalendar === 'islamic' || lowerCalendar.startsWith('islamic-');
+              const longNames = isIslamic ? islamicLong : gregLong;
+              const shortNames = isIslamic ? islamicShort : gregShort;
+              const narrowNames = isIslamic ? islamicLong.map((name) => name[0]) : gregNarrow;
+              if (style === 'long') return longNames[month - 1];
+              if (style === 'short') return shortNames[month - 1];
+              return narrowNames[month - 1];
+            }
+
+            function weekdayName(weekday, style) {
+              const longNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+              const shortNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+              const narrowNames = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+              if (style === 'long') return longNames[weekday];
+              if (style === 'short') return shortNames[weekday];
+              return narrowNames[weekday];
+            }
+
+            if (hasDateComponent || (!hasTimeComponent && normalized.dateStyle === undefined && normalized.timeStyle === undefined)) {
+              const dateParts = [];
+              if (normalized.weekday !== undefined) {
+                dateParts.push({ type: 'weekday', value: weekdayName(fields.weekday, normalized.weekday) });
+              }
+              if (normalized.month !== undefined) {
+                const displayMonth = fields.calendarMonth ?? fields.month;
+                const value = normalized.month === '2-digit'
+                  ? String(displayMonth).padStart(2, '0')
+                  : normalized.month === 'numeric'
+                    ? String(displayMonth)
+                    : monthName(displayMonth, normalized.month, fields.calendar);
+                dateParts.push({ type: 'month', value });
+              }
+              if (normalized.day !== undefined) {
+                const displayDay = fields.calendarDay ?? fields.day;
+                dateParts.push({
+                  type: 'day',
+                  value: normalized.day === '2-digit'
+                    ? String(displayDay).padStart(2, '0')
+                    : String(displayDay),
+                });
+              }
+              if (normalized.year !== undefined) {
+                const displayYear = fields.calendarYear ?? fields.year;
+                dateParts.push({
+                  type: 'year',
+                  value: normalized.year === '2-digit'
+                    ? String(displayYear % 100).padStart(2, '0')
+                    : String(displayYear),
+                });
+              }
+              if (normalized.era !== undefined) {
+                dateParts.push({ type: 'era', value: fields.year >= 1 ? 'AD' : 'BC' });
+              }
+
+              dateParts.forEach((part, index) => {
+                if (index > 0) {
+                  pushLiteral(index === 1 && dateParts[0].type === 'weekday' ? ', ' : '/');
+                }
+                parts.push(part);
+              });
+            }
+
+            if (hasTimeComponent) {
+              if (parts.length > 0) {
+                pushLiteral(', ');
+              }
+
+              const use12Hour = normalized.hour12 !== undefined
+                ? normalized.hour12
+                : normalized.hourCycle !== undefined
+                  ? normalized.hourCycle === 'h11' || normalized.hourCycle === 'h12'
+                  : !localeUses24Hour(normalized.locale);
+
+              let displayHour = fields.hour;
+              let dayPeriod;
+              if (normalized.hour !== undefined) {
+                if (use12Hour) {
+                  dayPeriod = fields.hour >= 12 ? 'PM' : 'AM';
+                  if (normalized.hourCycle === 'h11') {
+                    displayHour = fields.hour % 12;
+                  } else {
+                    displayHour = fields.hour % 12;
+                    if (displayHour === 0) displayHour = 12;
+                  }
+                } else if (normalized.hourCycle === 'h24' && displayHour === 0) {
+                  displayHour = 24;
+                }
+              }
+
+              const timeParts = [];
+              if (normalized.hour !== undefined) {
+                timeParts.push({
+                  type: 'hour',
+                  value: normalized.hour === '2-digit'
+                    ? String(displayHour).padStart(2, '0')
+                    : String(displayHour),
+                });
+              }
+              if (normalized.minute !== undefined) {
+                timeParts.push({ type: 'minute', value: String(fields.minute).padStart(2, '0') });
+              }
+              if (normalized.second !== undefined) {
+                let secondValue = String(fields.second).padStart(2, '0');
+                if (normalized.fractionalSecondDigits !== undefined) {
+                  const ms = String(fields.millisecond).padStart(3, '0')
+                    .substring(0, normalized.fractionalSecondDigits);
+                  secondValue += '.' + ms;
+                }
+                timeParts.push({ type: 'second', value: secondValue });
+              } else if (normalized.fractionalSecondDigits !== undefined) {
+                timeParts.push({
+                  type: 'fractionalSecond',
+                  value: String(fields.millisecond).padStart(3, '0').substring(0, normalized.fractionalSecondDigits),
+                });
+              }
+
+              timeParts.forEach((part, index) => {
+                if (index > 0) {
+                  pushLiteral(':');
+                }
+                parts.push(part);
+              });
+
+              if (dayPeriod && (use12Hour || normalized.dayPeriod !== undefined)) {
+                pushLiteral(' ');
+                parts.push({ type: 'dayPeriod', value: dayPeriod });
+              }
+
+              if (normalized.timeZoneName !== undefined) {
+                let zoneName = normalized.timeZone;
+                if (zoneName === 'America/New_York') zoneName = 'EST';
+                else if (zoneName === 'America/Los_Angeles') zoneName = 'PST';
+                else if (zoneName === 'Europe/Berlin' || zoneName === 'Europe/Vienna') zoneName = 'GMT+1';
+                else if (zoneName === 'UTC') zoneName = 'UTC';
+                pushLiteral(' ');
+                parts.push({ type: 'timeZoneName', value: zoneName || 'UTC' });
+              }
+            }
+
+            if (parts.length === 0) {
+              parts.push({ type: 'literal', value: '' });
+            }
+            return parts;
+          }
+
           // Helper function to format date according to resolved options
           function formatDateWithOptions(d, opts) {
-            const hasDateComponent = opts.year !== undefined || opts.month !== undefined || 
-              opts.day !== undefined || opts.weekday !== undefined || opts.era !== undefined;
-            const hasTimeComponent = opts.hour !== undefined || opts.minute !== undefined || 
-              opts.second !== undefined || opts.dayPeriod !== undefined;
-            const hasStyle = opts.dateStyle !== undefined || opts.timeStyle !== undefined;
-            
-            // Use dateStyle/timeStyle if specified
-            if (hasStyle) {
-              const styleOpts = {};
-              if (opts.dateStyle) styleOpts.dateStyle = opts.dateStyle;
-              if (opts.timeStyle) styleOpts.timeStyle = opts.timeStyle;
-              styleOpts.timeZone = opts.timeZone;
-              return d.toLocaleString(opts.locale, styleOpts);
+            return formatDateWithOptionsToParts(d, opts).map((part) => part.value).join('');
+          }
+
+          function normalizeDateTimeFormatInput(value) {
+            if (value === undefined) {
+              return new Date(Date.now());
             }
-            
-            // Build format string manually based on resolved options
-            const parts = [];
-            
-            // Date parts
-            if (hasDateComponent || (!hasTimeComponent && !hasStyle)) {
-              // Default to date if no components specified
-              const dateParts = [];
-              const month = d.getMonth() + 1;
-              const day = d.getDate();
-              const year = d.getFullYear();
-              
-              if (opts.month !== undefined) {
-                if (opts.month === '2-digit') {
-                  dateParts.push(month.toString().padStart(2, '0'));
-                } else if (opts.month === 'numeric') {
-                  dateParts.push(month.toString());
-                } else if (opts.month === 'long') {
-                  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-                    'July', 'August', 'September', 'October', 'November', 'December'];
-                  dateParts.push(monthNames[d.getMonth()]);
-                } else if (opts.month === 'short') {
-                  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-                  dateParts.push(monthNames[d.getMonth()]);
-                } else if (opts.month === 'narrow') {
-                  const monthNames = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
-                  dateParts.push(monthNames[d.getMonth()]);
-                }
-              }
-              
-              if (opts.day !== undefined) {
-                if (opts.day === '2-digit') {
-                  dateParts.push(day.toString().padStart(2, '0'));
-                } else {
-                  dateParts.push(day.toString());
-                }
-              }
-              
-              if (opts.year !== undefined) {
-                if (opts.year === '2-digit') {
-                  dateParts.push((year % 100).toString().padStart(2, '0'));
-                } else {
-                  dateParts.push(year.toString());
-                }
-              }
-              
-              // Format as M/D/YYYY for numeric, adjust order for locale
-              if (dateParts.length > 0) {
-                parts.push(dateParts.join('/'));
+
+            if (value instanceof Date) {
+              return new Date(value.getTime());
+            }
+
+            if (typeof value === 'object' && value !== null) {
+              const tag = Object.prototype.toString.call(value);
+              if (tag === '[object Temporal.Instant]') {
+                return new Date(Number(value.epochMilliseconds));
               }
             }
-            
-            // Time parts
-            if (hasTimeComponent) {
-              const timeParts = [];
-              let hours = d.getHours();
-              const minutes = d.getMinutes();
-              const seconds = d.getSeconds();
-              let period = '';
-              
-              // Handle 12-hour format - default to 12-hour for en-US and similar locales
-              // 24-hour locales: zh, ja, ko, de, ru, most European except UK/US
-              const locale = (opts.locale || 'en-US').toLowerCase();
-              const is24HourLocale = locale.startsWith('zh') || locale.startsWith('ja') || 
-                locale.startsWith('ko') || locale.startsWith('de') || locale.startsWith('ru') ||
-                locale.startsWith('pl') || locale.startsWith('it') || locale.startsWith('pt') ||
-                locale.startsWith('nl') || locale.startsWith('sv') || locale.startsWith('fi') ||
-                locale.startsWith('da') || locale.startsWith('nb') || locale.startsWith('cs') ||
-                locale.startsWith('hu') || locale.startsWith('ro') || locale.startsWith('sk') ||
-                locale.startsWith('uk') || locale.startsWith('hr') || locale.startsWith('bg') ||
-                locale.startsWith('el') || locale.startsWith('tr') || locale.startsWith('vi') ||
-                locale.startsWith('th') || locale.startsWith('id');
-              
-              // Use hour12 if explicitly set, otherwise check hourCycle, otherwise use locale default
-              let use12Hour;
-              if (opts.hour12 !== undefined) {
-                use12Hour = opts.hour12;
-              } else if (opts.hourCycle !== undefined) {
-                use12Hour = opts.hourCycle === 'h11' || opts.hourCycle === 'h12';
-              } else {
-                use12Hour = !is24HourLocale;
-              }
-              
-              if (use12Hour && opts.hour !== undefined) {
-                period = hours >= 12 ? ' PM' : ' AM';
-                hours = hours % 12;
-                if (hours === 0) hours = 12;
-              }
-              
-              if (opts.hour !== undefined) {
-                if (opts.hour === '2-digit') {
-                  timeParts.push(hours.toString().padStart(2, '0'));
-                } else {
-                  timeParts.push(hours.toString());
-                }
-              }
-              
-              if (opts.minute !== undefined) {
-                timeParts.push(minutes.toString().padStart(2, '0'));
-              }
-              
-              if (opts.second !== undefined) {
-                timeParts.push(seconds.toString().padStart(2, '0'));
-              }
-              
-              // Handle fractionalSecondDigits - add milliseconds portion
-              if (opts.fractionalSecondDigits !== undefined) {
-                const ms = d.getMilliseconds();
-                const fractional = ms.toString().padStart(3, '0');
-                const digits = opts.fractionalSecondDigits;
-                // Truncate to requested precision (round down)
-                const truncated = fractional.substring(0, digits);
-                // If we have seconds, append with dot, otherwise add to last part
-                if (opts.second !== undefined) {
-                  const lastIdx = timeParts.length - 1;
-                  timeParts[lastIdx] = timeParts[lastIdx] + '.' + truncated;
-                } else {
-                  // Per spec, fractionalSecondDigits requires second to be present
-                  // but if not, just append it
-                  timeParts.push('.' + truncated);
-                }
-              }
-              
-              if (timeParts.length > 0) {
-                parts.push(timeParts.join(':') + period);
+
+            return new Date(value);
+          }
+
+          function isTemporalInstantValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.Instant]';
+          }
+
+          function copyDefinedDateTimeFormatOptions(opts) {
+            const adjusted = {};
+            const keys = [
+              'calendar',
+              'numberingSystem',
+              'timeZone',
+              'weekday',
+              'era',
+              'year',
+              'month',
+              'day',
+              'dayPeriod',
+              'hour',
+              'minute',
+              'second',
+              'fractionalSecondDigits',
+              'timeZoneName',
+              'hourCycle',
+              'hour12',
+              'dateStyle',
+              'timeStyle',
+            ];
+            for (const key of keys) {
+              if (opts[key] !== undefined) {
+                adjusted[key] = opts[key];
               }
             }
-            
-            return parts.join(', ');
+            return adjusted;
+          }
+
+          function temporalInstantFormattingOptions(slot) {
+            const opts = copyDefinedDateTimeFormatOptions(slot.resolvedOpts);
+            const hasDateStyle = slot.resolvedOpts.dateStyle !== undefined || slot.resolvedOpts.timeStyle !== undefined;
+            const hasExplicitCoreFields = slot.resolvedOpts.weekday !== undefined ||
+              slot.resolvedOpts.era !== undefined ||
+              slot.resolvedOpts.year !== undefined ||
+              slot.resolvedOpts.month !== undefined ||
+              slot.resolvedOpts.day !== undefined ||
+              slot.resolvedOpts.hour !== undefined ||
+              slot.resolvedOpts.minute !== undefined ||
+              slot.resolvedOpts.second !== undefined;
+            const needsInstantDefaults = !hasDateStyle && (
+              slot.needsDefault || (!hasExplicitCoreFields && (
+                slot.resolvedOpts.fractionalSecondDigits !== undefined ||
+                slot.resolvedOpts.timeZoneName !== undefined ||
+                slot.resolvedOpts.hour12 !== undefined ||
+                slot.resolvedOpts.hourCycle !== undefined
+              ))
+            );
+            if (needsInstantDefaults) {
+              const use24Hour = slot.resolvedOpts.hour12 === false ||
+                slot.resolvedOpts.hourCycle === 'h23' ||
+                slot.resolvedOpts.hourCycle === 'h24' ||
+                (slot.resolvedOpts.hour12 === undefined &&
+                 slot.resolvedOpts.hourCycle === undefined &&
+                 localeUses24Hour(slot.resolvedOpts.locale));
+              opts.year ??= 'numeric';
+              opts.month ??= 'numeric';
+              opts.day ??= 'numeric';
+              opts.hour ??= use24Hour ? '2-digit' : 'numeric';
+              opts.minute ??= '2-digit';
+              opts.second ??= '2-digit';
+            }
+            return opts;
+          }
+
+          function formatTemporalInstant(slot, instant, toParts) {
+            const d = new Date(Number(instant.epochMilliseconds));
+            if (isNaN(d.getTime())) {
+              throw new RangeError('Invalid time value');
+            }
+            const opts = temporalInstantFormattingOptions(slot);
+            opts.locale = slot.resolvedOpts.locale;
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
           }
 
           // Helper to make non-constructable getter/function
@@ -5090,14 +6260,16 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               throw new TypeError('Method get Intl.DateTimeFormat.prototype.format called on incompatible receiver');
             }
             const boundFormat = (date) => {
-              if (date === undefined) {
-                date = Date.now();
+              if (isTemporalInstantValue(date)) {
+                return formatTemporalInstant(slot, date, false);
               }
-              const d = new Date(date);
+              const d = normalizeDateTimeFormatInput(date);
               if (isNaN(d.getTime())) {
                 throw new RangeError('Invalid time value');
               }
-              // Use our custom formatting that respects resolved options
+              if (slot.instance && typeof slot.instance.format === 'function') {
+                return slot.instance.format(d);
+              }
               return formatDateWithOptions(d, slot.resolvedOpts);
             };
             Object.defineProperty(boundFormat, 'name', { value: '', configurable: true });
@@ -5119,20 +6291,17 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (!slot) {
               throw new TypeError('Method Intl.DateTimeFormat.prototype.formatToParts called on incompatible receiver');
             }
-            if (date === undefined) {
-              date = Date.now();
+            if (isTemporalInstantValue(date)) {
+              return formatTemporalInstant(slot, date, true);
             }
-            const d = new Date(date);
+            const d = normalizeDateTimeFormatInput(date);
             if (isNaN(d.getTime())) {
               throw new RangeError('Invalid time value');
             }
-            // Use the underlying instance if it has formatToParts
             if (slot.instance && typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
-            // Fallback: return simple parts
-            const formatted = d.toLocaleString(slot.resolvedOpts.locale);
-            return [{ type: 'literal', value: formatted }];
+            return formatDateWithOptionsToParts(d, slot.resolvedOpts);
           };
           Object.defineProperty(newProto, 'formatToParts', {
             value: makeNonConstructableAccessor(formatToPartsImpl, 'formatToParts'),
@@ -5150,8 +6319,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (startDate === undefined || endDate === undefined) {
                 throw new TypeError('startDate and endDate are required');
               }
-              const start = new Date(startDate);
-              const end = new Date(endDate);
+              const start = normalizeDateTimeFormatInput(startDate);
+              const end = normalizeDateTimeFormatInput(endDate);
               if (isNaN(start.getTime()) || isNaN(end.getTime())) {
                 throw new RangeError('Invalid time value');
               }
@@ -5179,8 +6348,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (startDate === undefined || endDate === undefined) {
               throw new TypeError('startDate and endDate are required');
             }
-            const start = new Date(startDate);
-            const end = new Date(endDate);
+            const start = normalizeDateTimeFormatInput(startDate);
+            const end = normalizeDateTimeFormatInput(endDate);
             if (isNaN(start.getTime()) || isNaN(end.getTime())) {
               throw new RangeError('Invalid time value');
             }
@@ -5464,6 +6633,50 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
               writable: true,
               enumerable: false,
               configurable: true
+            });
+          }
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
+fn install_temporal_locale_string_polyfill(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Temporal !== 'object' || Temporal === null) return;
+          if (typeof Intl !== 'object' || Intl === null) return;
+          if (typeof Intl.DateTimeFormat !== 'function') return;
+
+          const instantProto = Temporal.Instant && Temporal.Instant.prototype;
+          if (instantProto && typeof instantProto.toLocaleString === 'function') {
+            const instantToLocaleString = new Proxy(() => {}, {
+              apply(_target, thisArg, args) {
+                if (Object.prototype.toString.call(thisArg) !== '[object Temporal.Instant]') {
+                  throw new TypeError('Temporal.Instant.prototype.toLocaleString called on incompatible receiver');
+                }
+                const formatter = new Intl.DateTimeFormat(args[0], args[1]);
+                return formatter.format(thisArg);
+              },
+            });
+            Object.defineProperty(instantToLocaleString, 'name', {
+              value: 'toLocaleString',
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(instantToLocaleString, 'length', {
+              value: 0,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(instantProto, 'toLocaleString', {
+              value: instantToLocaleString,
+              writable: true,
+              enumerable: false,
+              configurable: true,
             });
           }
         })();
@@ -8877,7 +10090,10 @@ fn install_prototype_method_if_missing(
     Ok(())
 }
 
-fn install_test262_globals(context: &mut Context) -> boa_engine::JsResult<()> {
+fn install_test262_globals(
+    context: &mut Context,
+    install_shadow_realm: bool,
+) -> boa_engine::JsResult<()> {
     let test262 = build_test262_object(
         context.realm().clone(),
         context.global_object(),
@@ -8885,6 +10101,319 @@ fn install_test262_globals(context: &mut Context) -> boa_engine::JsResult<()> {
         context,
     );
     context.register_global_property(js_string!("$262"), test262, Attribute::all())?;
+    if install_shadow_realm {
+        install_shadow_realm_polyfill(context)?;
+    }
+    Ok(())
+}
+
+fn install_shadow_realm_polyfill(context: &mut Context) -> boa_engine::JsResult<()> {
+    context.eval(Source::from_bytes(
+        r###"
+        (() => {
+          if (typeof globalThis.ShadowRealm === 'function') {
+            return;
+          }
+          if (typeof globalThis.$262 !== 'object' || globalThis.$262 === null || typeof globalThis.$262.createRealm !== 'function') {
+            return;
+          }
+
+          var stateKey = Symbol.for('@@agentjs.shadowrealm.state');
+          var nextTempId = 0;
+
+          function getIntrinsicShadowRealmPrototype(newTarget) {
+            if (newTarget === undefined || newTarget === ShadowRealm) {
+              return ShadowRealm.prototype;
+            }
+            var proto = newTarget.prototype;
+            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
+              return proto;
+            }
+            try {
+              var otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
+              var otherShadowRealm = otherGlobal && otherGlobal.ShadowRealm;
+              var otherProto = otherShadowRealm && otherShadowRealm.prototype;
+              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
+                return otherProto;
+              }
+            } catch {}
+            return ShadowRealm.prototype;
+          }
+
+          function requireShadowRealm(value, name, TypeErrorCtor) {
+            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !Object.prototype.hasOwnProperty.call(value, stateKey)) {
+              throw new TypeErrorCtor(name + ' called on incompatible receiver');
+            }
+            return value[stateKey];
+          }
+
+          function isPrimitive(value) {
+            return value === null || (typeof value !== 'object' && typeof value !== 'function');
+          }
+
+          function defineNameAndLength(wrapper, target) {
+            var length = 0;
+            var name = '';
+
+            try {
+              if (Object.prototype.hasOwnProperty.call(target, 'length')) {
+                var targetLength = target.length;
+                if (typeof targetLength === 'number') {
+                  if (targetLength === Infinity) {
+                    length = Infinity;
+                  } else if (targetLength === -Infinity) {
+                    length = 0;
+                  } else {
+                    var coerced = Math.trunc(targetLength);
+                    if (!Number.isFinite(coerced)) {
+                      coerced = 0;
+                    }
+                    length = Math.max(coerced, 0);
+                  }
+                }
+              }
+
+              var targetName = target.name;
+              if (typeof targetName === 'string') {
+                name = targetName;
+              }
+            } catch {
+              throw new TypeError('WrappedFunctionCreate failed');
+            }
+
+            Object.defineProperty(wrapper, 'length', {
+              value: length,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(wrapper, 'name', {
+              value: name,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+
+          function evalInBridge(state, sourceText) {
+            var tempName = '__agentjs_shadowrealm_source_' + (nextTempId++) + '__';
+            state.bridge.global[tempName] = sourceText;
+            try {
+              return state.bridge.evalScript('(0, eval)(globalThis[' + JSON.stringify(tempName) + '])');
+            } finally {
+              try {
+                delete state.bridge.global[tempName];
+              } catch (e) {}
+            }
+          }
+
+          function createTargetRealmCallable(callable, state) {
+            var callableId = __agentjs_shadowrealm_register_callable__(callable);
+            var source =
+              '(function(callableId) {' +
+              '  return function() {' +
+              '    var invokeArgs = [callableId];' +
+              '    for (var i = 0; i < arguments.length; i++) {' +
+              '      invokeArgs.push(arguments[i]);' +
+              '    }' +
+              '    var result;' +
+              '    try {' +
+              '      result = __agentjs_shadowrealm_invoke__.apply(undefined, invokeArgs);' +
+              '    } catch (e) {' +
+              '      throw new TypeError();' +
+              '    }' +
+              '    if (result === null || (typeof result !== "object" && typeof result !== "function")) {' +
+              '      return result;' +
+              '    }' +
+              '    if (typeof result === "function") {' +
+              '      var nestedId = __agentjs_shadowrealm_register_callable__(result);' +
+              '      return function() {' +
+              '        var nestedArgs = [nestedId];' +
+              '        for (var j = 0; j < arguments.length; j++) {' +
+              '          nestedArgs.push(arguments[j]);' +
+              '        }' +
+              '        try {' +
+              '          return __agentjs_shadowrealm_invoke__.apply(undefined, nestedArgs);' +
+              '        } catch (e) {' +
+              '          throw new TypeError();' +
+              '        }' +
+              '      };' +
+              '    }' +
+              '    throw new TypeError();' +
+              '  };' +
+              '})(' + String(callableId) + ')';
+            return evalInBridge(state, source);
+          }
+
+          function convertArgumentsForTarget(args, state) {
+            var converted = [];
+            for (var i = 0; i < args.length; i++) {
+              var arg = args[i];
+              if (isPrimitive(arg)) {
+                converted.push(arg);
+                continue;
+              }
+              if (typeof arg === 'function') {
+                converted.push(createTargetRealmCallable(arg, state));
+                continue;
+              }
+              throw new TypeError('ShadowRealm wrapped functions only accept primitives or callables');
+            }
+            return converted;
+          }
+
+          function wrapValueFromTarget(value, wrapperCarrier, TypeErrorCtor) {
+            if (isPrimitive(value)) {
+              return value;
+            }
+            if (typeof value === 'function') {
+              try {
+                return __agentjs_shadowrealm_wrap_callable__(wrapperCarrier, value);
+              } catch (e) {
+                throw new TypeErrorCtor('WrappedFunctionCreate failed');
+              }
+            }
+            throw new TypeErrorCtor('ShadowRealm values must be primitive or callable');
+          }
+
+          function createWrappedFunction(targetCallable, state) {
+            var targetId = __agentjs_shadowrealm_register_callable__(targetCallable);
+            var wrapped = function() {
+              var convertedArgs = convertArgumentsForTarget(Array.prototype.slice.call(arguments), state);
+              var invokeArgs = [targetId];
+              for (var i = 0; i < convertedArgs.length; i++) {
+                invokeArgs.push(convertedArgs[i]);
+              }
+              var result;
+              try {
+                result = __agentjs_shadowrealm_invoke__.apply(undefined, invokeArgs);
+              } catch (e) {
+                throw new TypeError('Wrapped function invocation failed');
+              }
+              return wrapValueFromTarget(result, state);
+            };
+            defineNameAndLength(wrapped, targetCallable);
+            return wrapped;
+          }
+
+          function ShadowRealm() {
+            if (new.target === undefined) {
+              throw new TypeError('Constructor ShadowRealm requires new');
+            }
+
+            var realm = Object.create(getIntrinsicShadowRealmPrototype(new.target));
+            Object.defineProperty(realm, stateKey, {
+              value: {
+                bridge: $262.createRealm(),
+              },
+              writable: false,
+              enumerable: false,
+              configurable: false,
+            });
+            return realm;
+          }
+
+          var shadowRealmMethods = {
+            evaluate(sourceText) {
+              var CallerTypeError = TypeError;
+              var CallerSyntaxError = SyntaxError;
+              var RealmCarrier = function() {};
+              var state = requireShadowRealm(this, 'ShadowRealm.prototype.evaluate', CallerTypeError);
+              if (typeof sourceText !== 'string') {
+                throw new CallerTypeError('ShadowRealm.prototype.evaluate requires a string');
+              }
+              var initialParseValid = __agentjs_shadowrealm_can_parse_script__(sourceText);
+
+              var result;
+              try {
+                result = evalInBridge(state, sourceText);
+              } catch (e) {
+                if (!initialParseValid && e && e.name === 'SyntaxError') {
+                  throw new CallerSyntaxError('Invalid ShadowRealm source text');
+                }
+                throw new CallerTypeError('ShadowRealm.prototype.evaluate failed');
+              }
+              return wrapValueFromTarget(result, RealmCarrier, CallerTypeError);
+            },
+
+            importValue(specifier, exportName) {
+              var CallerTypeError = TypeError;
+              var RealmCarrier = function() {};
+              var state = requireShadowRealm(this, 'ShadowRealm.prototype.importValue', CallerTypeError);
+              var specifierString = String(specifier);
+              if (typeof exportName !== 'string') {
+                throw new CallerTypeError('ShadowRealm.prototype.importValue exportName must be a string');
+              }
+
+              var promise;
+              try {
+                promise = __agentjs_shadowrealm_dynamic_import__(specifierString);
+              } catch (e) {
+                return Promise.reject(new CallerTypeError('ShadowRealm.prototype.importValue failed'));
+              }
+
+              return promise.then(
+                function(namespace) {
+                  if (!Object.prototype.hasOwnProperty.call(namespace, exportName)) {
+                    throw new CallerTypeError('Requested export was not found');
+                  }
+                  return wrapValueFromTarget(
+                    namespace[exportName],
+                    RealmCarrier,
+                    CallerTypeError
+                  );
+                },
+                function() {
+                  throw new CallerTypeError('ShadowRealm.prototype.importValue failed');
+                }
+              );
+            },
+          };
+
+          var shadowRealmPrototype = Object.create(Object.prototype);
+          Object.defineProperties(shadowRealmPrototype, {
+            constructor: {
+              value: ShadowRealm,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            evaluate: {
+              value: shadowRealmMethods.evaluate,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+            importValue: {
+              value: shadowRealmMethods.importValue,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            },
+          });
+          Object.defineProperty(shadowRealmPrototype, Symbol.toStringTag, {
+            value: 'ShadowRealm',
+            writable: false,
+            enumerable: false,
+            configurable: true,
+          });
+
+          Object.defineProperty(ShadowRealm, 'prototype', {
+            value: shadowRealmPrototype,
+            writable: false,
+            enumerable: false,
+            configurable: false,
+          });
+
+          Object.defineProperty(globalThis, 'ShadowRealm', {
+            value: ShadowRealm,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "###,
+    ))?;
     Ok(())
 }
 
@@ -8961,7 +10490,38 @@ fn build_test262_object(
     if let Some(agent) = agent {
         object.property(js_string!("agent"), agent, Attribute::all());
     }
-    object.build()
+    let object = object.build();
+    let can_parse_realm = target_realm.clone();
+    let can_parse = build_builtin_function(
+        context,
+        js_string!("__agentjsCanParseScript__"),
+        1,
+        NativeFunction::from_copy_closure_with_captures(
+            |_this, args, target_realm, context| {
+                let source = script_source_from_args(args, context)?;
+                with_realm(context, target_realm.clone(), |context| {
+                    Ok(
+                        Script::parse(Source::from_bytes(source.as_str()), None, context)
+                            .is_ok()
+                            .into(),
+                    )
+                })
+            },
+            can_parse_realm,
+        ),
+    );
+    object
+        .define_property_or_throw(
+            js_string!("__agentjsCanParseScript__"),
+            PropertyDescriptor::builder()
+                .value(can_parse)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )
+        .expect("defining internal parse helper on test262 realm wrapper must succeed");
+    object
 }
 
 fn build_agent_object(context: &mut Context) -> Option<JsObject> {
@@ -9576,7 +11136,7 @@ fn run_worker_agent(
     });
 
     if let Err(error) =
-        install_host_globals(&mut context).and_then(|_| install_test262_globals(&mut context))
+        install_host_globals(&mut context).and_then(|_| install_test262_globals(&mut context, true))
     {
         let _ = started_tx.send(Err(error.to_string()));
         mailbox.close();
@@ -9604,23 +11164,355 @@ fn eval_script_in_realm(
     context: &mut Context,
 ) -> JsResult<BoaValue> {
     let source = script_source_from_args(args, context)?;
-
-    with_realm(context, target_realm.clone(), |context| {
-        let result = context.eval(Source::from_bytes(source.as_str()))?;
-        context.run_jobs()?;
-        Ok(result)
-    })
+    let script = Script::parse(
+        Source::from_bytes(source.as_str()),
+        Some(target_realm.clone()),
+        context,
+    )?;
+    let result = script.evaluate(context)?;
+    context.run_jobs()?;
+    Ok(result)
 }
 
 fn host_create_realm(_: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let new_realm = context.create_realm()?;
     let new_global = with_realm(context, new_realm.clone(), |context| {
-        install_host_globals(context)?;
-        install_test262_globals(context)?;
+        install_child_realm_host_globals(context)?;
+        install_test262_globals(context, false)?;
         Ok(context.global_object())
     })?;
     let wrapper = build_test262_object(new_realm, new_global, false, context);
     Ok(wrapper.into())
+}
+
+fn register_shadow_realm_callable(callable: BoaValue, context: &mut Context) -> JsResult<u64> {
+    if callable.as_callable().is_none() {
+        return Err(
+            JsNativeError::typ()
+                .with_message("ShadowRealm bridge can only register callable values")
+                .into(),
+        );
+    }
+
+    let host = host_hooks_context(context)?;
+    let id = host.shadow_realm_next_callable_id.get();
+    host.shadow_realm_next_callable_id.set(id + 1);
+    host.shadow_realm_callables.borrow_mut().insert(id, callable);
+    Ok(id)
+}
+
+fn get_shadow_realm_registered_callable(id: u64, context: &mut Context) -> JsResult<BoaValue> {
+    host_hooks_context(context)?
+        .shadow_realm_callables
+        .borrow()
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("ShadowRealm bridge callable does not exist")
+                .into()
+        })
+}
+
+fn shadow_realm_target_length_and_name(
+    callable: &BoaValue,
+    context: &mut Context,
+) -> JsResult<(f64, JsString)> {
+    let object = callable.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("ShadowRealm wrapped value must be callable")
+    })?;
+
+    let mut length = 0.0;
+    if object.has_own_property(js_string!("length"), context)? {
+        let target_length = object.get(js_string!("length"), context)?;
+        if let Some(number) = target_length.as_number() {
+            if number == f64::INFINITY {
+                length = f64::INFINITY;
+            } else if number == f64::NEG_INFINITY {
+                length = 0.0;
+            } else if number.is_finite() {
+                length = number.trunc().max(0.0);
+            }
+        }
+    }
+
+    let name = object
+        .get(js_string!("name"), context)?
+        .as_string()
+        .unwrap_or_else(|| js_string!(""));
+
+    Ok((length, name))
+}
+
+fn shadow_realm_wrap_value_for_realm(
+    value: BoaValue,
+    wrapper_realm: Realm,
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    if value.as_callable().is_some() {
+        return create_shadow_realm_wrapped_function_for_realm(value, wrapper_realm, context);
+    }
+
+    if value.is_object() {
+        return Err(
+            JsNativeError::typ()
+                .with_message("ShadowRealm values must be primitive or callable")
+                .into(),
+        );
+    }
+
+    Ok(value)
+}
+
+fn shadow_realm_convert_args_for_realm(
+    args: &[BoaValue],
+    target_realm: Realm,
+    context: &mut Context,
+) -> JsResult<Vec<BoaValue>> {
+    let mut converted = Vec::with_capacity(args.len());
+    for arg in args {
+        if arg.as_callable().is_some() {
+            converted.push(create_shadow_realm_wrapped_function_for_realm(
+                arg.clone(),
+                target_realm.clone(),
+                context,
+            )?);
+            continue;
+        }
+        if arg.is_object() {
+            return Err(
+                JsNativeError::typ()
+                    .with_message(
+                        "ShadowRealm wrapped functions only accept primitives or callables",
+                    )
+                    .into(),
+            );
+        }
+        converted.push(arg.clone());
+    }
+    Ok(converted)
+}
+
+fn create_shadow_realm_wrapped_function_for_realm(
+    callable: BoaValue,
+    wrapper_realm: Realm,
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    if callable.as_callable().is_none() {
+        return Err(
+            JsNativeError::typ()
+                .with_message("ShadowRealm wrapped value must be callable")
+                .into(),
+        );
+    }
+
+    let callable_object = callable.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("ShadowRealm wrapped value must be callable")
+    })?;
+    let foreign_realm = callable_object.get_function_realm(context)?;
+    let callable_id = register_shadow_realm_callable(callable.clone(), context)?;
+    let (length, name) = shadow_realm_target_length_and_name(&callable, context).map_err(|_| {
+        JsNativeError::typ().with_message("WrappedFunctionCreate failed")
+    })?;
+
+    let wrapper: JsObject = FunctionObjectBuilder::new(
+        &wrapper_realm,
+        NativeFunction::from_copy_closure_with_captures(
+            |_this, args, capture, context| {
+                let caller_realm = context.realm().clone();
+                let converted_args = shadow_realm_convert_args_for_realm(
+                    args,
+                    capture.foreign_realm.clone(),
+                    context,
+                )
+                .map_err(|_| {
+                    JsNativeError::typ()
+                        .with_message("Wrapped function invocation failed")
+                        .with_realm(caller_realm.clone())
+                })?;
+                let callable = get_shadow_realm_registered_callable(capture.callable_id, context)?;
+                let function = callable.as_callable().ok_or_else(|| {
+                    JsNativeError::typ().with_message("ShadowRealm bridge callable is not callable")
+                })?;
+
+                let result = function
+                    .call(&BoaValue::undefined(), &converted_args, context)
+                    .map_err(|_| {
+                        JsNativeError::typ()
+                            .with_message("Wrapped function invocation failed")
+                            .with_realm(caller_realm.clone())
+                    })?;
+
+                let result_realm = caller_realm.clone();
+                shadow_realm_wrap_value_for_realm(result, caller_realm, context).map_err(|_| {
+                    JsNativeError::typ()
+                        .with_message("ShadowRealm values must be primitive or callable")
+                        .with_realm(result_realm)
+                        .into()
+                })
+            },
+            ShadowRealmWrappedFunctionCapture {
+                callable_id,
+                foreign_realm,
+            },
+        ),
+    )
+    .name(js_string!(""))
+    .length(0)
+    .constructor(false)
+    .build()
+    .into();
+
+    wrapper.define_property_or_throw(
+        js_string!("length"),
+        PropertyDescriptor::builder()
+            .value(length)
+            .writable(false)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    wrapper.define_property_or_throw(
+        js_string!("name"),
+        PropertyDescriptor::builder()
+            .value(name.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    Ok(wrapper.into())
+}
+
+fn host_shadow_realm_register_callable(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let callable = args.get_or_undefined(0).clone();
+    let id = register_shadow_realm_callable(callable, context)?;
+    Ok((id as f64).into())
+}
+
+fn host_shadow_realm_invoke(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let id = args.get_or_undefined(0).to_number(context)?;
+    if !id.is_finite() || id < 0.0 || id.fract() != 0.0 {
+        return Err(
+            JsNativeError::typ()
+                .with_message("ShadowRealm bridge id must be a non-negative integer")
+                .into(),
+        );
+    }
+    let id = id as u64;
+
+    let callable = get_shadow_realm_registered_callable(id, context)?;
+    let function = callable.as_callable().ok_or_else(|| {
+        JsNativeError::typ().with_message("ShadowRealm bridge callable is not callable")
+    })?;
+    function.call(&BoaValue::undefined(), &args[1..], context)
+}
+
+fn host_shadow_realm_wrap_callable(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let (wrapper_realm, callable) = if args.len() >= 2 {
+        let carrier = args.get_or_undefined(0);
+        let carrier_object = carrier.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message("ShadowRealm wrapper realm carrier must be callable")
+        })?;
+        let wrapper_realm = carrier_object.get_function_realm(context)?;
+        (wrapper_realm, args.get_or_undefined(1).clone())
+    } else {
+        (context.realm().clone(), args.get_or_undefined(0).clone())
+    };
+
+    create_shadow_realm_wrapped_function_for_realm(callable, wrapper_realm, context)
+}
+
+fn host_shadowrealm_placeholder_finalization_registry(
+    _: &BoaValue,
+    _: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    Ok(ObjectInitializer::new(context).build().into())
+}
+
+fn host_shadow_realm_dynamic_import(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let specifier = args.get_or_undefined(0).to_string(context)?;
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(JsPromise::reject(
+            JsNativeError::typ().with_message("dynamic import is unavailable"),
+            context,
+        )
+        .into());
+    };
+
+    let referrer = context.stack_trace().find_map(|frame| {
+        let rendered = frame.position().path.to_string();
+        if rendered.is_empty() {
+            None
+        } else {
+            let candidate = PathBuf::from(rendered);
+            if candidate.exists() {
+                Some(candidate.canonicalize().unwrap_or(candidate))
+            } else {
+                None
+            }
+        }
+    });
+
+    let path = resolve_module_specifier(
+        Some(&loader.root),
+        &specifier,
+        referrer.as_deref(),
+        context,
+    )?;
+
+    let module = if let Some(module) = loader.get(&path, ModuleResourceKind::JavaScript) {
+        module
+    } else {
+        let module = load_module_from_path(&path, ModuleResourceKind::JavaScript, context)?;
+        loader.insert(path.clone(), ModuleResourceKind::JavaScript, module.clone());
+        module
+    };
+
+    let promise = module.load_link_evaluate(context);
+    for _ in 0..16 {
+        context.run_jobs()?;
+        if !matches!(promise.state(), PromiseState::Pending) {
+            break;
+        }
+    }
+    match promise.state() {
+        PromiseState::Fulfilled(_) => Ok(JsPromise::resolve(module.namespace(context), context).into()),
+        PromiseState::Rejected(reason) => {
+            Ok(JsPromise::reject(JsError::from_opaque(reason.clone()), context).into())
+        }
+        PromiseState::Pending => Ok(promise.into()),
+    }
+}
+
+fn host_shadow_realm_can_parse_script(
+    _: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let source = script_source_from_args(args, context)?;
+    Ok(
+        Script::parse(Source::from_bytes(source.as_str()), None, context)
+            .is_ok()
+            .into(),
+    )
 }
 
 fn host_gc(_: &BoaValue, _: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {

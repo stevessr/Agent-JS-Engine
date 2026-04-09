@@ -1,10 +1,10 @@
 use ai_agent::engine::{EngineError, EvalOptions, JsEngine};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::process::{self, Command};
+use std::process::{self, Command, Stdio};
 use std::thread;
 use walkdir::WalkDir;
 
@@ -22,11 +22,14 @@ where
 }
 
 const DEFAULT_TEST262_DIR: &str = "test262";
+const DEFAULT_SMOKE_FILTER: &str = "test/built-ins/String/raw/raw.js";
 const LOOP_ITERATION_LIMIT: u64 = 5_000_000;
 const PROGRESS_INTERVAL: usize = 2_000;
 const SAMPLE_LIMIT: usize = 12;
 const DEFAULT_CHUNK_SIZE: usize = 1_000;
+const DEFAULT_PARALLEL_CHUNKS: usize = 1;
 const SUMMARY_FILE_ENV: &str = "TEST262_SUMMARY_FILE";
+const QUIET_OUTPUT_ENV: &str = "TEST262_QUIET";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct Test262Metadata {
@@ -103,113 +106,32 @@ impl Test262Metadata {
     fn has_flag(&self, flag: &str) -> bool {
         self.flags.iter().any(|value| value == flag)
     }
-
-    fn has_feature(&self, feature: &str) -> bool {
-        self.features.iter().any(|value| value == feature)
-    }
 }
 
-fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
-    let case_path = case.path.to_string_lossy();
+fn quiet_output() -> bool {
+    std::env::var(QUIET_OUTPUT_ENV).ok().as_deref() == Some("1")
+}
 
+fn unsupported_feature(_case: &TestCase) -> Option<&'static str> {
     // cross-realm is now supported via $262.createRealm()
     // iterator-sequencing and joint-iteration are now implemented via polyfill
-    if case.metadata.has_feature("symbols-as-weakmap-keys") {
-        return Some("unsupported feature: symbols-as-weakmap-keys");
-    }
-    if case.metadata.has_feature("uint8array-base64") {
-        return Some("unsupported feature: uint8array-base64");
-    }
-    if case.metadata.has_feature("ShadowRealm") {
-        return Some("unsupported feature: ShadowRealm");
-    }
-    if case.metadata.has_feature("FinalizationRegistry") {
-        return Some("unsupported feature: FinalizationRegistry");
-    }
-    if case_path.contains("/built-ins/FinalizationRegistry/") {
-        return Some("unsupported feature: FinalizationRegistry");
-    }
-    if case.metadata.has_feature("caller")
-        && case_path.contains("/built-ins/Function/15.3.5.4_2-")
-    {
-        return Some("unsupported feature: caller legacy semantics");
-    }
-    if case.metadata.has_feature("json-parse-with-source") {
-        return Some("unsupported feature: json-parse-with-source");
-    }
-    if case_path.contains(
-        "/built-ins/Function/prototype/toString/built-in-function-object.js",
-    ) {
-        return Some("unsupported behavior: native Function#toString format");
-    }
-    if case_path.contains("/built-ins/Number/prototype/toExponential/return-values.js") {
-        return Some("unsupported behavior: Number#toExponential rounding edge");
-    }
-    if case_path.contains("/built-ins/Object/freeze/typedarray-backed-by-resizable-buffer.js") {
-        return Some("unsupported behavior: freeze on RAB-backed TypedArray");
-    }
-    if case_path.contains("/built-ins/RegExp/property-escapes/generated/") {
-        return Some("unsupported behavior: generated RegExp Unicode property escapes");
-    }
-    if case_path.contains("/built-ins/RegExp/unicodeSets/generated/rgi-emoji-16.0.js")
-        || case_path.contains("/built-ins/RegExp/unicodeSets/generated/rgi-emoji-17.0.js")
-    {
-        return Some("unsupported behavior: RegExp RGI_Emoji generated data");
-    }
-    if case_path.contains("/built-ins/RegExp/regexp-modifiers/") {
-        return Some("unsupported behavior: RegExp modifiers semantics");
-    }
-    if case_path.contains("/built-ins/RegExp/prototype/exec/regexp-builtin-exec-v-u-flag.js") {
-        return Some("unsupported behavior: RegExp v/u exec edge");
-    }
-    if case_path
-        .contains("/built-ins/RegExp/named-groups/duplicate-names-group-property-enumeration-order.js")
-    {
-        return Some("unsupported behavior: RegExp duplicate group key order");
-    }
-    if case_path
-        .contains("/built-ins/RegExp/property-escapes/special-property-value-Script_Extensions-Unknown.js")
-    {
-        return Some("unsupported behavior: RegExp Script_Extensions=Unknown alias");
-    }
-    if case_path.contains("/built-ins/String/prototype/match/regexp-prototype-match-v-u-flag.js")
-        || case_path.contains("/built-ins/String/prototype/matchAll/regexp-prototype-matchAll-v-u-flag.js")
-        || case_path.contains("/built-ins/String/prototype/replace/regexp-prototype-replace-v-u-flag.js")
-        || case_path.contains("/built-ins/String/prototype/search/regexp-prototype-search-v-flag.js")
-        || case_path.contains("/built-ins/String/prototype/search/regexp-prototype-search-v-u-flag.js")
-    {
-        return Some("unsupported behavior: String RegExp v-flag integration");
-    }
-    if case_path.contains(
-        "/intl402/BigInt/prototype/toLocaleString/returns-same-results-as-NumberFormat.js",
-    )
-    {
-        return Some("unsupported behavior: Intl NumberFormat percent/currency edge");
-    }
-    if case_path.contains("/built-ins/TypedArrayConstructors/") && case_path.contains("conversion-operation")
-    {
-        return Some("unsupported behavior: TypedArray conversion-operation edge");
-    }
-    if case_path.contains("/built-ins/TypedArray/prototype/fill/fill-values-conversion-operations")
-        || case_path.contains(
-            "/built-ins/TypedArray/prototype/map/return-new-typedarray-conversion-operation",
-        )
-    {
-        return Some("unsupported behavior: TypedArray conversion-operation edge");
-    }
-    if case_path.contains(
-        "/built-ins/TypedArray/prototype/set/array-arg-src-tonumber-value-conversions.js",
-    ) || case_path.contains(
-        "/built-ins/TypedArray/prototype/set/typedarray-arg-set-values-diff-buffer-other-type-conversions.js",
-    ) {
-        return Some("unsupported behavior: TypedArray conversion-operation edge");
-    }
-    if case_path.contains("/built-ins/TypedArray/prototype/slice/resize-count-bytes-to-zero.js") {
-        return Some("unsupported behavior: TypedArray slice resize edge");
-    }
-    if case_path.contains("/built-ins/TypedArray/prototype/sort/sort-tonumber.js") {
-        return Some("unsupported behavior: TypedArray sort detach edge");
-    }
+    // Run symbol-weak keys, Uint8Array base64, ShadowRealm, and FinalizationRegistry tests
+    // directly so they contribute to the real executed failure/pass counts.
+    // Legacy caller tests under 15.3.5.4_2-* are runnable.
+    // JSON.parse source-aware reviver context is supported.
+    // Runtime-installed built-ins now stringify as native functions.
+    // Number#toExponential rounding edge is tested directly.
+    // RAB-backed TypedArray freeze edge is tested directly.
+    // Generated RegExp Unicode property escapes are also run directly.
+    // RegExp RGI_Emoji generated data is tested directly.
+    // RegExp modifiers are implemented enough to run the conformance cases.
+    // RegExp v/u exec edge is runnable.
+    // Duplicate named capture groups now preserve source enumeration order.
+    // RegExp Script_Extensions=Unknown alias is tested directly.
+    // String RegExp v-flag integration is runnable.
+    // Intl BigInt toLocaleString matches Intl.NumberFormat directly.
+    // TypedArray conversion-operation edges are tested directly.
+    // TypedArray slice resize and sort detach edges are tested directly.
     // Temporal is now supported via boa_engine temporal feature - no longer skip
     // temporalHelpers.js is loaded normally via harness
 
@@ -497,6 +419,19 @@ negative:
 }
 
 #[test]
+fn compute_chunk_specs_splits_tail_chunk() {
+    let chunks = compute_chunk_specs(2_501, 1_000);
+
+    assert_eq!(chunks.len(), 3);
+    assert_eq!(chunks[0].offset, 0);
+    assert_eq!(chunks[0].max_cases, 1_000);
+    assert_eq!(chunks[1].offset, 1_000);
+    assert_eq!(chunks[1].max_cases, 1_000);
+    assert_eq!(chunks[2].offset, 2_000);
+    assert_eq!(chunks[2].max_cases, 501);
+}
+
+#[test]
 fn run_case_skips_unsupported_shadowrealm_feature() {
     let case = TestCase {
         path: PathBuf::from("sample.js"),
@@ -518,12 +453,105 @@ fn run_case_skips_unsupported_shadowrealm_feature() {
     );
 }
 
+#[derive(Debug, Clone)]
+struct ChunkSpec {
+    index: usize,
+    total_chunks: usize,
+    offset: usize,
+    max_cases: usize,
+}
+
+fn compute_chunk_specs(total_cases: usize, chunk_size: usize) -> Vec<ChunkSpec> {
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+
+    while offset < total_cases {
+        let max_cases = chunk_size.min(total_cases - offset);
+        chunks.push(ChunkSpec {
+            index: chunks.len() + 1,
+            total_chunks: 0,
+            offset,
+            max_cases,
+        });
+        offset += max_cases;
+    }
+
+    let total_chunks = chunks.len();
+    for chunk in &mut chunks {
+        chunk.total_chunks = total_chunks;
+    }
+
+    chunks
+}
+
+fn chunk_parallelism() -> usize {
+    std::env::var("TEST262_PARALLEL_CHUNKS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_PARALLEL_CHUNKS)
+}
+
+fn run_chunk_subprocess(
+    exe: &Path,
+    suite_root: &Path,
+    filter: Option<&str>,
+    chunk: &ChunkSpec,
+) -> RunSummary {
+    let quiet = quiet_output();
+    if !quiet {
+        eprintln!(
+            "starting chunk {}/{} (offset {}, max_cases {})",
+            chunk.index, chunk.total_chunks, chunk.offset, chunk.max_cases
+        );
+    }
+
+    let summary_path = std::env::temp_dir().join(format!(
+        "agentjs-test262-summary-{}-{}-{}.txt",
+        process::id(),
+        chunk.offset,
+        chunk.max_cases
+    ));
+    let mut cmd = Command::new(exe);
+    cmd.arg("--exact")
+        .arg("test262_core_profile")
+        .env("TEST262_CHILD", "1")
+        .env("TEST262_DIR", suite_root)
+        .env("TEST262_OFFSET", chunk.offset.to_string())
+        .env("TEST262_MAX_CASES", chunk.max_cases.to_string())
+        .env(SUMMARY_FILE_ENV, &summary_path)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some(filter) = filter {
+        cmd.env("TEST262_FILTER", filter);
+    }
+    let status = cmd.status().expect("failed to run chunked test262 subprocess");
+    if !status.success() {
+        panic!(
+            "chunked test262 subprocess failed at offset {} with status {}",
+            chunk.offset, status
+        );
+    }
+    let summary_text = fs::read_to_string(&summary_path)
+        .expect("chunked test262 subprocess did not produce a summary file");
+    let _ = fs::remove_file(&summary_path);
+    let summary = parse_summary_from_output(summary_text.as_bytes());
+    if !quiet {
+        eprintln!(
+            "finished chunk {}/{}: total {}, passed {}, skipped {}",
+            chunk.index, chunk.total_chunks, summary.total, summary.passed, summary.skipped
+        );
+    }
+    summary
+}
+
 fn run_core_profile_once(
     suite_root: &Path,
     harness: &HarnessCache,
     cases: &[TestCase],
 ) -> RunSummary {
     let mut summary = RunSummary::default();
+    let quiet = quiet_output();
     let progress_interval = if cases.len() <= 1_000 {
         100.min(cases.len().max(1))
     } else {
@@ -555,7 +583,7 @@ fn run_core_profile_once(
             }
         }
 
-        if (index + 1) % progress_interval == 0 {
+        if !quiet && (index + 1) % progress_interval == 0 {
             let current_pass_rate = summary.passed as f64 / summary.total as f64 * 100.0;
             eprintln!(
                 "progress: {}/{} scanned, passed {}, skipped {}, total pass {:.2}%",
@@ -579,51 +607,33 @@ fn run_core_profile_chunked(
     let chunk_size = std::env::var("TEST262_CHUNK_SIZE")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_CHUNK_SIZE);
+    let parallelism = chunk_parallelism();
     let exe = std::env::current_exe().expect("failed to locate current test binary");
     let mut summary = RunSummary::default();
-    let mut offset = 0usize;
+    let mut pending = VecDeque::from(compute_chunk_specs(total_cases, chunk_size));
 
-    while offset < total_cases {
-        let max_cases = chunk_size.min(total_cases - offset);
-        let summary_path = std::env::temp_dir().join(format!(
-            "agentjs-test262-summary-{}-{offset}-{max_cases}.txt",
-            process::id()
-        ));
-        let mut cmd = Command::new(&exe);
-        cmd.arg("--ignored")
-            .arg("--exact")
-            .arg("test262_core_profile");
-        cmd.env("TEST262_CHILD", "1");
-        cmd.env("TEST262_DIR", suite_root);
-        cmd.env("TEST262_OFFSET", offset.to_string());
-        cmd.env("TEST262_MAX_CASES", max_cases.to_string());
-        cmd.env(SUMMARY_FILE_ENV, &summary_path);
-        if let Some(filter) = filter {
-            cmd.env("TEST262_FILTER", filter);
+    while !pending.is_empty() {
+        let batch_size = parallelism.min(pending.len());
+        let mut handles = Vec::with_capacity(batch_size);
+
+        for _ in 0..batch_size {
+            let chunk = pending.pop_front().expect("missing queued chunk");
+            let exe = exe.clone();
+            let suite_root = suite_root.to_path_buf();
+            let filter = filter.map(str::to_owned);
+            handles.push(thread::spawn(move || {
+                run_chunk_subprocess(&exe, &suite_root, filter.as_deref(), &chunk)
+            }));
         }
-        let output = cmd
-            .output()
-            .expect("failed to run chunked test262 subprocess");
-        if !output.status.success() {
-            panic!(
-                "chunked test262 subprocess failed at offset {}: {}{}",
-                offset,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
+
+        for handle in handles {
+            let chunk_summary = handle
+                .join()
+                .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+            summary.merge(chunk_summary);
         }
-        let summary_text = fs::read_to_string(&summary_path).unwrap_or_else(|_| {
-            format!(
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
-        let _ = fs::remove_file(&summary_path);
-        let chunk = parse_summary_from_output(summary_text.as_bytes());
-        summary.merge(chunk);
-        offset += max_cases;
     }
 
     summary
@@ -734,9 +744,9 @@ fn persist_summary_if_requested(summary: &RunSummary) {
 }
 
 #[test]
-#[ignore = "long-running test262 sweep"]
 fn test262_core_profile() {
     run_with_large_stack("test262_core_profile", || {
+        let full_mode = std::env::var("TEST262_FULL").ok().as_deref() == Some("1");
         let filter = std::env::var("TEST262_FILTER").ok();
         let max_cases = std::env::var("TEST262_MAX_CASES")
             .ok()
@@ -760,13 +770,65 @@ fn test262_core_profile() {
         }
 
         let harness = HarnessCache::load(&harness_root);
+        let effective_filter = if child_mode || full_mode {
+            filter.clone()
+        } else {
+            Some(filter.clone().unwrap_or_else(|| DEFAULT_SMOKE_FILTER.to_string()))
+        };
+        let effective_max_cases = if child_mode || full_mode {
+            max_cases
+        } else {
+            Some(max_cases.unwrap_or(1))
+        };
+        let effective_offset = if child_mode || full_mode { offset } else { 0 };
 
-        let summary = if child_mode || filter.is_some() || max_cases.is_some() || offset > 0 {
+        let summary = if child_mode
+            || effective_filter.is_some()
+            || effective_max_cases.is_some()
+            || effective_offset > 0
+        {
+            let previous_filter = filter.clone();
+            let previous_max_cases = max_cases;
+            let previous_offset = if std::env::var_os("TEST262_OFFSET").is_some() {
+                Some(offset)
+            } else {
+                None
+            };
+
+            match &effective_filter {
+                Some(value) => unsafe { std::env::set_var("TEST262_FILTER", value) },
+                None => unsafe { std::env::remove_var("TEST262_FILTER") },
+            }
+            match effective_max_cases {
+                Some(value) => unsafe { std::env::set_var("TEST262_MAX_CASES", value.to_string()) },
+                None => unsafe { std::env::remove_var("TEST262_MAX_CASES") },
+            }
+            if effective_offset > 0 {
+                unsafe { std::env::set_var("TEST262_OFFSET", effective_offset.to_string()) };
+            } else {
+                unsafe { std::env::remove_var("TEST262_OFFSET") };
+            }
+
             let cases = discover_cases(&test_root);
-            run_core_profile_once(&suite_root, &harness, &cases)
+            let summary = run_core_profile_once(&suite_root, &harness, &cases);
+
+            match previous_filter {
+                Some(value) => unsafe { std::env::set_var("TEST262_FILTER", value) },
+                None => unsafe { std::env::remove_var("TEST262_FILTER") },
+            }
+            match previous_max_cases {
+                Some(value) => unsafe { std::env::set_var("TEST262_MAX_CASES", value.to_string()) },
+                None => unsafe { std::env::remove_var("TEST262_MAX_CASES") },
+            }
+            match previous_offset {
+                Some(value) => unsafe { std::env::set_var("TEST262_OFFSET", value.to_string()) },
+                None => unsafe { std::env::remove_var("TEST262_OFFSET") },
+            }
+
+            summary
         } else {
             let total_cases = discover_case_paths(&test_root).len();
-            run_core_profile_chunked(&suite_root, filter.as_deref(), total_cases)
+            run_core_profile_chunked(&suite_root, effective_filter.as_deref(), total_cases)
         };
 
         persist_summary_if_requested(&summary);
@@ -777,13 +839,8 @@ fn test262_core_profile() {
         } else {
             summary.passed as f64 / summary.total as f64 * 100.0
         };
-        let _executed_pass_rate = if summary.executed == 0 {
-            0.0
-        } else {
-            summary.passed as f64 / summary.executed as f64 * 100.0
-        };
 
-        if filter.is_none() && max_cases.is_none() && offset == 0 {
+        if full_mode && filter.is_none() && max_cases.is_none() && offset == 0 {
             assert!(
                 total_pass_rate >= 60.0,
                 "expected total pass rate >= 60%, got {total_pass_rate:.2}%"

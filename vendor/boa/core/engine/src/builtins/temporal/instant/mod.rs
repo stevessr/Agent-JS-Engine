@@ -797,6 +797,23 @@ pub(crate) fn create_temporal_instant(
 /// 8.5.3 `ToTemporalInstant ( item )`
 #[inline]
 fn to_temporal_instant(item: &JsValue, context: &mut Context) -> JsResult<InnerInstant> {
+    fn has_too_many_fractional_second_digits(value: &str) -> bool {
+        let Some(time_separator) = value.find(['T', 't']) else {
+            return false;
+        };
+        let time_part = &value[time_separator + 1..];
+        let Some(dot_index) = time_part.find('.') else {
+            return false;
+        };
+
+        let digits = time_part[dot_index + 1..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .count();
+
+        digits > 9
+    }
+
     // 1.If item is an Object, then
     let item = if let Some(obj) = item.as_object() {
         // a. If item has an [[InitializedTemporalInstant]] internal slot, then
@@ -828,8 +845,12 @@ fn to_temporal_instant(item: &JsValue, context: &mut Context) -> JsResult<InnerI
     // 7. If IsValidEpochNanoseconds(epochNanoseconds) is false, throw a RangeError exception.
     // 8. Return ! CreateTemporalInstant(epochNanoseconds).
     // 2. If item is not a String, throw a TypeError exception.
-    string_to_parse
-        .to_std_string_escaped()
-        .parse::<InnerInstant>()
-        .map_err(Into::into)
+    let string_to_parse = string_to_parse.to_std_string_escaped();
+    if has_too_many_fractional_second_digits(&string_to_parse) {
+        return Err(JsNativeError::range()
+            .with_message("Temporal.Instant strings may have at most 9 fractional second digits.")
+            .into());
+    }
+
+    string_to_parse.parse::<InnerInstant>().map_err(Into::into)
 }

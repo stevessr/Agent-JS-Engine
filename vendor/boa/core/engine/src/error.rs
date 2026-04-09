@@ -1302,7 +1302,7 @@ impl JsNativeError {
     }
 
     /// Sets the realm of this error.
-    pub(crate) fn with_realm(mut self, realm: Realm) -> Self {
+    pub fn with_realm(mut self, realm: Realm) -> Self {
         self.realm = Some(realm);
         self
     }

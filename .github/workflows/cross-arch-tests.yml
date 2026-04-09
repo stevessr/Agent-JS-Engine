@@ -165,6 +165,7 @@ jobs:
         shell: bash
         env:
           SHARD_ID: ${{ matrix.shard }}
+          TEST262_FULL: 1
           TEST262_OFFSET: ${{ steps.shard.outputs.offset }}
           TEST262_MAX_CASES: ${{ steps.shard.outputs.max_cases }}
           TEST262_FILTER_OVERRIDE: ${{ steps.shard.outputs.filter }}
@@ -184,7 +185,7 @@ jobs:
           if [ -n "${TEST262_FILTER_OVERRIDE:-}" ]; then
             export TEST262_FILTER="${TEST262_FILTER_OVERRIDE}"
           fi
-          cargo test --release --target riscv64gc-unknown-linux-gnu --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
+          cargo test --release --target riscv64gc-unknown-linux-gnu --test test262_runner -- --exact test262_core_profile --nocapture | tee shard.log
 
       - name: Extract shard summary
         if: always()
@@ -321,6 +322,7 @@ jobs:
         shell: bash
         env:
           SHARD_ID: ${{ matrix.shard }}
+          TEST262_FULL: 1
           TEST262_OFFSET: ${{ steps.shard.outputs.offset }}
           TEST262_MAX_CASES: ${{ steps.shard.outputs.max_cases }}
           TEST262_FILTER_OVERRIDE: ${{ steps.shard.outputs.filter }}
@@ -340,7 +342,7 @@ jobs:
           if [ -n "${TEST262_FILTER_OVERRIDE:-}" ]; then
             export TEST262_FILTER="${TEST262_FILTER_OVERRIDE}"
           fi
-          cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
+          cargo +nightly test --release --target loongarch64-unknown-linux-gnu --test test262_runner -- --exact test262_core_profile --nocapture | tee shard.log
 
       - name: Extract shard summary
         if: always()

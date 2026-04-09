@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use boa_gc::{Finalize, Trace};
 use fixed_decimal::{Decimal, FloatPrecision, SignDisplay};
 use icu_decimal::{
-    DecimalFormatter, FormattedDecimal,
+    DecimalFormatter,
     options::{DecimalFormatterOptions, GroupingStrategy},
     preferences::NumberingSystem,
     provider::DecimalSymbolsV1,
@@ -70,14 +70,26 @@ impl NumberFormat {
     ///
     /// [full]: https://tc39.es/ecma402/#sec-formatnumber
     /// [parts]: https://tc39.es/ecma402/#sec-formatnumbertoparts
-    pub(crate) fn format<'a>(&'a self, value: &'a mut Decimal) -> FormattedDecimal<'a> {
+    pub(crate) fn format(&self, value: &mut Decimal) -> String {
         // TODO: Missing support from ICU4X for Percent/Currency/Unit formatting.
         // TODO: Missing support from ICU4X for Scientific/Engineering/Compact notation.
+        if self.unit_options.style() == Style::Percent {
+            value.multiply_pow10(2);
+        }
 
         self.digit_options.format_fixed_decimal(value);
         value.apply_sign_display(self.sign_display);
 
-        self.formatter.format(value)
+        let formatted = self.formatter.format(value).to_string();
+        if self.unit_options.style() == Style::Percent {
+            let percent_suffix = match self.locale.id.language.as_str() {
+                "de" => "\u{00A0}%",
+                _ => "%",
+            };
+            return format!("{formatted}{percent_suffix}");
+        }
+
+        formatted
     }
 }
 
@@ -326,12 +338,23 @@ impl NumberFormat {
         // 15. Let style be numberFormat.[[Style]].
         // 16. If style is "currency", then
         let (min_fractional, max_fractional) = if unit_options.style() == Style::Currency {
-            // TODO: Missing support from ICU4X
-            // a. Let currency be numberFormat.[[Currency]].
-            // b. Let cDigits be CurrencyDigits(currency).
-            // c. Let mnfdDefault be cDigits.
-            // d. Let mxfdDefault be cDigits.
-            return Err(JsNativeError::typ().with_message("unimplemented").into());
+            // TODO: Missing support from ICU4X for currency/unit affixes. For now we at least
+            // construct the formatter and honor the currency-specific fraction digits so that
+            // Intl.NumberFormat and BigInt.prototype.toLocaleString stay aligned.
+            let c_digits = match unit_options {
+                UnitFormatOptions::Currency { currency, .. } => {
+                    match currency.to_js_string().to_std_string_escaped().as_str() {
+                        "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" => 3,
+                        "BIF" | "CLP" | "DJF" | "GNF" | "ISK" | "JPY" | "KMF" | "KRW"
+                        | "PYG" | "RWF" | "UGX" | "UYI" | "VND" | "VUV" | "XAF" | "XOF"
+                        | "XPF" => 0,
+                        "CLF" => 4,
+                        _ => 2,
+                    }
+                }
+                _ => 2,
+            };
+            (c_digits, c_digits)
         } else {
             // 17. Else,
             (
@@ -523,7 +546,7 @@ impl NumberFormat {
                         let mut x = to_intl_mathematical_value(value, context)?;
 
                         // 5. Return FormatNumeric(nf, x).
-                        Ok(js_string!(nf.borrow().data().format(&mut x).to_string()).into())
+                        Ok(js_string!(nf.borrow().data().format(&mut x)).into())
                     },
                     nf_clone,
                 ),

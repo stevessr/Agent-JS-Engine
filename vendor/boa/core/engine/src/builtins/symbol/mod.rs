@@ -88,6 +88,10 @@ impl GlobalSymbolRegistry {
     }
 }
 
+pub(crate) fn is_registered_symbol(sym: &JsSymbol) -> bool {
+    GLOBAL_SYMBOL_REGISTRY.get_key(sym).is_some()
+}
+
 /// The internal representation of a `Symbol` object.
 #[derive(Debug, Clone, Copy)]
 pub struct Symbol;

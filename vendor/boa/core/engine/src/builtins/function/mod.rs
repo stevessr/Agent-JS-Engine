@@ -25,8 +25,9 @@ use crate::{
     object::{
         JsData, JsFunction, JsObject, PrivateElement, PrivateName,
         internal_methods::{
-            CallValue, InternalMethodCallContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
-            get_prototype_from_constructor,
+            CallValue, InternalMethodCallContext, InternalMethodPropertyContext,
+            InternalObjectMethods, ORDINARY_INTERNAL_METHODS, get_prototype_from_constructor,
+            ordinary_get, ordinary_try_get,
         },
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
@@ -191,12 +192,16 @@ impl JsData for OrdinaryFunction {
     fn internal_methods(&self) -> &'static InternalObjectMethods {
         static FUNCTION_METHODS: InternalObjectMethods = InternalObjectMethods {
             __call__: function_call,
+            __try_get__: function_try_get,
+            __get__: function_get,
             ..ORDINARY_INTERNAL_METHODS
         };
 
         static CONSTRUCTOR_METHODS: InternalObjectMethods = InternalObjectMethods {
             __call__: function_call,
             __construct__: function_construct,
+            __try_get__: function_try_get,
+            __get__: function_get,
             ..ORDINARY_INTERNAL_METHODS
         };
 
@@ -206,6 +211,73 @@ impl JsData for OrdinaryFunction {
             &FUNCTION_METHODS
         }
     }
+}
+
+fn legacy_caller_value(
+    obj: &JsObject,
+    key: &PropertyKey,
+    context: &mut InternalMethodPropertyContext<'_>,
+) -> JsResult<Option<JsValue>> {
+    let caller_key: PropertyKey = js_string!("caller").into();
+    if key != &caller_key {
+        return Ok(None);
+    }
+
+    let Some(function) = obj.downcast_ref::<OrdinaryFunction>() else {
+        return Ok(None);
+    };
+
+    if function.code.strict() || context.vm.frame().code_block.strict() {
+        return Ok(None);
+    }
+
+    let Some(active_function) = context.vm.stack.get_function(context.vm.frame()) else {
+        return Ok(None);
+    };
+
+    if active_function != *obj {
+        return Ok(None);
+    }
+
+    let Some(caller_frame) = context.vm.frames.last() else {
+        return Ok(Some(JsValue::null()));
+    };
+
+    if caller_frame.code_block.strict() {
+        return Ok(Some(JsValue::null()));
+    }
+
+    Ok(Some(
+        context
+            .vm
+            .stack
+            .get_function(caller_frame)
+            .map_or_else(JsValue::null, JsValue::from),
+    ))
+}
+
+fn function_try_get(
+    obj: &JsObject,
+    key: &PropertyKey,
+    receiver: JsValue,
+    context: &mut InternalMethodPropertyContext<'_>,
+) -> JsResult<Option<JsValue>> {
+    if let Some(value) = legacy_caller_value(obj, key, context)? {
+        return Ok(Some(value));
+    }
+    ordinary_try_get(obj, key, receiver, context)
+}
+
+fn function_get(
+    obj: &JsObject,
+    key: &PropertyKey,
+    receiver: JsValue,
+    context: &mut InternalMethodPropertyContext<'_>,
+) -> JsResult<JsValue> {
+    if let Some(value) = legacy_caller_value(obj, key, context)? {
+        return Ok(value);
+    }
+    ordinary_get(obj, key, receiver, context)
 }
 
 impl OrdinaryFunction {

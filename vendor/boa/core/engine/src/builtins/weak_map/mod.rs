@@ -8,10 +8,11 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/WeakMap
 
 use crate::{
-    Context, JsArgs, JsNativeError, JsResult, JsString, JsValue,
+    Context, JsArgs, JsData, JsNativeError, JsResult, JsString, JsValue,
     builtins::{
         BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
         map::add_entries_from_iterable,
+        symbol::is_registered_symbol,
     },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
@@ -22,11 +23,42 @@ use crate::{
     symbol::JsSymbol,
 };
 use boa_gc::{Finalize, Trace};
+use std::collections::HashMap;
 
-type NativeWeakMap = boa_gc::WeakMap<ErasedVTableObject, JsValue>;
+#[derive(Trace, Finalize, JsData)]
+struct NativeWeakMap {
+    object_entries: boa_gc::WeakMap<ErasedVTableObject, JsValue>,
+    symbol_entries: HashMap<JsSymbol, JsValue>,
+}
+
+impl NativeWeakMap {
+    fn new() -> Self {
+        Self {
+            object_entries: boa_gc::WeakMap::new(),
+            symbol_entries: HashMap::new(),
+        }
+    }
+}
 
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct WeakMap;
+
+enum WeakMapKey {
+    Object(JsObject),
+    Symbol(JsSymbol),
+}
+
+fn weak_map_key(value: &JsValue) -> Option<WeakMapKey> {
+    value
+        .as_object()
+        .map(WeakMapKey::Object)
+        .or_else(|| {
+            value
+                .as_symbol()
+                .filter(|symbol| !is_registered_symbol(symbol))
+                .map(WeakMapKey::Symbol)
+        })
+}
 
 #[cfg(test)]
 mod tests;
@@ -146,7 +178,7 @@ impl WeakMap {
 
         // 3. Let entries be M.[[WeakMapData]].
         // 4. If key is not an Object, return false.
-        let Some(key) = args.get_or_undefined(0).as_object() else {
+        let Some(key) = weak_map_key(args.get_or_undefined(0)) else {
             return Ok(false.into());
         };
 
@@ -156,7 +188,11 @@ impl WeakMap {
         // ii. Set p.[[Value]] to empty.
         // iii. Return true.
         // 6. Return false.
-        Ok(map.remove(key.inner()).is_some().into())
+        Ok(match key {
+            WeakMapKey::Object(key) => map.object_entries.remove(key.inner()).is_some(),
+            WeakMapKey::Symbol(symbol) => map.symbol_entries.remove(&symbol).is_some(),
+        }
+        .into())
     }
 
     /// `WeakMap.prototype.get ( key )`
@@ -184,14 +220,17 @@ impl WeakMap {
 
         // 3. Let entries be M.[[WeakMapData]].
         // 4. If key is not an Object, return undefined.
-        let Some(key) = args.get_or_undefined(0).as_object() else {
+        let Some(key) = weak_map_key(args.get_or_undefined(0)) else {
             return Ok(JsValue::undefined());
         };
 
         // 5. For each Record { [[Key]], [[Value]] } p of entries, do
         // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
         // 6. Return undefined.
-        Ok(map.get(key.inner()).unwrap_or_default())
+        Ok(match key {
+            WeakMapKey::Object(key) => map.object_entries.get(key.inner()).unwrap_or_default(),
+            WeakMapKey::Symbol(symbol) => map.symbol_entries.get(&symbol).cloned().unwrap_or_default(),
+        })
     }
 
     /// `WeakMap.prototype.has ( key )`
@@ -219,14 +258,18 @@ impl WeakMap {
 
         // 3. Let entries be M.[[WeakMapData]].
         // 4. If key is not an Object, return false.
-        let Some(key) = args.get_or_undefined(0).as_object() else {
+        let Some(key) = weak_map_key(args.get_or_undefined(0)) else {
             return Ok(false.into());
         };
 
         // 5. For each Record { [[Key]], [[Value]] } p of entries, do
         // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return true.
         // 6. Return false.
-        Ok(map.contains_key(key.inner()).into())
+        Ok(match key {
+            WeakMapKey::Object(key) => map.object_entries.contains_key(key.inner()),
+            WeakMapKey::Symbol(symbol) => map.symbol_entries.contains_key(&symbol),
+        }
+        .into())
     }
 
     /// `WeakMap.prototype.set ( key, value )`
@@ -255,10 +298,10 @@ impl WeakMap {
         // 3. Let entries be M.[[WeakMapData]].
         // 4. If key is not an Object, throw a TypeError exception.
         let key = args.get_or_undefined(0);
-        let Some(key) = key.as_object() else {
+        let Some(key) = weak_map_key(key) else {
             return Err(JsNativeError::typ()
                 .with_message(format!(
-                    "WeakMap.set: expected target argument of type `object`, got target of type `{}`",
+                    "WeakMap.set: expected target argument of type `object` or `symbol`, got target of type `{}`",
                     key.type_of()
                 )).into());
         };
@@ -269,7 +312,14 @@ impl WeakMap {
         // ii. Return M.
         // 6. Let p be the Record { [[Key]]: key, [[Value]]: value }.
         // 7. Append p to entries.
-        map.insert(key.inner(), args.get_or_undefined(1).clone());
+        match key {
+            WeakMapKey::Object(key) => {
+                map.object_entries.insert(key.inner(), args.get_or_undefined(1).clone());
+            }
+            WeakMapKey::Symbol(symbol) => {
+                map.symbol_entries.insert(symbol, args.get_or_undefined(1).clone());
+            }
+        }
 
         // 8. Return M.
         Ok(this.clone())
@@ -306,26 +356,43 @@ impl WeakMap {
         //       objects are accepted as keys; symbols should be allowed in the
         //       future according to the proposal.
         let key_val = args.get_or_undefined(0);
-        let Some(key) = key_val.as_object() else {
+        let Some(key) = weak_map_key(key_val) else {
             return Err(JsNativeError::typ()
                 .with_message(format!(
-                    "WeakMap.getOrInsert: expected target argument of type `object`, got target of type `{}`",
+                    "WeakMap.getOrInsert: expected target argument of type `object` or `symbol`, got target of type `{}`",
                     key_val.type_of()
                 ))
                 .into());
         };
 
         // 4. For each Record { [[Key]], [[Value]] } p of M.[[WeakMapData]]
-        if let Some(existing) = map.borrow().data().get(key.inner()) {
-            // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
+        let existing = {
+            let map_ref = map.borrow();
+            match &key {
+                WeakMapKey::Object(key) => map_ref.data().object_entries.get(key.inner()),
+                WeakMapKey::Symbol(symbol) => map_ref.data().symbol_entries.get(symbol).cloned(),
+            }
+        };
+        if let Some(existing) = existing {
             return Ok(existing);
         }
 
         // 5-6. Insert the new record with provided value and return it.
         let value = args.get_or_undefined(1).clone();
-        map.borrow_mut()
-            .data_mut()
-            .insert(key.inner(), value.clone());
+        match key {
+            WeakMapKey::Object(key) => {
+                map.borrow_mut()
+                    .data_mut()
+                    .object_entries
+                    .insert(key.inner(), value.clone());
+            }
+            WeakMapKey::Symbol(symbol) => {
+                map.borrow_mut()
+                    .data_mut()
+                    .symbol_entries
+                    .insert(symbol, value.clone());
+            }
+        }
         Ok(value)
     }
 
@@ -360,10 +427,10 @@ impl WeakMap {
         //       objects are accepted as keys; symbols should be allowed in the
         //       future according to the proposal.
         let key_value = args.get_or_undefined(0).clone();
-        let Some(key_obj) = key_value.as_object() else {
+        let Some(key) = weak_map_key(&key_value) else {
             return Err(JsNativeError::typ()
                 .with_message(format!(
-                    "WeakMap.getOrInsertComputed: expected target argument of type `object`, got target of type `{}`",
+                    "WeakMap.getOrInsertComputed: expected target argument of type `object` or `symbol`, got target of type `{}`",
                     key_value.type_of()
                 ))
                 .into());
@@ -377,8 +444,14 @@ impl WeakMap {
         };
 
         // 5. For each Record { [[Key]], [[Value]] } p of M.[[WeakMapData]]
-        if let Some(existing) = map.borrow().data().get(key_obj.inner()) {
-            // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
+        let existing = {
+            let map_ref = map.borrow();
+            match &key {
+                WeakMapKey::Object(key_obj) => map_ref.data().object_entries.get(key_obj.inner()),
+                WeakMapKey::Symbol(symbol) => map_ref.data().symbol_entries.get(symbol).cloned(),
+            }
+        };
+        if let Some(existing) = existing {
             return Ok(existing);
         }
 
@@ -391,9 +464,20 @@ impl WeakMap {
         )?;
 
         // 8-10. Insert or update the entry and return value.
-        map.borrow_mut()
-            .data_mut()
-            .insert(key_obj.inner(), value.clone());
+        match key {
+            WeakMapKey::Object(key_obj) => {
+                map.borrow_mut()
+                    .data_mut()
+                    .object_entries
+                    .insert(key_obj.inner(), value.clone());
+            }
+            WeakMapKey::Symbol(symbol) => {
+                map.borrow_mut()
+                    .data_mut()
+                    .symbol_entries
+                    .insert(symbol, value.clone());
+            }
+        }
         Ok(value)
     }
 }

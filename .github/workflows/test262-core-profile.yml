@@ -194,6 +194,7 @@ jobs:
             max_cases: 113
     env:
       CARGO_TERM_COLOR: always
+      TEST262_FULL: 1
       TEST262_OFFSET: ${{ matrix.offset }}
       TEST262_MAX_CASES: ${{ matrix.max_cases }}
       TEST262_FILTER_OVERRIDE: ${{ matrix.filter || '' }}
@@ -232,7 +233,7 @@ jobs:
           if [ -n "${TEST262_FILTER_OVERRIDE:-}" ]; then
             export TEST262_FILTER="${TEST262_FILTER_OVERRIDE}"
           fi
-          cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture | tee shard.log
+          cargo test --test test262_runner -- --exact test262_core_profile --nocapture | tee shard.log
 
       - name: Extract shard summary
         if: always()
@@ -279,6 +280,7 @@ jobs:
     continue-on-error: true
     env:
       CARGO_TERM_COLOR: always
+      TEST262_FULL: 1
       TEST262_FILTER: test/staging/sm/String/replace-flags.js
       TEST262_OFFSET: 0
       TEST262_MAX_CASES: 1
@@ -309,7 +311,7 @@ jobs:
           done &
           HEARTBEAT_PID=$!
           trap 'kill ${HEARTBEAT_PID} >/dev/null 2>&1 || true' EXIT
-          cargo test --test test262_runner -- --ignored --exact test262_core_profile --nocapture
+          cargo test --test test262_runner -- --exact test262_core_profile --nocapture
 
   aggregate:
     needs:

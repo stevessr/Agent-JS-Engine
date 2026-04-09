@@ -2070,6 +2070,12 @@ impl BuiltinTypedArray {
         // d. Set countBytes to max(endIndex - startIndex, 0).
         let count = end_index.saturating_sub(start_index) as usize;
 
+        if count == 0 {
+            drop(src_buf_borrow);
+            drop((src_borrow, target_borrow));
+            return Ok(target.upcast().into());
+        }
+
         // f. Let targetType be TypedArrayElementType(A).
         let target_type = target_borrow.data().kind();
 
@@ -2271,15 +2277,10 @@ impl BuiltinTypedArray {
 
         // 5. NOTE: The following closure performs a numeric comparison rather than the string comparison used in 23.1.3.30.
         // 6. Let SortCompare be a new Abstract Closure with parameters (x, y) that captures comparefn and performs the following steps when called:
-        let sort_compare =
-            |x: &JsValue, y: &JsValue, context: &mut Context| -> JsResult<cmp::Ordering> {
-                // a. Return ? CompareTypedArrayElements(x, y, comparefn).
-                compare_typed_array_elements(x, y, compare_fn.as_ref(), context)
-            };
+        // 7. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, read-through-holes).
+        let sorted = sort_typed_array_indexed_properties(&ta, len, compare_fn.as_ref(), context)?;
 
         let ta = ta.upcast();
-        // 7. Let sortedList be ? SortIndexedProperties(obj, len, SortCompare, read-through-holes).
-        let sorted = Array::sort_indexed_properties(&ta, len, sort_compare, false, context)?;
 
         // 8. Let j be 0.
         // 9. Repeat, while j < len,
@@ -3225,6 +3226,71 @@ fn compare_typed_array_elements(
         }
         _ => unreachable!("x and y must be both Numbers or BigInts"),
     }
+}
+
+fn typed_array_buffer_is_detached(typed_array: &JsObject<TypedArray>) -> bool {
+    typed_array
+        .borrow()
+        .data()
+        .viewed_array_buffer()
+        .as_buffer()
+        .bytes(Ordering::SeqCst)
+        .is_none()
+}
+
+fn sort_typed_array_indexed_properties(
+    typed_array: &JsObject<TypedArray>,
+    len: u64,
+    compare_fn: Option<&JsObject>,
+    context: &mut Context,
+) -> JsResult<Vec<JsValue>> {
+    let obj = typed_array.clone().upcast();
+    let mut items = Vec::with_capacity(len as usize);
+
+    for i in 0..len {
+        items.push(obj.get(i, context)?);
+    }
+
+    if compare_fn.is_none() {
+        let mut sort_err = Ok(());
+        items.sort_by(|x, y| {
+            if sort_err.is_ok() {
+                compare_typed_array_elements(x, y, None, context).unwrap_or_else(|err| {
+                    sort_err = Err(err);
+                    cmp::Ordering::Equal
+                })
+            } else {
+                cmp::Ordering::Equal
+            }
+        });
+        sort_err?;
+        return Ok(items);
+    }
+
+    for i in 1..items.len() {
+        let mut j = i;
+        while j > 0 {
+            let order = compare_typed_array_elements(
+                &items[j - 1],
+                &items[j],
+                compare_fn,
+                context,
+            )?;
+
+            if typed_array_buffer_is_detached(typed_array) {
+                return Ok(items);
+            }
+
+            if order == cmp::Ordering::Greater {
+                items.swap(j - 1, j);
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok(items)
 }
 
 /// Abstract operation `IsValidIntegerIndex ( O, index )`.

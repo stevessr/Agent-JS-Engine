@@ -15,27 +15,23 @@
 
 use std::{borrow::Cow, iter::once};
 
-use boa_ast::scope::Scope;
 use boa_macros::utf16;
 use itertools::Itertools;
 
 use crate::{
-    Context, JsArgs, JsBigInt, JsResult, JsString, JsValue, SpannedSourceText,
-    builtins::BuiltInObject,
-    bytecompiler::ByteCompiler,
+    Context, JsArgs, JsBigInt, JsData, JsResult, JsString, JsValue,
+    builtins::{Array, BuiltInObject},
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
-    object::{JsObject, internal_methods::InternalMethodPropertyContext},
+    object::{IntegrityLevel, JsObject, internal_methods::InternalMethodPropertyContext},
     property::{Attribute, PropertyNameKind},
     realm::Realm,
     string::{CodePoint, StaticJsStrings},
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
 };
-use boa_gc::Gc;
-use boa_parser::{Parser, Source};
+use boa_gc::{Finalize, Trace};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -46,6 +42,12 @@ mod tests;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Json;
 
+#[derive(Debug, Clone, Trace, Finalize, JsData)]
+#[boa_gc(unsafe_empty_trace)]
+struct RawJson {
+    text: JsString,
+}
+
 impl IntrinsicObject for Json {
     fn init(realm: &Realm) {
         let to_string_tag = JsSymbol::to_string_tag();
@@ -53,6 +55,8 @@ impl IntrinsicObject for Json {
 
         BuiltInBuilder::with_intrinsic::<Self>(realm)
             .static_method(Self::parse, js_string!("parse"), 2)
+            .static_method(Self::raw_json, js_string!("rawJSON"), 1)
+            .static_method(Self::is_raw_json, js_string!("isRawJSON"), 1)
             .static_method(Self::stringify, js_string!("stringify"), 3)
             .static_property(to_string_tag, Self::NAME, attribute)
             .build();
@@ -68,6 +72,73 @@ impl BuiltInObject for Json {
 }
 
 impl Json {
+    pub(crate) fn raw_json(
+        _: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let json_string = args
+            .first()
+            .cloned()
+            .unwrap_or_default()
+            .to_string(context)?
+            .to_std_string()
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+
+        if json_string.is_empty()
+            || matches!(json_string.as_bytes().first(), Some(b' ' | b'\n' | b'\r' | b'\t'))
+            || matches!(json_string.as_bytes().last(), Some(b' ' | b'\n' | b'\r' | b'\t'))
+        {
+            return Err(JsNativeError::syntax()
+                .with_message("invalid raw JSON text")
+                .into());
+        }
+
+        let parsed = serde_json::from_str::<serde_json::Value>(&json_string)
+            .map_err(|e| JsNativeError::syntax().with_message(e.to_string()))?;
+        if parsed.is_array() || parsed.is_object() {
+            return Err(JsNativeError::syntax()
+                .with_message("raw JSON text must not be an object or array")
+                .into());
+        }
+
+        let obj = JsObject::from_proto_and_data(
+            None,
+            RawJson {
+                text: JsString::from(json_string.clone()),
+            },
+        );
+        obj.create_data_property_or_throw(js_string!("rawJSON"), JsString::from(json_string), context)
+            .expect("CreateDataPropertyOrThrow should never throw here");
+        let status = obj.set_integrity_level(IntegrityLevel::Frozen, context)?;
+        debug_assert!(status);
+        Ok(obj.into())
+    }
+
+    pub(crate) fn is_raw_json(
+        _: &JsValue,
+        args: &[JsValue],
+        _: &mut Context,
+    ) -> JsResult<JsValue> {
+        Ok(args
+            .get_or_undefined(0)
+            .as_object()
+            .is_some_and(|obj| obj.downcast_ref::<RawJson>().is_some())
+            .into())
+    }
+
+    fn make_json_parse_context(
+        source: Option<JsString>,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let ctx = JsObject::with_object_proto(context.intrinsics());
+        if let Some(source) = source {
+            ctx.create_data_property_or_throw(js_string!("source"), source, context)
+                .expect("CreateDataPropertyOrThrow should never throw here");
+        }
+        Ok(ctx.into())
+    }
+
     /// `JSON.parse( text[, reviver] )`
     ///
     /// This `JSON` method parses a JSON string, constructing the JavaScript value or object described by the string.
@@ -92,81 +163,28 @@ impl Json {
 
         // 2. Parse ! StringToCodePoints(jsonString) as a JSON text as specified in ECMA-404.
         //    Throw a SyntaxError exception if it is not a valid JSON text as defined in that specification.
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(&json_string) {
-            return Err(JsNativeError::syntax().with_message(e.to_string()).into());
-        }
+        let (unfiltered, source_tree) = JsonParseSourceParser::new(&json_string).parse_value(context)?;
 
-        // 3. Let scriptString be the string-concatenation of "(", jsonString, and ");".
-        // TODO: fix script read for eval
-        let script_string = format!("({json_string});");
-
-        // 4. Let script be ParseText(! StringToCodePoints(scriptString), Script).
-        // 5. NOTE: The early error rules defined in 13.2.5.1 have special handling for the above invocation of ParseText.
-        // 6. Assert: script is a Parse Node.
-        // 7. Let completion be the result of evaluating script.
-        // 8. NOTE: The PropertyDefinitionEvaluation semantics defined in 13.2.5.5 have special handling for the above evaluation.
-        // 9. Let unfiltered be completion.[[Value]].
-        // 10. Assert: unfiltered is either a String, Number, Boolean, Null, or an Object that is defined by either an ArrayLiteral or an ObjectLiteral.
-        let source = Source::from_bytes(&script_string);
-
-        let mut parser = Parser::new(source);
-        parser.set_json_parse();
-        // In json we don't need the source: there no way to pass an object that needs a source text
-        // But if it's incorrect, just call `parser.parse_script_with_source` here
-        let script = parser.parse_script(&Scope::new_global(), context.interner_mut())?;
-        let code_block = {
-            let in_with = context.vm.environments.has_object_environment();
-            // If the source is needed then call `parser.parse_script_with_source` and pass `source_text` here.
-            let spanned_source_text = SpannedSourceText::new_empty();
-            let mut compiler = ByteCompiler::new(
-                js_string!("<json>"),
-                script.strict(),
-                true,
-                context.realm().scope().clone(),
-                context.realm().scope().clone(),
-                false,
-                false,
-                context.interner_mut(),
-                in_with,
-                spanned_source_text,
-                // TODO: Could give more information from previous shadow stack.
-                SourcePath::Json,
-            );
-            compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
-        };
-
-        let realm = context.realm().clone();
-
-        let env_fp = context.vm.environments.len() as u32;
-        context.vm.push_frame_with_stack(
-            CallFrame::new(code_block, None, context.vm.environments.clone(), realm)
-                .with_env_fp(env_fp)
-                .with_flags(CallFrameFlags::EXIT_EARLY),
-            JsValue::undefined(),
-            JsValue::null(),
-        );
-
-        context.realm().resize_global_env();
-        let record = context.run();
-        context.vm.pop_frame();
-
-        let unfiltered = record.consume()?;
-
-        // 11. If IsCallable(reviver) is true, then
+        // 3. If IsCallable(reviver) is true, then
         if let Some(obj) = args.get_or_undefined(1).as_callable() {
             // a. Let root be ! OrdinaryObjectCreate(%Object.prototype%).
             let root = JsObject::with_object_proto(context.intrinsics());
 
             // b. Let rootName be the empty String.
             // c. Perform ! CreateDataPropertyOrThrow(root, rootName, unfiltered).
-            root.create_data_property_or_throw(js_string!(), unfiltered, context)
+            root.create_data_property_or_throw(js_string!(), unfiltered.clone(), context)
                 .expect("CreateDataPropertyOrThrow should never throw here");
 
             // d. Return ? InternalizeJSONProperty(root, rootName, reviver).
-            Self::internalize_json_property(&root, js_string!(), &obj, context)
+            Self::internalize_json_property(
+                &root,
+                js_string!(),
+                &obj,
+                Some(&source_tree),
+                context,
+            )
         } else {
-            // 12. Else,
+            // 4. Else,
             // a. Return unfiltered.
             Ok(unfiltered)
         }
@@ -182,6 +200,7 @@ impl Json {
         holder: &JsObject,
         name: JsString,
         reviver: &JsObject,
+        source_tree: Option<&JsonParseSourceNode>,
         context: &mut Context,
     ) -> JsResult<JsValue> {
         // 1. Let val be ? Get(holder, name).
@@ -200,7 +219,13 @@ impl Json {
                     // 1. Let prop be ! ToString(𝔽(I)).
                     // 2. Let newElement be ? InternalizeJSONProperty(val, prop, reviver).
                     let new_element =
-                        Self::internalize_json_property(&obj, i.into(), reviver, context)?;
+                        Self::internalize_json_property(
+                            &obj,
+                            i.into(),
+                            reviver,
+                            source_tree.and_then(|node| node.array_index_source(&val, i as usize)),
+                            context,
+                        )?;
 
                     // 3. If newElement is undefined, then
                     if new_element.is_undefined() {
@@ -231,7 +256,13 @@ impl Json {
 
                     // 1. Let newElement be ? InternalizeJSONProperty(val, P, reviver).
                     let new_element =
-                        Self::internalize_json_property(&obj, p.clone(), reviver, context)?;
+                        Self::internalize_json_property(
+                            &obj,
+                            p.clone(),
+                            reviver,
+                            source_tree.and_then(|node| node.object_property_source(&val, &p)),
+                            context,
+                        )?;
 
                     // 2. If newElement is undefined, then
                     if new_element.is_undefined() {
@@ -251,7 +282,11 @@ impl Json {
         }
 
         // 3. Return ? Call(reviver, holder, « name, val »).
-        reviver.call(&holder.clone().into(), &[name.into(), val], context)
+        let context_value = Self::make_json_parse_context(
+            source_tree.and_then(|node| node.context_source(&val)),
+            context,
+        )?;
+        reviver.call(&holder.clone().into(), &[name.into(), val, context_value], context)
     }
 
     /// `JSON.stringify( value[, replacer[, space]] )`
@@ -510,6 +545,12 @@ impl Json {
             return Err(JsNativeError::typ()
                 .with_message("cannot serialize bigint to JSON")
                 .into());
+        }
+
+        if let Some(obj) = value.as_object()
+            && let Some(raw_json) = obj.downcast_ref::<RawJson>()
+        {
+            return Ok(Some(raw_json.text.clone()));
         }
 
         // 11. If Type(value) is Object and IsCallable(value) is false, then
@@ -826,6 +867,332 @@ impl Json {
 
         // 13. Return final.
         Ok(r#final)
+    }
+}
+
+#[derive(Debug, Clone)]
+enum JsonParseSourceNode {
+    Primitive {
+        source: JsString,
+        original: JsValue,
+    },
+    Array {
+        original: JsObject,
+        elements: Vec<JsonParseSourceNode>,
+    },
+    Object {
+        original: JsObject,
+        properties: Vec<(JsString, JsonParseSourceNode)>,
+    },
+}
+
+impl JsonParseSourceNode {
+    fn context_source(&self, current: &JsValue) -> Option<JsString> {
+        match self {
+            Self::Primitive { source, original } if JsValue::same_value(current, original) => {
+                Some(source.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn array_index_source<'a>(
+        &'a self,
+        current: &JsValue,
+        index: usize,
+    ) -> Option<&'a JsonParseSourceNode> {
+        match self {
+            Self::Array { original, elements }
+                if current.as_object().is_some_and(|obj| obj == *original) =>
+            {
+                elements.get(index)
+            }
+            _ => None,
+        }
+    }
+
+    fn object_property_source<'a>(
+        &'a self,
+        current: &JsValue,
+        key: &JsString,
+    ) -> Option<&'a JsonParseSourceNode> {
+        match self {
+            Self::Object {
+                original,
+                properties,
+            } if current.as_object().is_some_and(|obj| obj == *original) => properties
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, source)| source),
+            _ => None,
+        }
+    }
+}
+
+struct JsonParseSourceParser<'a> {
+    source: &'a str,
+    index: usize,
+}
+
+impl<'a> JsonParseSourceParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self { source, index: 0 }
+    }
+
+    fn parse_value(mut self, context: &mut Context) -> JsResult<(JsValue, JsonParseSourceNode)> {
+        self.skip_ws();
+        let (value, node) = self.parse_node(context)?;
+        self.skip_ws();
+        if self.peek().is_some() {
+            return Err(JsNativeError::syntax()
+                .with_message("unexpected trailing tokens in JSON source")
+                .into());
+        }
+        Ok((value, node))
+    }
+
+    fn parse_node(&mut self, context: &mut Context) -> JsResult<(JsValue, JsonParseSourceNode)> {
+        self.skip_ws();
+        let Some(ch) = self.peek() else {
+            return Err(JsNativeError::syntax()
+                .with_message("unexpected end of JSON source")
+                .into());
+        };
+
+        match ch {
+            b'{' => self.parse_object_node(context),
+            b'[' => self.parse_array_node(context),
+            b'"' => {
+                let raw = self.parse_string_literal()?;
+                let decoded: String = serde_json::from_str(&raw).map_err(|e| {
+                    JsNativeError::syntax().with_message(format!("invalid JSON string: {e}"))
+                })?;
+                let value = JsValue::from(JsString::from(decoded));
+                let node = JsonParseSourceNode::Primitive {
+                    source: JsString::from(raw),
+                    original: value.clone(),
+                };
+                Ok((value, node))
+            }
+            b't' => {
+                self.expect_keyword("true")?;
+                let value = JsValue::new(true);
+                let node = JsonParseSourceNode::Primitive {
+                    source: js_string!("true"),
+                    original: value.clone(),
+                };
+                Ok((value, node))
+            }
+            b'f' => {
+                self.expect_keyword("false")?;
+                let value = JsValue::new(false);
+                let node = JsonParseSourceNode::Primitive {
+                    source: js_string!("false"),
+                    original: value.clone(),
+                };
+                Ok((value, node))
+            }
+            b'n' => {
+                self.expect_keyword("null")?;
+                let value = JsValue::null();
+                let node = JsonParseSourceNode::Primitive {
+                    source: js_string!("null"),
+                    original: value.clone(),
+                };
+                Ok((value, node))
+            }
+            b'-' | b'0'..=b'9' => {
+                let raw = self.parse_number_literal();
+                let value = Self::parse_number_value(&raw)?;
+                let node = JsonParseSourceNode::Primitive {
+                    source: JsString::from(raw),
+                    original: value.clone(),
+                };
+                Ok((value, node))
+            }
+            _ => Err(JsNativeError::syntax()
+                .with_message("unexpected token in JSON source")
+                .into()),
+        }
+    }
+
+    fn parse_object_node(&mut self, context: &mut Context) -> JsResult<(JsValue, JsonParseSourceNode)> {
+        self.consume_byte(b'{')?;
+        self.skip_ws();
+        let obj = JsObject::with_object_proto(context.intrinsics());
+        let mut properties: Vec<(JsString, JsonParseSourceNode)> = Vec::new();
+        if self.try_consume_byte(b'}') {
+            let value = JsValue::from(obj.clone());
+            let node = JsonParseSourceNode::Object {
+                original: obj,
+                properties,
+            };
+            return Ok((value, node));
+        }
+
+        loop {
+            let key_literal = self.parse_string_literal()?;
+            let key_decoded: String = serde_json::from_str(&key_literal).map_err(|e| {
+                JsNativeError::syntax().with_message(format!("invalid JSON property key: {e}"))
+            })?;
+            self.skip_ws();
+            self.consume_byte(b':')?;
+            let (child_value, child_node) = self.parse_node(context)?;
+            let key = JsString::from(key_decoded);
+            obj.create_data_property(key.clone(), child_value, context)?;
+            if let Some((_, existing)) = properties.iter_mut().find(|(name, _)| *name == key) {
+                *existing = child_node;
+            } else {
+                properties.push((key, child_node));
+            }
+            self.skip_ws();
+            if self.try_consume_byte(b'}') {
+                break;
+            }
+            self.consume_byte(b',')?;
+            self.skip_ws();
+        }
+
+        let value = JsValue::from(obj.clone());
+        let node = JsonParseSourceNode::Object {
+            original: obj,
+            properties,
+        };
+        Ok((value, node))
+    }
+
+    fn parse_array_node(&mut self, context: &mut Context) -> JsResult<(JsValue, JsonParseSourceNode)> {
+        self.consume_byte(b'[')?;
+        self.skip_ws();
+        let mut elements = Vec::new();
+        if self.try_consume_byte(b']') {
+            let obj = Array::create_array_from_list([], context);
+            let value = JsValue::from(obj.clone());
+            let node = JsonParseSourceNode::Array {
+                original: obj,
+                elements,
+            };
+            return Ok((value, node));
+        }
+
+        let mut values = Vec::new();
+        loop {
+            let (child_value, child_node) = self.parse_node(context)?;
+            values.push(child_value);
+            elements.push(child_node);
+            self.skip_ws();
+            if self.try_consume_byte(b']') {
+                break;
+            }
+            self.consume_byte(b',')?;
+            self.skip_ws();
+        }
+
+        let obj = Array::create_array_from_list(values, context);
+        let value = JsValue::from(obj.clone());
+        let node = JsonParseSourceNode::Array {
+            original: obj,
+            elements,
+        };
+        Ok((value, node))
+    }
+
+    fn parse_string_literal(&mut self) -> JsResult<String> {
+        let start = self.index;
+        self.consume_byte(b'"')?;
+        let bytes = self.source.as_bytes();
+        while self.index < bytes.len() {
+            let byte = bytes[self.index];
+            self.index += 1;
+            match byte {
+                b'\\' => {
+                    if self.index >= bytes.len() {
+                        return Err(JsNativeError::syntax()
+                            .with_message("unterminated JSON string escape")
+                            .into());
+                    }
+                    self.index += 1;
+                }
+                b'"' => return Ok(self.source[start..self.index].to_string()),
+                _ => {}
+            }
+        }
+        Err(JsNativeError::syntax()
+            .with_message("unterminated JSON string")
+            .into())
+    }
+
+    fn parse_number_literal(&mut self) -> String {
+        let start = self.index;
+        if self.peek() == Some(b'-') {
+            self.index += 1;
+        }
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.index += 1;
+        }
+        if self.peek() == Some(b'.') {
+            self.index += 1;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.index += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.index += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.index += 1;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.index += 1;
+            }
+        }
+        self.source[start..self.index].to_string()
+    }
+
+    fn parse_number_value(raw: &str) -> JsResult<JsValue> {
+        let number = raw
+            .parse::<f64>()
+            .map_err(|e| JsNativeError::syntax().with_message(format!("invalid JSON number: {e}")))?;
+        Ok(JsValue::new(number))
+    }
+
+    fn expect_keyword(&mut self, keyword: &str) -> JsResult<()> {
+        if self.source[self.index..].starts_with(keyword) {
+            self.index += keyword.len();
+            Ok(())
+        } else {
+            Err(JsNativeError::syntax()
+                .with_message(format!("expected `{keyword}`"))
+                .into())
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.index += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.source.as_bytes().get(self.index).copied()
+    }
+
+    fn try_consume_byte(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn consume_byte(&mut self, byte: u8) -> JsResult<()> {
+        if self.try_consume_byte(byte) {
+            Ok(())
+        } else {
+            Err(JsNativeError::syntax()
+                .with_message(format!("expected `{}`", char::from(byte)))
+                .into())
+        }
     }
 }
 

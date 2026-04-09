@@ -5,6 +5,7 @@ use crate::{
     builtins::{
         Array, Proxy,
         function::{BoundFunction, ClassFieldDefinition, OrdinaryFunction, set_function_name},
+        typed_array::TypedArray,
     },
     context::intrinsics::{StandardConstructor, StandardConstructors},
     error::JsNativeError,
@@ -494,6 +495,15 @@ impl JsObject {
         // 1. Assert: Type(O) is Object.
         // 2. Assert: level is either sealed or frozen.
 
+        if level == IntegrityLevel::Frozen
+            && let Some(typed_array) = self.downcast_ref::<TypedArray>()
+            && !typed_array.viewed_array_buffer().as_buffer().is_fixed_len()
+        {
+            return Err(JsNativeError::typ()
+                .with_message("cannot freeze typed array backed by resizable array buffer")
+                .into());
+        }
+
         // 3. Let status be ? O.[[PreventExtensions]]().
         let status =
             self.__prevent_extensions__(&mut InternalMethodPropertyContext::new(context))?;
@@ -816,7 +826,7 @@ impl JsObject {
     /// Abstract operation [`GetFunctionRealm`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-getfunctionrealm
-    pub(crate) fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
+    pub fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
         if let Some(fun) = self.downcast_ref::<OrdinaryFunction>() {
             return Ok(fun.realm().clone());
         }

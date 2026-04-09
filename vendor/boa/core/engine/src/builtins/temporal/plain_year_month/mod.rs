@@ -565,6 +565,11 @@ impl PlainYearMonth {
         // 6. Let partialYearMonth be ? PrepareCalendarFields(calendar, temporalYearMonthLike, « year, month, month-code », « », partial).
         // 7. Set fields to CalendarMergeFields(calendar, fields, partialYearMonth).
         let fields = to_year_month_calendar_fields(&obj, year_month.inner.calendar(), context)?;
+        if fields.year.is_none() && fields.month.is_none() && fields.month_code.is_none() {
+            return Err(JsNativeError::typ()
+                .with_message("temporalYearMonthLike must contain at least one of year, month, or monthCode")
+                .into());
+        }
         // 8. Let resolvedOptions be ? GetOptionsObject(options).
         let resolved_options = get_options_object(args.get_or_undefined(1))?;
         // 9. Let overflow be ? GetTemporalOverflowOption(resolvedOptions).
@@ -975,10 +980,6 @@ fn add_or_subtract_duration(
             .into());
     };
 
-    let options = get_options_object(options)?;
-    let overflow =
-        get_option(&options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
-
     let object = this.as_object();
     let year_month = object
         .as_ref()
@@ -988,10 +989,33 @@ fn add_or_subtract_duration(
         })?;
 
     let inner = &year_month.inner;
-    let year_month_result = if is_addition {
-        inner.add(&duration, overflow)?
+    let options = get_options_object(options)?;
+    let overflow =
+        get_option(&options, js_string!("overflow"), context)?.unwrap_or(Overflow::Constrain);
+
+    if duration.weeks() != 0
+        || duration.days() != 0
+        || duration.hours() != 0
+        || duration.minutes() != 0
+        || duration.seconds() != 0
+        || duration.milliseconds() != 0
+        || duration.microseconds() != 0
+        || duration.nanoseconds() != 0
+    {
+        return Err(JsNativeError::range()
+            .with_message("duration units smaller than months are not allowed")
+            .into());
+    }
+
+    let adjusted_overflow = if inner.calendar().is_iso() {
+        Overflow::Constrain
     } else {
-        inner.subtract(&duration, overflow)?
+        overflow
+    };
+    let year_month_result = if is_addition {
+        inner.add(&duration, adjusted_overflow)?
+    } else {
+        inner.subtract(&duration, adjusted_overflow)?
     };
 
     create_temporal_year_month(year_month_result, None, context)

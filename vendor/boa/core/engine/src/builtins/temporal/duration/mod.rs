@@ -47,6 +47,16 @@ pub struct Duration {
 }
 
 impl Duration {
+    #[inline]
+    fn round_duration_slot_i64(value: i64) -> i64 {
+        value as f64 as i64
+    }
+
+    #[inline]
+    fn round_duration_slot_i128(value: i128) -> i128 {
+        value as f64 as i128
+    }
+
     pub(crate) fn new(inner: InnerDuration) -> Self {
         Self {
             inner: Box::new(inner),
@@ -1260,6 +1270,20 @@ pub(crate) fn create_temporal_duration(
     // 11. Set object.[[Milliseconds]] to ℝ(𝔽(milliseconds)).
     // 12. Set object.[[Microseconds]] to ℝ(𝔽(microseconds)).
     // 13. Set object.[[Nanoseconds]] to ℝ(𝔽(nanoseconds)).
+
+    let inner = InnerDuration::new(
+        Duration::round_duration_slot_i64(inner.years()),
+        Duration::round_duration_slot_i64(inner.months()),
+        Duration::round_duration_slot_i64(inner.weeks()),
+        Duration::round_duration_slot_i64(inner.days()),
+        Duration::round_duration_slot_i64(inner.hours()),
+        Duration::round_duration_slot_i64(inner.minutes()),
+        Duration::round_duration_slot_i64(inner.seconds()),
+        Duration::round_duration_slot_i64(inner.milliseconds()),
+        Duration::round_duration_slot_i128(inner.microseconds()),
+        Duration::round_duration_slot_i128(inner.nanoseconds()),
+    )
+    .map_err(Into::<JsError>::into)?;
 
     let obj = JsObject::from_proto_and_data(prototype, Duration::new(inner));
     // 14. Return object.

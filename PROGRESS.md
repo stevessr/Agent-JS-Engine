@@ -80,15 +80,15 @@
    - 增加 runtime smoke tests，覆盖普通脚本、路径脚本、module 和 `$262.agent` worker 中的 `Temporal` 可见性
    - 验证：
      - `cargo test --test isolated_test`：`25 passed, 1 ignored`
-     - `TEST262_FILTER='Temporal' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
-     - `TEST262_FILTER='test/built-ins/Temporal/' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
+     - `TEST262_FULL=1 TEST262_FILTER='Temporal' cargo test --test test262_runner -- --exact test262_core_profile`：通过
+     - `TEST262_FULL=1 TEST262_FILTER='test/built-ins/Temporal/' cargo test --test test262_runner -- --exact test262_core_profile`：通过
 15. 修复 core profile 的两处 test262 runner 炸栈路径：
    - 对普通 JS `import()` 也复用 `CompatModuleLoader` 已缓存的 namespace object，避免 `reuse-namespace-object-from-import.js` 这类 case 走入 Boa 的动态导入炸栈路径
    - 给 `tests/test262_runner.rs` 和需要的 isolated regression test 改用 32MB 栈线程执行，避免 `S13.2.1_A1_T1.js` 这类 32 层函数嵌套样本把默认测试线程栈打爆
    - 验证：
-     - `TEST262_FILTER='test/language/expressions/dynamic-import/' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
-     - `TEST262_FILTER='test/language/statements/function/S13.2.1_A1_T1.js' cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
-     - `cargo test --test test262_runner -- --ignored --exact test262_core_profile`：通过
+     - `TEST262_FULL=1 TEST262_FILTER='test/language/expressions/dynamic-import/' cargo test --test test262_runner -- --exact test262_core_profile`：通过
+     - `TEST262_FULL=1 TEST262_FILTER='test/language/statements/function/S13.2.1_A1_T1.js' cargo test --test test262_runner -- --exact test262_core_profile`：通过
+     - `TEST262_FULL=1 cargo test --test test262_runner -- --exact test262_core_profile`：通过
 16. 启用最小 `Intl` / `intl402` 子集：
    - 在 `Cargo.toml` 为 `boa_engine` 打开 `intl_bundled` feature，使用 Boa 自带 ICU/provider 数据，避免额外 provider wiring
    - 增加 `Intl` smoke tests，验证脚本和 module 入口都能构造 `Intl.NumberFormat` / `Intl.Collator`

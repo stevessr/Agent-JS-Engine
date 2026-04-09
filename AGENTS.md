@@ -5,7 +5,7 @@
 - `src/main.rs` is the CLI entry point for `--eval`, file execution, `--module`, and `--test262`.
 - `src/lexer/`, `src/parser/`, and `src/engine/interpreter.rs` preserve the handwritten experimental frontend/runtime pieces.
 - `tests/` holds integration coverage: `parser_test.rs`, `interpreter_test.rs`, `isolated_test.rs`, and `test262_runner.rs`.
-- `run_test262.sh` manages a sparse `test262` checkout and runs the ignored core-profile conformance suite. Helper scripts live in `tmp_scripts/`.
+- `run_test262.sh` manages a sparse `test262` checkout and runs the full core-profile conformance suite. Helper scripts live in `tmp_scripts/`.
 
 ## Build, Test, and Development Commands
 - `cargo build` — compile the project.
@@ -13,8 +13,9 @@
 - `cargo run -- --module path/to/file.js` — run an ECMAScript module.
 - `cargo test` — run the standard Rust test suite.
 - `cargo test --test isolated_test` — run engine smoke tests similar to CI.
-- `./run_test262.sh` — fetch `test262` if needed and run the ignored core-profile suite.
-- `TEST262_FILTER=import-defer TEST262_MAX_CASES=50 cargo test --test test262_runner test262_core_profile -- --ignored --nocapture` — example focused conformance run.
+- `./run_test262.sh` — fetch `test262` if needed and run the full core-profile suite with summary-only output.
+- `TEST262_FULL=1 TEST262_FILTER=import-defer TEST262_MAX_CASES=50 cargo test --test test262_runner test262_core_profile -- --nocapture` — example focused conformance run.
+- `TEST262_QUIET=1 cargo test --test test262_runner test262_core_profile -- --nocapture` — suppress progress/chunk logs and keep only the final summary.
 
 ## Coding Style & Naming Conventions
 - Use Rust 2024 idioms and `rustfmt` defaults; this repo has no custom formatter config.

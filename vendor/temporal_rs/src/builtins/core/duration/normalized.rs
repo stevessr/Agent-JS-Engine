@@ -628,7 +628,6 @@ impl InternalDurationRecord {
         // 17. Let total be r1 + progress × increment × sign.
         let progress_numerator = dest_epoch_ns - start_epoch_ns.0;
         let progress_denominator = end_epoch_ns.0 - start_epoch_ns.0;
-        let progress = exact_rational_to_f64(progress_numerator, progress_denominator)?;
         let total = exact_rational_to_f64(
             i128::from(r1) * progress_denominator
                 + progress_numerator

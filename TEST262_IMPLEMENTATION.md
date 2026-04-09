@@ -450,7 +450,7 @@ workflow 文件：
 
 ```bash
 cargo test --test isolated_test
-TEST262_FILTER='test/staging/sm/extensions/regress-650753.js' cargo test --test test262_runner -- --ignored --exact test262_core_profile
+TEST262_FULL=1 TEST262_FILTER='test/staging/sm/extensions/regress-650753.js' cargo test --test test262_runner -- --exact test262_core_profile
 ```
 
 ### CI

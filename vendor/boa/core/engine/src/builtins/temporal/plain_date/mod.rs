@@ -1398,7 +1398,13 @@ pub(crate) fn to_partial_date_record(
     let calendar = get_temporal_calendar_slot_value_with_default(partial_object, context)?;
     // TODO: Most likely need to use an iterator to handle.
     let calendar_fields = to_calendar_fields(partial_object, &calendar, context)?;
-    if calendar_fields.year.is_none() {
+    let has_no_era = matches!(
+        calendar.kind(),
+        AnyCalendarKind::Iso | AnyCalendarKind::Chinese | AnyCalendarKind::Dangi
+    );
+    let has_year_info = calendar_fields.year.is_some()
+        || (!has_no_era && calendar_fields.era.is_some() && calendar_fields.era_year.is_some());
+    if !has_year_info {
         return Err(JsNativeError::typ().with_message("year is required.").into());
     }
     if calendar_fields.month.is_none() && calendar_fields.month_code.is_none() {

@@ -925,10 +925,38 @@ fn f64_to_exponential(n: f64) -> JsString {
 // because in cases like (0.999).toExponential(0) the result will be 1e0.
 // Instead we get the index of 'e', and if the next character is not '-' we insert the plus sign
 fn f64_to_exponential_with_precision(n: f64, prec: usize) -> JsString {
-    let mut res = format!("{n:.prec$e}");
-    let idx = res.find('e').expect("'e' not found in exponential string");
-    if res.as_bytes()[idx + 1] != b'-' {
-        res.insert(idx + 1, '+');
+    let sign = if n.is_sign_negative() { "-" } else { "" };
+    let abs = n.abs();
+
+    let raw = format!("{abs:.110e}");
+    let (mantissa, exponent) = raw
+        .split_once('e')
+        .expect("'e' not found in exponential string");
+    let mut exponent = exponent
+        .parse::<i32>()
+        .expect("exponent must be a valid integer");
+    let mut digits = mantissa.chars().filter(|c| *c != '.').collect::<String>();
+
+    if Number::round_to_precision(&mut digits, prec + 1) {
+        exponent += 1;
     }
+
+    let first = digits
+        .chars()
+        .next()
+        .expect("rounded exponential digits must not be empty");
+    let mut res = String::new();
+    res.push_str(sign);
+    res.push(first);
+    if prec > 0 {
+        res.push('.');
+        res.push_str(&digits[1..]);
+    }
+    res.push('e');
+    if exponent >= 0 {
+        res.push('+');
+    }
+    res.push_str(&exponent.to_string());
+
     js_string!(res)
 }

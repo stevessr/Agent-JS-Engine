@@ -479,7 +479,7 @@ impl Regex {
         start: usize,
     ) -> exec::Matches<super::classicalbacktrack::BacktrackExecutor<'r, indexing::Utf16Input<'t>>>
     {
-        let input = Utf16Input::new(text, self.cr.flags.unicode);
+        let input = Utf16Input::new(text, self.cr.flags.unicode || self.cr.flags.unicode_sets);
         exec::Matches::new(
             super::classicalbacktrack::BacktrackExecutor::new(
                 input,

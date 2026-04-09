@@ -295,15 +295,19 @@ impl Emitter {
                         });
                         stack.push(Emitter::Node(contents));
                     }
-                    Node::WordBoundary { invert } => {
-                        self.emit_insn(Insn::WordBoundary { invert: *invert })
+                    Node::WordBoundary { invert, icase } => {
+                        self.emit_insn(Insn::WordBoundary {
+                            invert: *invert,
+                            icase: *icase,
+                        })
                     }
-                    Node::BackRef(groups) => {
+                    Node::BackRef { groups, icase } => {
                         debug_assert!(!groups.is_empty(), "Backreference should reference at least one group");
                         debug_assert!(groups.iter().all(|group| *group >= 1), "Group should not be zero");
-                        self.emit_insn(Insn::BackRef(
-                            groups.iter().map(|group| group - 1).collect(),
-                        ))
+                        self.emit_insn(Insn::BackRef {
+                            groups: groups.iter().map(|group| group - 1).collect(),
+                            icase: *icase,
+                        })
                     }
 
                     Node::ByteSet(bytes) => self.emit_insn(self.make_byte_set_insn(bytes)),

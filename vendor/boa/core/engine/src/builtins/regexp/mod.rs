@@ -337,12 +337,15 @@ impl RegExp {
 
         // 13. Let parseResult be ParsePattern(patternText, u, v).
         // 14. If parseResult is a non-empty List of SyntaxError objects, throw a SyntaxError exception.
-        let matcher =
-            Regex::from_unicode(p.code_points().map(CodePoint::as_u32), Flags::from(flags))
-                .map_err(|error| {
-                    JsNativeError::syntax()
-                        .with_message(format!("failed to create matcher: {}", error.text))
-                })?;
+        let regress_flags = Flags::from(flags);
+        let matcher = if regress_flags.unicode || regress_flags.unicode_sets {
+            Regex::from_unicode(p.code_points().map(CodePoint::as_u32), regress_flags)
+        } else {
+            Regex::from_unicode(p.iter().map(u32::from), regress_flags)
+        }
+        .map_err(|error| {
+            JsNativeError::syntax().with_message(format!("failed to create matcher: {}", error.text))
+        })?;
 
         // 15. Assert: parseResult is a Pattern Parse Node.
         // 16. Set obj.[[OriginalSource]] to P.
@@ -1064,11 +1067,9 @@ impl RegExp {
         a.create_data_property_or_throw(0, matched_substr, context)
             .expect("this CreateDataPropertyOrThrow call must not fail");
 
-        let mut named_groups = match_value
+        let named_groups = match_value
             .named_groups()
             .collect::<Vec<(&str, Option<Range>)>>();
-        // Strict mode requires groups to be created in a sorted order
-        named_groups.sort_by(|(name_x, _), (name_y, _)| name_x.cmp(name_y));
 
         // Combines:
         // 26. Let groupNames be a new empty List.
@@ -1369,9 +1370,9 @@ impl RegExp {
         // 10. Else, let global be false.
         let global = flags.contains(b'g');
 
-        // 11. If flags contains "u", let fullUnicode be true.
+        // 11. If flags contains "u" or flags contains "v", let fullUnicode be true.
         // 12. Else, let fullUnicode be false.
-        let unicode = flags.contains(b'u');
+        let unicode = flags.contains(b'u') || flags.contains(b'v');
 
         // 13. Return ! CreateRegExpStringIterator(matcher, S, global, fullUnicode).
         Ok(RegExpStringIterator::create_regexp_string_iterator(
@@ -1441,8 +1442,9 @@ impl RegExp {
 
         // 9. If global is true, then
         let full_unicode = if global {
-            // a. If flags contains "u", let fullUnicode be true. Otherwise, let fullUnicode be false.
-            let full_unicode = flags.contains(b'u');
+            // a. If flags contains "u" or flags contains "v", let fullUnicode be true.
+            //    Otherwise, let fullUnicode be false.
+            let full_unicode = flags.contains(b'u') || flags.contains(b'v');
 
             // b. Perform ? Set(rx, "lastIndex", +0𝔽, true).
             rx.set(js_string!("lastIndex"), 0, true, context)?;
@@ -1720,9 +1722,9 @@ impl RegExp {
         // 5. Let flags be ? ToString(? Get(rx, "flags")).
         let flags = rx.get(js_string!("flags"), context)?.to_string(context)?;
 
-        // 6. If flags contains "u", let unicodeMatching be true.
+        // 6. If flags contains "u" or flags contains "v", let unicodeMatching be true.
         // 7. Else, let unicodeMatching be false.
-        let unicode = flags.contains(b'u');
+        let unicode = flags.contains(b'u') || flags.contains(b'v');
 
         // 8. If flags contains "y", let newFlags be flags.
         // 9. Else, let newFlags be the string-concatenation of flags and "y".
@@ -1885,6 +1887,17 @@ impl RegExp {
                 JsNativeError::typ()
                     .with_message("`RegExp.prototype.compile` cannot be called for a non-object")
             })?;
+        let expected_prototype = context.intrinsics().constructors().regexp().prototype();
+        let has_compatible_prototype = this
+            .prototype()
+            .is_some_and(|prototype| JsObject::equals(&prototype, &expected_prototype));
+        if !has_compatible_prototype {
+            return Err(JsNativeError::typ()
+                .with_message(
+                    "`RegExp.prototype.compile` cannot be called on a RegExp from another realm or subclass",
+                )
+                .into());
+        }
         let pattern = args.get_or_undefined(0);
         let flags = args.get_or_undefined(1);
         // 3. If pattern is an Object and pattern has a [[RegExpMatcher]] internal slot, then

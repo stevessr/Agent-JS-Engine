@@ -70,7 +70,7 @@ pub enum Node {
     },
 
     /// Word boundary (\b or \B).
-    WordBoundary { invert: bool },
+    WordBoundary { invert: bool, icase: bool },
 
     /// A capturing group.
     CaptureGroup(Box<Node>, CaptureGroupID),
@@ -79,7 +79,7 @@ pub enum Node {
     NamedCaptureGroup(Box<Node>, CaptureGroupID, CaptureGroupName),
 
     /// A backreference.
-    BackRef(Vec<u32>),
+    BackRef { groups: Vec<u32>, icase: bool },
 
     /// A bracket.
     Bracket(BracketContents),
@@ -223,8 +223,11 @@ impl Node {
             Node::CaptureGroup(..) | Node::NamedCaptureGroup(..) => {
                 panic!("Refusing to duplicate a capture group");
             }
-            &Node::WordBoundary { invert } => Node::WordBoundary { invert },
-            Node::BackRef(idx) => Node::BackRef(idx.clone()),
+            &Node::WordBoundary { invert, icase } => Node::WordBoundary { invert, icase },
+            Node::BackRef { groups, icase } => Node::BackRef {
+                groups: groups.clone(),
+                icase: *icase,
+            },
             Node::Bracket(bc) => Node::Bracket(bc.clone()),
             // Do not reverse into lookarounds, they already have the right sense.
             Node::LookaroundAssertion {
@@ -537,12 +540,12 @@ fn display_node(node: &Node, depth: usize, f: &mut fmt::Formatter) -> fmt::Resul
         Node::NamedCaptureGroup(_node, _, name) => {
             writeln!(f, "NamedCaptureGroup {:?}", name)?;
         }
-        &Node::WordBoundary { invert } => {
+        &Node::WordBoundary { invert, icase } => {
             let kind = if invert { "\\B" } else { "\\b" };
-            writeln!(f, "WordBoundary {:?} ", kind)?;
+            writeln!(f, "WordBoundary {:?} icase={icase}", kind)?;
         }
-        Node::BackRef(group) => {
-            writeln!(f, "BackRef {:?} ", group)?;
+        Node::BackRef { groups, icase } => {
+            writeln!(f, "BackRef {:?} icase={icase}", groups)?;
         }
         Node::Bracket(contents) => {
             writeln!(f, "Bracket {:?}", contents)?;

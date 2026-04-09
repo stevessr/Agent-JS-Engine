@@ -790,14 +790,18 @@ impl<'a, Input: InputIndexer> MatchAttempter<'a, Input> {
                         )
                     }
 
-                    &Insn::WordBoundary { invert } => {
+                    &Insn::WordBoundary { invert, icase } => {
                         // Copy the positions since these destructively move them.
                         let prev_wordchar = input
                             .peek_left(pos)
-                            .is_some_and(Input::CharProps::is_word_char);
+                            .is_some_and(|c| {
+                                Input::CharProps::is_word_char_mod(c, input.unicode(), icase)
+                            });
                         let curr_wordchar = input
                             .peek_right(pos)
-                            .is_some_and(Input::CharProps::is_word_char);
+                            .is_some_and(|c| {
+                                Input::CharProps::is_word_char_mod(c, input.unicode(), icase)
+                            });
                         let is_boundary = prev_wordchar != curr_wordchar;
                         next_or_bt!(is_boundary != invert)
                     }
@@ -876,15 +880,15 @@ impl<'a, Input: InputIndexer> MatchAttempter<'a, Input> {
                         next_or_bt!(true)
                     }
 
-                    Insn::BackRef(cg_idx) => {
-                        let cg = resolved_backref_group(&mut self.s.groups, &cg_idx)
+                    Insn::BackRef { groups: cg_idx, icase } => {
+                        let cg = resolved_backref_group(&mut self.s.groups, cg_idx)
                             .expect("Backreference should reference at least one group");
                         // Backreferences to a capture group that did not match always succeed (ES5
                         // 15.10.2.9).
                         // Note we may be in the capture group we are examining, e.g. /(abc\1)/.
                         let matched;
                         if let Some(orig_range) = cg.as_range() {
-                            if re.flags.icase {
+                            if *icase {
                                 matched = matchers::backref_icase(input, dir, orig_range, &mut pos);
                             } else {
                                 matched = matchers::backref(input, dir, orig_range, &mut pos);
@@ -1161,7 +1165,7 @@ impl<'r, 't> exec::Executor<'r, 't> for BacktrackExecutor<'r, Utf8Input<'t>> {
     type AsAscii = BacktrackExecutor<'r, AsciiInput<'t>>;
 
     fn new(re: &'r CompiledRegex, text: &'t str) -> Self {
-        let input = Utf8Input::new(text, re.flags.unicode);
+        let input = Utf8Input::new(text, re.flags.unicode || re.flags.unicode_sets);
         Self {
             input,
             matcher: MatchAttempter::new(re, input.left_end()),

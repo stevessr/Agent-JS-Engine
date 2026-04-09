@@ -13,10 +13,15 @@ pub trait CharProperties {
     /// ES9 21.2.2.6.2.
     fn is_word_char(c: Self::Element) -> bool {
         let c = c.as_u32();
-        'a' as u32 <= c && c <= 'z' as u32
-            || 'A' as u32 <= c && c <= 'Z' as u32
-            || '0' as u32 <= c && c <= '9' as u32
-            || c == '_' as u32
+        ascii_word_char(c)
+    }
+
+    fn is_word_char_mod(c: Self::Element, unicode: bool, icase: bool) -> bool {
+        let cp = c.as_u32();
+        if ascii_word_char(cp) {
+            return true;
+        }
+        unicode && icase && ascii_word_char(unicode::fold_code_point(cp, true))
     }
 
     /// ES9 11.3
@@ -34,6 +39,14 @@ pub trait CharProperties {
         }
         bc.invert
     }
+}
+
+#[inline]
+fn ascii_word_char(c: u32) -> bool {
+    ('a' as u32 <= c && c <= 'z' as u32)
+        || ('A' as u32 <= c && c <= 'Z' as u32)
+        || ('0' as u32 <= c && c <= '9' as u32)
+        || c == '_' as u32
 }
 
 pub struct UTF8CharProperties {}
