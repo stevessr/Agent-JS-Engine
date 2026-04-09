@@ -450,15 +450,17 @@ impl JsData for HostHooksContext {}
 struct ShadowRealmWrappedFunctionCapture {
     callable_id: u64,
     foreign_realm: Realm,
+    wrapper_realm: Realm,
 }
 
 impl Finalize for ShadowRealmWrappedFunctionCapture {}
 
-// SAFETY: capture stores a traced realm plus a plain integer id.
+// SAFETY: capture stores traced realms plus a plain integer id.
 unsafe impl Trace for ShadowRealmWrappedFunctionCapture {
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        // SAFETY: the captured realm must stay reachable while the wrapper exists.
+        // SAFETY: the captured realms must stay reachable while the wrapper exists.
         unsafe { self.foreign_realm.trace(tracer) };
+        unsafe { self.wrapper_realm.trace(tracer) };
     }
 
     unsafe fn trace_non_roots(&self) {}
@@ -11373,7 +11375,7 @@ fn host_create_realm(_: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsR
     let new_realm = context.create_realm()?;
     let new_global = with_realm(context, new_realm.clone(), |context| {
         install_child_realm_host_globals(context)?;
-        install_test262_globals(context, false)?;
+        install_test262_globals(context, true)?;
         Ok(context.global_object())
     })?;
     let wrapper = build_test262_object(new_realm, new_global, false, context);
@@ -11505,7 +11507,7 @@ fn create_shadow_realm_wrapped_function_for_realm(
         &wrapper_realm,
         NativeFunction::from_copy_closure_with_captures(
             |_this, args, capture, context| {
-                let caller_realm = context.realm().clone();
+                let wrapper_realm = capture.wrapper_realm.clone();
                 let converted_args = shadow_realm_convert_args_for_realm(
                     args,
                     capture.foreign_realm.clone(),
@@ -11514,7 +11516,7 @@ fn create_shadow_realm_wrapped_function_for_realm(
                 .map_err(|_| {
                     JsNativeError::typ()
                         .with_message("Wrapped function invocation failed")
-                        .with_realm(caller_realm.clone())
+                        .with_realm(wrapper_realm.clone())
                 })?;
                 let callable = get_shadow_realm_registered_callable(capture.callable_id, context)?;
                 let function = callable.as_callable().ok_or_else(|| {
@@ -11526,20 +11528,20 @@ fn create_shadow_realm_wrapped_function_for_realm(
                     .map_err(|_| {
                         JsNativeError::typ()
                             .with_message("Wrapped function invocation failed")
-                            .with_realm(caller_realm.clone())
+                            .with_realm(wrapper_realm.clone())
                     })?;
 
-                let result_realm = caller_realm.clone();
-                shadow_realm_wrap_value_for_realm(result, caller_realm, context).map_err(|_| {
+                shadow_realm_wrap_value_for_realm(result, wrapper_realm.clone(), context).map_err(|_| {
                     JsNativeError::typ()
                         .with_message("ShadowRealm values must be primitive or callable")
-                        .with_realm(result_realm)
+                        .with_realm(wrapper_realm)
                         .into()
                 })
             },
             ShadowRealmWrappedFunctionCapture {
                 callable_id,
                 foreign_realm,
+                wrapper_realm: wrapper_realm.clone(),
             },
         ),
     )
