@@ -1,7 +1,8 @@
 use crate::codepointset::{CodePointSet, Interval};
 use crate::unicodetables::{
     FOLDS, TO_UPPERCASE, binary_property_ranges, general_category_property_value_ranges,
-    script_extensions_value_ranges, script_value_ranges, string_property_sets,
+    private_use_ranges, script_extensions_value_ranges, script_value_ranges, string_property_sets,
+    surrogate_ranges, unassigned_ranges,
     unicode_property_binary_from_str, unicode_property_value_general_category_from_str,
     unicode_property_value_script_from_str, unicode_string_property_from_str,
 };
@@ -9,6 +10,7 @@ use crate::util::SliceHelp;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::cmp::Ordering;
+use std::sync::OnceLock;
 
 // CodePointRange packs a code point and a length together into a u32.
 // We currently do not need to store any information about code points in plane 16 (U+100000),
@@ -371,12 +373,32 @@ pub(crate) fn unicode_property_from_str(
                 &unicode_property_value_general_category_from_str(s)?,
             ),
         )),
-        Some(UnicodePropertyName::Script) => Some(PropertyEscapeKind::CharacterClass(
-            script_value_ranges(&unicode_property_value_script_from_str(s)?),
-        )),
-        Some(UnicodePropertyName::ScriptExtensions) => Some(PropertyEscapeKind::CharacterClass(
-            script_extensions_value_ranges(&unicode_property_value_script_from_str(s)?),
-        )),
+        Some(UnicodePropertyName::Script) => {
+            let value = unicode_property_value_script_from_str(s)?;
+            Some(PropertyEscapeKind::CharacterClass(
+                if matches!(
+                    value,
+                    crate::unicodetables::UnicodePropertyValueScript::Unknown
+                ) {
+                    unknown_script_ranges()
+                } else {
+                    script_value_ranges(&value)
+                },
+            ))
+        }
+        Some(UnicodePropertyName::ScriptExtensions) => {
+            let value = unicode_property_value_script_from_str(s)?;
+            Some(PropertyEscapeKind::CharacterClass(
+                if matches!(
+                    value,
+                    crate::unicodetables::UnicodePropertyValueScript::Unknown
+                ) {
+                    unknown_script_ranges()
+                } else {
+                    script_extensions_value_ranges(&value)
+                },
+            ))
+        }
         None => {
             if let Some(value) = unicode_property_binary_from_str(s) {
                 return Some(PropertyEscapeKind::CharacterClass(binary_property_ranges(
@@ -393,6 +415,24 @@ pub(crate) fn unicode_property_from_str(
             ))
         }
     }
+}
+
+fn unknown_script_ranges() -> &'static [Interval] {
+    static RANGES: OnceLock<Box<[Interval]>> = OnceLock::new();
+    RANGES
+        .get_or_init(|| {
+            // Unicode Script=Unknown and Script_Extensions=Unknown cover code points without a
+            // concrete script assignment, which in practice is the union of general categories
+            // Cn (unassigned/noncharacters), Co (private use), and Cs (surrogates).
+            let mut set = CodePointSet::new();
+            for ranges in [unassigned_ranges(), private_use_ranges(), surrogate_ranges()] {
+                for interval in ranges {
+                    set.add(*interval);
+                }
+            }
+            set.intervals().to_vec().into_boxed_slice()
+        })
+        .as_ref()
 }
 
 #[cfg(test)]

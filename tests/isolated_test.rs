@@ -1487,7 +1487,11 @@ fn engine_allows_valid_import_call_trailing_commas() {
         "typeof import('./dep.mjs', {},);",
     ] {
         let output = engine.eval(source).unwrap();
-        assert_eq!(output.value.as_deref(), Some("'object'"), "source: {source}");
+        assert_eq!(
+            output.value.as_deref(),
+            Some("'object'"),
+            "source: {source}"
+        );
     }
 }
 
@@ -2069,7 +2073,10 @@ fn engine_parses_await_using_in_for_of_heads() {
         )
         .unwrap();
 
-    assert_eq!(output.printed, vec!["body-1,dispose-1,body-2,dispose-2".to_string()]);
+    assert_eq!(
+        output.printed,
+        vec!["body-1,dispose-1,body-2,dispose-2".to_string()]
+    );
 }
 
 #[test]

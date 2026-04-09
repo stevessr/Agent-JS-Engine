@@ -40,6 +40,15 @@ impl EraInfo {
             ArithmeticYear::Inverse => 1 - era_year,
         }
     }
+
+    pub(crate) fn era_year_for_arithmetic_year(&self, arithmetic_year: i32) -> Option<i32> {
+        let era_year = match self.arithmetic_year {
+            ArithmeticYear::DefaultEra => arithmetic_year,
+            ArithmeticYear::Offset(offset) => arithmetic_year - offset + 1,
+            ArithmeticYear::Inverse => 1 - arithmetic_year,
+        };
+        self.range.contains(&era_year).then_some(era_year)
+    }
 }
 
 macro_rules! era_identifier {
@@ -94,11 +103,11 @@ pub(crate) const GREGORY_INVERSE_ERA: EraInfo =
     valid_era!("bce", 1..=i32::MAX, ArithmeticYear::Inverse);
 pub(crate) const HEBREW_ERA: EraInfo = valid_era!("am", i32::MIN..=i32::MAX);
 pub(crate) const INDIAN_ERA: EraInfo = valid_era!("shaka", i32::MIN..=i32::MAX);
-pub(crate) const ISLAMIC_ERA: EraInfo = valid_era!("ah", i32::MIN..=i32::MAX);
+pub(crate) const ISLAMIC_ERA: EraInfo = valid_era!("ah", 1..=i32::MAX);
 pub(crate) const ISLAMIC_INVERSE_ERA: EraInfo =
-    valid_era!("bh", i32::MIN..=i32::MAX, ArithmeticYear::Inverse);
+    valid_era!("bh", 1..=i32::MAX, ArithmeticYear::Inverse);
 pub(crate) const HEISEI_ERA: EraInfo = valid_era!("heisei", 1..=31, ArithmeticYear::Offset(1989));
-pub(crate) const JAPANESE_ERA: EraInfo = valid_era!("ce", 1..=1868);
+pub(crate) const JAPANESE_ERA: EraInfo = valid_era!("ce", 1..=1872);
 pub(crate) const JAPANESE_INVERSE_ERA: EraInfo =
     valid_era!("bce", 1..=i32::MAX, ArithmeticYear::Inverse);
 pub(crate) const MEIJI_ERA: EraInfo = valid_era!("meiji", 1..=45, ArithmeticYear::Offset(1868));

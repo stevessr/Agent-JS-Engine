@@ -1,6 +1,6 @@
 use ai_agent::engine::{EvalOptions, JsEngine, ReplSession};
-use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal};
@@ -72,9 +72,7 @@ fn run() -> Result<(), String> {
 
     match (inline_source, file_path, interactive) {
         // --eval or -p with source
-        (Some(source), None, false) => {
-            run_inline(&source, is_module, &eval_options, print_result)
-        }
+        (Some(source), None, false) => run_inline(&source, is_module, &eval_options, print_result),
         // File execution
         (None, Some(path), false) => run_file(&path, is_module, &eval_options),
         // --eval + -i: run eval then enter REPL
@@ -87,9 +85,7 @@ fn run() -> Result<(), String> {
             run_file(&path, is_module, &eval_options)?;
             run_repl(&eval_options)
         }
-        (Some(_), Some(_), _) => {
-            Err("provide either a file path or --eval, not both".to_string())
-        }
+        (Some(_), Some(_), _) => Err("provide either a file path or --eval, not both".to_string()),
         // No file, no eval: REPL mode or stdin
         (None, None, _) => {
             if io::stdin().is_terminal() {
@@ -139,8 +135,7 @@ fn run_inline(
 }
 
 fn run_file(path: &str, is_module: bool, options: &EvalOptions) -> Result<(), String> {
-    let source =
-        fs::read_to_string(path).map_err(|err| format!("failed to read {path}: {err}"))?;
+    let source = fs::read_to_string(path).map_err(|err| format!("failed to read {path}: {err}"))?;
     let source_path = PathBuf::from(path);
     let module_root = source_path
         .parent()
@@ -165,8 +160,8 @@ fn run_file(path: &str, is_module: bool, options: &EvalOptions) -> Result<(), St
 }
 
 fn run_stdin(is_module: bool, options: &EvalOptions) -> Result<(), String> {
-    let source = io::read_to_string(io::stdin())
-        .map_err(|err| format!("failed to read stdin: {err}"))?;
+    let source =
+        io::read_to_string(io::stdin()).map_err(|err| format!("failed to read stdin: {err}"))?;
     run_inline(&source, is_module, options, false)
 }
 
@@ -180,8 +175,8 @@ fn run_repl(options: &EvalOptions) -> Result<(), String> {
         let _ = rl.load_history(path);
     }
 
-    let cwd = env::current_dir()
-        .map_err(|err| format!("failed to resolve current directory: {err}"))?;
+    let cwd =
+        env::current_dir().map_err(|err| format!("failed to resolve current directory: {err}"))?;
     let mut session = ReplSession::new(&cwd, options).map_err(|e| e.to_string())?;
 
     let mut multiline_buffer = String::new();

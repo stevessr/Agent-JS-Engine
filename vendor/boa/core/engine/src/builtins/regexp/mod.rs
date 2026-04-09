@@ -338,8 +338,18 @@ impl RegExp {
         // 13. Let parseResult be ParsePattern(patternText, u, v).
         // 14. If parseResult is a non-empty List of SyntaxError objects, throw a SyntaxError exception.
         let regress_flags = Flags::from(flags);
-        let matcher = Regex::from_unicode(p.code_points().map(CodePoint::as_u32), regress_flags)
-            .map_err(|error| {
+        let matcher = if flags.contains(RegExpFlags::UNICODE)
+            || flags.contains(RegExpFlags::UNICODE_SETS)
+        {
+            Regex::from_unicode(p.code_points().map(CodePoint::as_u32), regress_flags)
+        } else {
+            // Non-unicode ECMAScript patterns are parsed over UTF-16 code units, not Unicode
+            // code points. Feeding regress the code units keeps astral literals split into their
+            // surrogate pair pieces, which matches the semantics used for non-`u`/non-`v`
+            // matching against UCS-2 inputs.
+            Regex::from_unicode(p.iter().map(u32::from), regress_flags)
+        }
+        .map_err(|error| {
             JsNativeError::syntax().with_message(format!("failed to create matcher: {}", error.text))
         })?;
 

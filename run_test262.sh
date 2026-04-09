@@ -96,4 +96,9 @@ fi
 
 git -C "$SUITE_DIR" sparse-checkout set test harness
 
-TEST262_DIR="$SUITE_DIR" TEST262_FULL=1 TEST262_QUIET=1 cargo test --test test262_runner test262_core_profile -- --nocapture
+# Run with lower priority (higher nice value) to avoid interfering with system tasks
+exec nice -n 10 env \
+  TEST262_DIR="$SUITE_DIR" \
+  TEST262_FULL=1 \
+  TEST262_QUIET=1 \
+  cargo test --release --test test262_runner test262_core_profile -- --nocapture

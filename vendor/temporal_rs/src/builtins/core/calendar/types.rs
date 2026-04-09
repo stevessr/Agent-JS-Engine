@@ -1,5 +1,6 @@
 //! Implementation of `ResolvedCalendarFields`
 
+use alloc::vec::Vec;
 use tinystr::tinystr;
 use tinystr::TinyAsciiStr;
 
@@ -65,7 +66,7 @@ impl ResolvedCalendarFields {
             });
         }
 
-        let month_code = MonthCode::try_from_fields(calendar, fields, Some(&era_year))?;
+        let month_code = MonthCode::try_from_fields(calendar, fields, Some(&era_year), overflow)?;
         let day = resolve_day(
             fields.day,
             resolve_type == ResolutionType::YearMonth,
@@ -91,21 +92,40 @@ fn resolve_day(
 ) -> TemporalResult<u8> {
     if is_year_month {
         if calendar.kind() == AnyCalendarKind::Japanese {
-            Ok(
-                match (year.arithmetic_year, month_code.to_month_integer()) {
+            let explicit_era_start_day = year.era.as_ref().and_then(|era| {
+                let month = month_code.to_month_integer();
+                if era.0 == tinystr!(16, "meiji") && year.year == 1 && month == 10 {
+                    Some(23)
+                } else if era.0 == tinystr!(16, "taisho") && year.year == 1 && month == 7 {
+                    Some(30)
+                } else if era.0 == tinystr!(16, "showa") && year.year == 1 && month == 12 {
+                    Some(25)
+                } else if era.0 == tinystr!(16, "heisei") && year.year == 1 && month == 1 {
+                    Some(8)
+                } else if era.0 == tinystr!(16, "reiwa") && year.year == 1 && month == 5 {
+                    Some(1)
+                } else {
+                    None
+                }
+            });
+
+            if year.era.is_some() {
+                Ok(explicit_era_start_day.unwrap_or(1))
+            } else {
+                Ok(match (year.arithmetic_year, month_code.to_month_integer()) {
                     // Meiji begins Oct 23, 1868
                     (1868, 10) => 23,
                     // Taisho begins Jul 30, 1912
                     (1912, 7) => 30,
-                    // Showa begins Dec 12, 1926
+                    // Showa begins Dec 25, 1926
                     (1926, 12) => 25,
                     // Heisei begins 8 Jan 1989
                     (1989, 1) => 8,
                     // Reiwa begins 1 May 2019
                     (2019, 5) => 1,
                     _ => 1,
-                },
-            )
+                })
+            }
         } else {
             // PlainYearMonth construction paths all *require* setting the day to the first day of the month.
             // See https://tc39.es/proposal-temporal/#sec-temporal-calendaryearmonthfromfields
@@ -452,6 +472,7 @@ impl MonthCode {
         calendar: &Calendar,
         fields: &CalendarFields,
         era_year: Option<&EraYear>,
+        overflow: Overflow,
     ) -> TemporalResult<Self> {
         match fields {
             CalendarFields {
@@ -459,11 +480,7 @@ impl MonthCode {
                 month_code: None,
                 ..
             } => {
-                // TODO(manishearth) this is incorrect,
-                // see https://github.com/unicode-org/icu4x/issues/6790
-                let month_code = month_to_month_code(*month)?;
-                month_code.validate(calendar)?;
-                Ok(month_code)
+                resolve_month_code_from_ordinal(calendar, *month, era_year, overflow)
             }
             CalendarFields {
                 month_code: Some(month_code),
@@ -623,6 +640,112 @@ fn are_month_and_month_code_resolvable(
     }
 
     Ok(())
+}
+
+fn resolve_month_code_from_ordinal(
+    calendar: &Calendar,
+    month: u8,
+    era_year: Option<&EraYear>,
+    overflow: Overflow,
+) -> TemporalResult<MonthCode> {
+    if calendar.is_iso() {
+        return if overflow == Overflow::Constrain {
+            month_to_month_code(month.clamp(1, 12))
+        } else {
+            month_to_month_code(month)
+        };
+    }
+
+    let Some(era_year) = era_year else {
+        let month_code = month_to_month_code(month)?;
+        month_code.validate(calendar)?;
+        return Ok(month_code);
+    };
+
+    let month_code_ordinal = |month_code: MonthCode| -> Option<u8> {
+        let (era, year) = era_year
+            .era
+            .as_ref()
+            .map(|era| (Some(era.0), era_year.year))
+            .or_else(|| {
+                calendar
+                    .era_year_for_arithmetic_date(era_year.arithmetic_year, month_code, 1)
+                    .map(|(era, year)| (Some(era), year))
+            })
+            .unwrap_or((None, era_year.year));
+
+        let date = calendar
+            .0
+            .from_codes(era.as_ref().map(TinyAsciiStr::as_str), year, IcuMonthCode(month_code.0), 1)
+            .ok()?;
+        Some(calendar.0.month(&date).ordinal)
+    };
+
+    let mut candidates = Vec::with_capacity(25);
+    for code in [
+        MONTH_ONE,
+        MONTH_TWO,
+        MONTH_THREE,
+        MONTH_FOUR,
+        MONTH_FIVE,
+        MONTH_SIX,
+        MONTH_SEVEN,
+        MONTH_EIGHT,
+        MONTH_NINE,
+        MONTH_TEN,
+        MONTH_ELEVEN,
+        MONTH_TWELVE,
+    ] {
+        candidates.push(MonthCode(code));
+    }
+
+    match calendar.identifier() {
+        "chinese" | "dangi" => {
+            for code in [
+                MONTH_ONE_LEAP,
+                MONTH_TWO_LEAP,
+                MONTH_THREE_LEAP,
+                MONTH_FOUR_LEAP,
+                MONTH_FIVE_LEAP,
+                MONTH_SIX_LEAP,
+                MONTH_SEVEN_LEAP,
+                MONTH_EIGHT_LEAP,
+                MONTH_NINE_LEAP,
+                MONTH_TEN_LEAP,
+                MONTH_ELEVEN_LEAP,
+                MONTH_TWELVE_LEAP,
+            ] {
+                candidates.push(MonthCode(code));
+            }
+        }
+        "coptic" | "ethiopic" | "ethioaa" => candidates.push(MonthCode(MONTH_THIRTEEN)),
+        "hebrew" => candidates.push(MonthCode(MONTH_FIVE_LEAP)),
+        _ => {}
+    }
+
+    let mut constrained = None;
+    for candidate in candidates {
+        let Some(ordinal) = month_code_ordinal(candidate) else {
+            continue;
+        };
+        if ordinal == month {
+            return Ok(candidate);
+        }
+        if overflow == Overflow::Constrain && ordinal < month {
+            match constrained {
+                Some((best_ordinal, _)) if best_ordinal >= ordinal => {}
+                _ => constrained = Some((ordinal, candidate)),
+            }
+        }
+    }
+
+    if overflow == Overflow::Constrain {
+        if let Some((_, candidate)) = constrained {
+            return Ok(candidate);
+        }
+    }
+
+    Err(TemporalError::range().with_message("Month not in a valid range."))
 }
 
 // Potentially greedy. Need to verify for all calendars that

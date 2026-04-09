@@ -297,11 +297,25 @@ impl Calendar {
             );
         }
 
-        let build_date = |day| -> TemporalResult<PlainDate> {
+        let build_date = |month_code: MonthCode, day| -> TemporalResult<PlainDate> {
+            let (era, year) = resolved_fields
+                .era_year
+                .era
+                .as_ref()
+                .map(|e| (Some(e.0), resolved_fields.era_year.year))
+                .or_else(|| {
+                    self.era_year_for_arithmetic_date(
+                        resolved_fields.era_year.arithmetic_year,
+                        month_code,
+                        day,
+                    )
+                        .map(|(era, year)| (Some(era), year))
+                })
+                .unwrap_or((None, resolved_fields.era_year.year));
             let calendar_date = self.0.from_codes(
-                resolved_fields.era_year.era.as_ref().map(|e| e.0.as_str()),
-                resolved_fields.era_year.year,
-                IcuMonthCode(resolved_fields.month_code.0),
+                era.as_ref().map(TinyAsciiStr::as_str),
+                year,
+                IcuMonthCode(month_code.0),
                 day,
             )?;
             let iso = self.0.to_iso(&calendar_date);
@@ -315,19 +329,24 @@ impl Calendar {
         };
 
         if overflow == Overflow::Constrain {
-            let mut day = resolved_fields.day;
-            loop {
-                if let Ok(date) = build_date(day) {
-                    return Ok(date);
+            let mut candidates = [resolved_fields.month_code, resolved_fields.month_code];
+            let candidate_count =
+                constrain_month_code_candidates(self, resolved_fields.month_code, &mut candidates);
+            for month_code in candidates.into_iter().take(candidate_count) {
+                let mut day = resolved_fields.day;
+                loop {
+                    if let Ok(date) = build_date(month_code, day) {
+                        return Ok(date);
+                    }
+                    if day == 1 {
+                        break;
+                    }
+                    day -= 1;
                 }
-                if day == 1 {
-                    break;
-                }
-                day -= 1;
             }
         }
 
-        build_date(resolved_fields.day)
+        build_date(resolved_fields.month_code, resolved_fields.day)
     }
 
     /// `CalendarPlainMonthDayFromFields`
@@ -361,7 +380,7 @@ impl Calendar {
             self.kind(),
             AnyCalendarKind::Chinese | AnyCalendarKind::Dangi
         ) {
-            let month_code = MonthCode::try_from_fields(self, &fields, None)?;
+            let month_code = MonthCode::try_from_fields(self, &fields, None, overflow)?;
             let day = fields
                 .day
                 .ok_or(TemporalError::r#type().with_message("MonthDay must specify day"))?;
@@ -398,9 +417,23 @@ impl Calendar {
         }
 
         let build_month_day = |month_code: MonthCode, day: u8| -> TemporalResult<PlainMonthDay> {
+            let (era, year) = resolved_fields
+                .era_year
+                .era
+                .as_ref()
+                .map(|e| (Some(e.0), resolved_fields.era_year.year))
+                .or_else(|| {
+                    self.era_year_for_arithmetic_date(
+                        resolved_fields.era_year.arithmetic_year,
+                        month_code,
+                        day,
+                    )
+                        .map(|(era, year)| (Some(era), year))
+                })
+                .unwrap_or((None, resolved_fields.era_year.year));
             let calendar_date = self.0.from_codes(
-                resolved_fields.era_year.era.as_ref().map(|e| e.0.as_str()),
-                resolved_fields.era_year.year,
+                era.as_ref().map(TinyAsciiStr::as_str),
+                year,
                 IcuMonthCode(month_code.as_tinystr()),
                 day,
             )?;
@@ -416,24 +449,20 @@ impl Calendar {
 
         if overflow == Overflow::Constrain {
             let mut candidates = [resolved_fields.month_code, resolved_fields.month_code];
-            let candidate_count = if resolved_fields.month_code.is_leap_month() {
-                candidates[1] = resolved_fields.month_code.without_leap();
-                2
-            } else {
-                1
-            };
-            let mut day = resolved_fields.day;
-            loop {
-                for month_code in candidates.into_iter().take(candidate_count) {
+            let candidate_count =
+                constrain_month_code_candidates(self, resolved_fields.month_code, &mut candidates);
+            for month_code in candidates.into_iter().take(candidate_count) {
+                let mut day = resolved_fields.day;
+                loop {
                     if let Ok(month_day) = build_month_day(month_code, day) {
                         return Ok(month_day);
                     }
-                }
 
-                if day == 1 {
-                    break;
+                    if day == 1 {
+                        break;
+                    }
+                    day -= 1;
                 }
-                day -= 1;
             }
         }
 
@@ -464,12 +493,27 @@ impl Calendar {
         }
 
         // NOTE: This might preemptively throw as `ICU4X` does not support regulating.
-        let calendar_date = self.0.from_codes(
-            resolved_fields.era_year.era.as_ref().map(|e| e.0.as_str()),
-            resolved_fields.era_year.year,
-            IcuMonthCode(resolved_fields.month_code.0),
-            resolved_fields.day,
-        )?;
+        let (era, year) = resolved_fields
+            .era_year
+            .era
+            .as_ref()
+            .map(|e| (Some(e.0), resolved_fields.era_year.year))
+            .or_else(|| {
+                self.era_year_for_arithmetic_date(
+                    resolved_fields.era_year.arithmetic_year,
+                    resolved_fields.month_code,
+                    resolved_fields.day,
+                )
+                    .map(|(era, year)| (Some(era), year))
+            })
+            .unwrap_or((None, resolved_fields.era_year.year));
+        let calendar_date =
+            self.0.from_codes(
+                era.as_ref().map(TinyAsciiStr::as_str),
+                year,
+                IcuMonthCode(resolved_fields.month_code.0),
+                resolved_fields.day,
+            )?;
         let iso = self.0.to_iso(&calendar_date);
         PlainYearMonth::new_with_overflow(
             Iso.year_info(&iso).year,
@@ -526,12 +570,16 @@ impl Calendar {
             Ok(CalendarDateRecord::from_iso(self, regulated.iso))
         };
         let adjust_calendar_date =
-            |year: i32, month_code: MonthCode, day: u8| -> TemporalResult<CalendarDateRecord> {
+            |year: i32,
+             month_code: MonthCode,
+             day: u8,
+             overflow: Overflow|
+             -> TemporalResult<CalendarDateRecord> {
                 let fields = CalendarFields::new()
                     .with_year(year)
                     .with_month_code(month_code)
                     .with_day(day);
-                let adjusted = self.date_from_fields(fields, Overflow::Constrain)?;
+                let adjusted = self.date_from_fields(fields, overflow)?;
                 Ok(CalendarDateRecord::from_iso(self, adjusted.iso))
             };
         let add_days_calendar =
@@ -585,19 +633,30 @@ impl Calendar {
             };
 
         let record = CalendarDateRecord::from_iso(self, *date);
-        let added_years = if duration.years != 0 {
+        let mut year_month_anchor = regulate_day(&record, 1)?;
+        if duration.years != 0 {
             let years = i32::try_from(duration.years)
                 .map_err(|_| TemporalError::range().with_enum(ErrorMessage::IntermediateDateTimeOutOfRange))?;
             let year = record
                 .year
                 .checked_add(years)
                 .ok_or_else(|| TemporalError::range().with_enum(ErrorMessage::IntermediateDateTimeOutOfRange))?;
-            adjust_calendar_date(year, record.month_code, record.day)?
+            year_month_anchor = adjust_calendar_date(year, record.month_code, 1, overflow)?;
+        }
+        if duration.months != 0 {
+            year_month_anchor = add_months_calendar(&year_month_anchor, duration.months, Overflow::Constrain)?;
+        }
+        let year_month_added = if duration.years != 0 || duration.months != 0 {
+            adjust_calendar_date(
+                year_month_anchor.year,
+                year_month_anchor.month_code,
+                record.day,
+                overflow,
+            )?
         } else {
             record
         };
-        let added_months = add_months_calendar(&added_years, duration.months, overflow)?;
-        let added_days = add_days_calendar(&added_months, duration.days + 7 * duration.weeks)?;
+        let added_days = add_days_calendar(&year_month_added, duration.days + 7 * duration.weeks)?;
 
         PlainDate::new_with_overflow(
             added_days.iso.year,
@@ -743,7 +802,6 @@ impl Calendar {
                 } else {
                     let mut years = 0i64;
                     let mut months = 0i64;
-
                     let diff_years = i64::from(calendar_two.year - calendar_one.year);
                     let diff_days = i32::from(calendar_two.day) - i32::from(calendar_one.day);
 
@@ -759,6 +817,35 @@ impl Calendar {
                         } else {
                             diff_years
                         };
+
+                        if years != 0 {
+                            let years_added = adjust_calendar_date(
+                                calendar_one.year + years as i32,
+                                calendar_one.month,
+                                calendar_one.month_code,
+                                calendar_one.day,
+                            )?;
+                            let candidate_cmp = compare(&calendar_two, &years_added) * sign;
+                            let intercalary_last_day_match = candidate_cmp == 0
+                                && years_added.day != calendar_one.day
+                                && matches!(
+                                    self.kind(),
+                                    AnyCalendarKind::Coptic
+                                        | AnyCalendarKind::Ethiopian
+                                        | AnyCalendarKind::EthiopianAmeteAlem
+                                )
+                                && calendar_one.month_code.to_month_integer() == 13
+                                && calendar_two.month_code.to_month_integer() == 13
+                                && u16::from(calendar_one.day) == self.days_in_month(&calendar_one.iso)
+                                && u16::from(calendar_two.day) == self.days_in_month(&calendar_two.iso);
+                            if candidate_cmp < 0
+                                || (candidate_cmp == 0
+                                    && years_added.day != calendar_one.day
+                                    && !intercalary_last_day_match)
+                            {
+                                years -= i64::from(sign);
+                            }
+                        }
                     }
 
                     let years_added = if years != 0 {
@@ -773,21 +860,49 @@ impl Calendar {
                     };
 
                     let mut current = years_added;
-                    let mut next = years_added;
+                    let mut previous = years_added;
+                    let mut last_month_was_constrained = false;
                     loop {
-                        months += i64::from(sign);
-                        current = next;
-                        next = add_months_calendar(&current, i64::from(sign), Overflow::Constrain)?;
+                        let mut next =
+                            add_months_calendar(&current, i64::from(sign), Overflow::Constrain)?;
+                        let mut constrained = false;
                         if next.day != calendar_one.day {
                             next = regulate_day(&next, calendar_one.day)?;
+                            constrained = next.day != calendar_one.day;
                         }
                         if compare(&calendar_two, &next) * sign < 0 {
-                            months -= i64::from(sign);
                             break;
                         }
+                        months += i64::from(sign);
+                        previous = current;
+                        current = next;
+                        last_month_was_constrained = constrained;
                     }
 
-                    let remaining_days = calendar_days_until(&current, &calendar_two);
+                    let mut remaining_days = calendar_days_until(&current, &calendar_two);
+                    let intercalary_last_day_month_match = remaining_days == 0
+                        && last_month_was_constrained
+                        && largest_unit == Unit::Month
+                        && sign < 0
+                        && matches!(
+                            self.kind(),
+                            AnyCalendarKind::Coptic
+                                | AnyCalendarKind::Ethiopian
+                                | AnyCalendarKind::EthiopianAmeteAlem
+                        )
+                        && calendar_one.month_code.to_month_integer() == 13
+                        && calendar_two.month_code.to_month_integer() == 13
+                        && u16::from(calendar_one.day) == self.days_in_month(&calendar_one.iso)
+                        && u16::from(calendar_two.day) == self.days_in_month(&calendar_two.iso);
+                    if months != 0
+                        && remaining_days == 0
+                        && last_month_was_constrained
+                        && !intercalary_last_day_month_match
+                    {
+                        months -= i64::from(sign);
+                        current = previous;
+                        remaining_days = calendar_days_until(&current, &calendar_two);
+                    }
                     DateDuration::new(years, months, 0, remaining_days)?
                 }
             }
@@ -1071,6 +1186,32 @@ fn chinese_or_dangi_month_day_reference(
     ))
 }
 
+fn constrain_month_code_candidates(
+    calendar: &Calendar,
+    month_code: MonthCode,
+    candidates: &mut [MonthCode; 2],
+) -> usize {
+    candidates[0] = month_code;
+    let fallback = match calendar.kind() {
+        AnyCalendarKind::Chinese | AnyCalendarKind::Dangi if month_code.is_leap_month() => {
+            Some(month_code.without_leap())
+        }
+        AnyCalendarKind::Hebrew if month_code.as_tinystr() == tinystr!(4, "M05L") => {
+            Some(MonthCode(tinystr!(4, "M06")))
+        }
+        _ => None,
+    };
+
+    if let Some(fallback) = fallback {
+        if fallback != month_code {
+            candidates[1] = fallback;
+            return 2;
+        }
+    }
+
+    1
+}
+
 impl Calendar {
     pub(crate) fn get_era_info(&self, era_alias: &TinyAsciiStr<19>) -> Option<EraInfo> {
         match self.0 .0.kind() {
@@ -1170,6 +1311,79 @@ impl Calendar {
             AnyCalendarKind::Roc => Some(era::ROC_ERA),
             _ => None,
         }
+    }
+
+    pub(crate) fn era_year_for_arithmetic_year(
+        &self,
+        arithmetic_year: i32,
+    ) -> Option<(TinyAsciiStr<16>, i32)> {
+        let eras: &[era::EraInfo] = match self.0 .0.kind() {
+            AnyCalendarKind::Buddhist => &[era::BUDDHIST_ERA],
+            AnyCalendarKind::Coptic => &[era::COPTIC_ERA],
+            AnyCalendarKind::Ethiopian => &[era::ETHIOPIC_ERA, era::ETHIOPIC_ETHIOAA_ERA],
+            AnyCalendarKind::EthiopianAmeteAlem => &[era::ETHIOAA_ERA],
+            AnyCalendarKind::Gregorian => &[era::GREGORY_ERA, era::GREGORY_INVERSE_ERA],
+            AnyCalendarKind::Hebrew => &[era::HEBREW_ERA],
+            AnyCalendarKind::Indian => &[era::INDIAN_ERA],
+            AnyCalendarKind::HijriSimulatedMecca
+            | AnyCalendarKind::HijriTabularTypeIIFriday
+            | AnyCalendarKind::HijriTabularTypeIIThursday
+            | AnyCalendarKind::HijriUmmAlQura => &[era::ISLAMIC_ERA, era::ISLAMIC_INVERSE_ERA],
+            AnyCalendarKind::Japanese => &[
+                era::JAPANESE_ERA,
+                era::JAPANESE_INVERSE_ERA,
+                era::MEIJI_ERA,
+                era::TAISHO_ERA,
+                era::SHOWA_ERA,
+                era::HEISEI_ERA,
+                era::REIWA_ERA,
+            ],
+            AnyCalendarKind::Persian => &[era::PERSIAN_ERA],
+            AnyCalendarKind::Roc => &[era::ROC_ERA, era::ROC_INVERSE_ERA],
+            _ => &[],
+        };
+
+        eras.iter().find_map(|era| {
+            era.era_year_for_arithmetic_year(arithmetic_year)
+                .map(|year| (era.name, year))
+        })
+    }
+
+    pub(crate) fn era_year_for_arithmetic_date(
+        &self,
+        arithmetic_year: i32,
+        month_code: MonthCode,
+        day: u8,
+    ) -> Option<(TinyAsciiStr<16>, i32)> {
+        if self.kind() != AnyCalendarKind::Japanese {
+            return self.era_year_for_arithmetic_year(arithmetic_year);
+        }
+
+        let month = month_code.to_month_integer();
+        let is_on_or_after = |start_year: i32, start_month: u8, start_day: u8| {
+            (arithmetic_year, month, day) >= (start_year, start_month, start_day)
+        };
+
+        if arithmetic_year >= 1 && !is_on_or_after(1873, 1, 1) {
+            return Some((tinystr!(16, "ce"), arithmetic_year));
+        }
+        if is_on_or_after(2019, 5, 1) {
+            return Some((tinystr!(16, "reiwa"), arithmetic_year - 2019 + 1));
+        }
+        if is_on_or_after(1989, 1, 8) {
+            return Some((tinystr!(16, "heisei"), arithmetic_year - 1989 + 1));
+        }
+        if is_on_or_after(1926, 12, 25) {
+            return Some((tinystr!(16, "showa"), arithmetic_year - 1926 + 1));
+        }
+        if is_on_or_after(1912, 7, 30) {
+            return Some((tinystr!(16, "taisho"), arithmetic_year - 1912 + 1));
+        }
+        if is_on_or_after(1873, 1, 1) {
+            return Some((tinystr!(16, "meiji"), arithmetic_year - 1868 + 1));
+        }
+
+        self.era_year_for_arithmetic_year(arithmetic_year)
     }
 
     pub(crate) fn calendar_has_eras(kind: AnyCalendarKind) -> bool {

@@ -541,7 +541,9 @@ fn run_chunk_subprocess(
     if let Some(filter) = filter {
         cmd.env("TEST262_FILTER", filter);
     }
-    let status = cmd.status().expect("failed to run chunked test262 subprocess");
+    let status = cmd
+        .status()
+        .expect("failed to run chunked test262 subprocess");
     if !status.success() {
         panic!(
             "chunked test262 subprocess failed at offset {} with status {}",
@@ -790,7 +792,11 @@ fn test262_core_profile() {
         let effective_filter = if child_mode || full_mode {
             filter.clone()
         } else {
-            Some(filter.clone().unwrap_or_else(|| DEFAULT_SMOKE_FILTER.to_string()))
+            Some(
+                filter
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_SMOKE_FILTER.to_string()),
+            )
         };
         let effective_max_cases = if child_mode || full_mode {
             max_cases

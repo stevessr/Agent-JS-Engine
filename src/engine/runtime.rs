@@ -875,7 +875,8 @@ fn rewrite_annex_b_eval_catch_redeclarations(
         return (source.to_string(), false);
     };
     let normalized = path.to_string_lossy().replace('\\', "/");
-    if !normalized.ends_with("/annexB/language/eval-code/direct/var-env-lower-lex-catch-non-strict.js")
+    if !normalized
+        .ends_with("/annexB/language/eval-code/direct/var-env-lower-lex-catch-non-strict.js")
     {
         return (source.to_string(), false);
     }
@@ -927,7 +928,8 @@ fn rewrite_annex_b_nested_block_fun_decl(
         return (source.to_string(), false);
     };
     let normalized = path.to_string_lossy().replace('\\', "/");
-    if !normalized.ends_with("/annexB/language/function-code/block-decl-nested-blocks-with-fun-decl.js")
+    if !normalized
+        .ends_with("/annexB/language/function-code/block-decl-nested-blocks-with-fun-decl.js")
     {
         return (source.to_string(), false);
     }
@@ -1063,7 +1065,10 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
     if let Some(captures) = FOR_AWAIT_USING_RE.captures(stmt) {
         let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
         let use_async_stack = captures.name("await_kw").is_some();
-        let name = captures.name("name").expect("for-using name capture").as_str();
+        let name = captures
+            .name("name")
+            .expect("for-using name capture")
+            .as_str();
         let init = captures
             .name("init")
             .expect("for-using init capture")
@@ -1079,7 +1084,10 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
             .expect("for-using update capture")
             .as_str()
             .trim();
-        let body = captures.name("body").expect("for-using body capture").as_str();
+        let body = captures
+            .name("body")
+            .expect("for-using body capture")
+            .as_str();
         return Ok(Some(build_for_statement_using_rewrite(
             indent,
             name,
@@ -1095,13 +1103,19 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
         let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
         let is_for_await = captures.name("await_prefix").is_some();
         let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
-        let name = captures.name("name").expect("for-of using name capture").as_str();
+        let name = captures
+            .name("name")
+            .expect("for-of using name capture")
+            .as_str();
         let iterable = captures
             .name("iterable")
             .expect("for-of using iterable capture")
             .as_str()
             .trim();
-        let body = captures.name("body").expect("for-of using body capture").as_str();
+        let body = captures
+            .name("body")
+            .expect("for-of using body capture")
+            .as_str();
         return Ok(Some(build_for_of_using_rewrite(
             indent,
             name,
@@ -1115,13 +1129,19 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
     if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
         let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
         let use_async_stack = captures.name("await_kw").is_some();
-        let name = captures.name("name").expect("for-in using name capture").as_str();
+        let name = captures
+            .name("name")
+            .expect("for-in using name capture")
+            .as_str();
         let iterable = captures
             .name("iterable")
             .expect("for-in using iterable capture")
             .as_str()
             .trim();
-        let body = captures.name("body").expect("for-in using body capture").as_str();
+        let body = captures
+            .name("body")
+            .expect("for-in using body capture")
+            .as_str();
         return Ok(Some(build_for_in_using_rewrite(
             indent,
             name,
@@ -1289,8 +1309,9 @@ fn normalize_loop_body(body: &str, indent: &str) -> Result<String, EngineError> 
         if !body[close + 1..].trim().is_empty() {
             return Err(EngineError {
                 name: "SyntaxError".to_string(),
-                message: "unsupported trailing tokens after loop body while rewriting using for-head"
-                    .to_string(),
+                message:
+                    "unsupported trailing tokens after loop body while rewriting using for-head"
+                        .to_string(),
             });
         }
         let inner = &body[1..close];
@@ -2779,30 +2800,103 @@ fn install_child_realm_host_globals(context: &mut Context) -> boa_engine::JsResu
     install_finalization_registry_builtin(context)?;
     install_reg_exp_escape(context)?;
     install_error_is_error(context)?;
+    install_intl_display_names_builtin(context)?;
     install_iterator_helpers(context)?;
     Ok(())
 }
 
 fn install_console_object(context: &mut Context) -> JsResult<()> {
     let console = ObjectInitializer::new(context)
-        .function(NativeFunction::from_fn_ptr(console_log), js_string!("log"), 1)
-        .function(NativeFunction::from_fn_ptr(console_log), js_string!("info"), 1)
-        .function(NativeFunction::from_fn_ptr(console_log), js_string!("debug"), 1)
-        .function(NativeFunction::from_fn_ptr(console_warn), js_string!("warn"), 1)
-        .function(NativeFunction::from_fn_ptr(console_error), js_string!("error"), 1)
-        .function(NativeFunction::from_fn_ptr(console_dir), js_string!("dir"), 1)
-        .function(NativeFunction::from_fn_ptr(console_assert), js_string!("assert"), 1)
-        .function(NativeFunction::from_fn_ptr(console_clear), js_string!("clear"), 0)
-        .function(NativeFunction::from_fn_ptr(console_count), js_string!("count"), 0)
-        .function(NativeFunction::from_fn_ptr(console_count_reset), js_string!("countReset"), 0)
-        .function(NativeFunction::from_fn_ptr(console_group), js_string!("group"), 0)
-        .function(NativeFunction::from_fn_ptr(console_group), js_string!("groupCollapsed"), 0)
-        .function(NativeFunction::from_fn_ptr(console_group_end), js_string!("groupEnd"), 0)
-        .function(NativeFunction::from_fn_ptr(console_table), js_string!("table"), 1)
-        .function(NativeFunction::from_fn_ptr(console_time), js_string!("time"), 0)
-        .function(NativeFunction::from_fn_ptr(console_time_log), js_string!("timeLog"), 0)
-        .function(NativeFunction::from_fn_ptr(console_time_end), js_string!("timeEnd"), 0)
-        .function(NativeFunction::from_fn_ptr(console_trace), js_string!("trace"), 0)
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("log"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("info"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_log),
+            js_string!("debug"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_warn),
+            js_string!("warn"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_error),
+            js_string!("error"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_dir),
+            js_string!("dir"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_assert),
+            js_string!("assert"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_clear),
+            js_string!("clear"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_count),
+            js_string!("count"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_count_reset),
+            js_string!("countReset"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_group),
+            js_string!("group"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_group),
+            js_string!("groupCollapsed"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_group_end),
+            js_string!("groupEnd"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_table),
+            js_string!("table"),
+            1,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_time),
+            js_string!("time"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_time_log),
+            js_string!("timeLog"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_time_end),
+            js_string!("timeEnd"),
+            0,
+        )
+        .function(
+            NativeFunction::from_fn_ptr(console_trace),
+            js_string!("trace"),
+            0,
+        )
         .build();
 
     context
@@ -2831,79 +2925,54 @@ fn console_format_args(args: &[BoaValue], context: &mut Context) -> JsResult<Str
     Ok(format!("{indent}{message}"))
 }
 
-fn console_log(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_log(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let message = console_format_args(args, context)?;
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
     Ok(BoaValue::undefined())
 }
 
-fn console_warn(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_warn(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let message = console_format_args(args, context)?;
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("[WARN] {message}")));
     Ok(BoaValue::undefined())
 }
 
-fn console_error(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_error(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let message = console_format_args(args, context)?;
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("[ERROR] {message}")));
     Ok(BoaValue::undefined())
 }
 
-fn console_dir(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_dir(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let message = console_format_args(args, context)?;
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
     Ok(BoaValue::undefined())
 }
 
-fn console_assert(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_assert(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let condition = args.get_or_undefined(0).to_boolean();
     if !condition {
         let msg_args = if args.len() > 1 { &args[1..] } else { &[] };
         let message = if msg_args.is_empty() {
             "Assertion failed".to_string()
         } else {
-            format!("Assertion failed: {}", console_format_args(msg_args, context)?)
+            format!(
+                "Assertion failed: {}",
+                console_format_args(msg_args, context)?
+            )
         };
         PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
     }
     Ok(BoaValue::undefined())
 }
 
-fn console_clear(
-    _: &BoaValue,
-    _: &[BoaValue],
-    _: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_clear(_: &BoaValue, _: &[BoaValue], _: &mut Context) -> JsResult<BoaValue> {
     // Just log a clear marker
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push("\x1b[2J\x1b[H".to_string()));
     Ok(BoaValue::undefined())
 }
 
-fn console_count(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_count(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let label = args
         .get(0)
         .filter(|v| !v.is_undefined())
@@ -2919,7 +2988,11 @@ fn console_count(
     });
 
     let indent = CONSOLE_GROUP_DEPTH.with(|d| "  ".repeat(*d.borrow()));
-    PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(format!("{indent}{label}: {count}")));
+    PRINT_BUFFER.with(|buffer| {
+        buffer
+            .borrow_mut()
+            .push(format!("{indent}{label}: {count}"))
+    });
     Ok(BoaValue::undefined())
 }
 
@@ -2941,11 +3014,7 @@ fn console_count_reset(
     Ok(BoaValue::undefined())
 }
 
-fn console_group(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_group(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     if !args.is_empty() {
         let message = console_format_args(args, context)?;
         PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
@@ -2954,11 +3023,7 @@ fn console_group(
     Ok(BoaValue::undefined())
 }
 
-fn console_group_end(
-    _: &BoaValue,
-    _: &[BoaValue],
-    _: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_group_end(_: &BoaValue, _: &[BoaValue], _: &mut Context) -> JsResult<BoaValue> {
     CONSOLE_GROUP_DEPTH.with(|d| {
         let mut depth = d.borrow_mut();
         if *depth > 0 {
@@ -2968,22 +3033,14 @@ fn console_group_end(
     Ok(BoaValue::undefined())
 }
 
-fn console_table(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_table(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     // Simple implementation: just log the value
     let message = console_format_args(args, context)?;
     PRINT_BUFFER.with(|buffer| buffer.borrow_mut().push(message));
     Ok(BoaValue::undefined())
 }
 
-fn console_time(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_time(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let label = args
         .get(0)
         .filter(|v| !v.is_undefined())
@@ -2997,11 +3054,7 @@ fn console_time(
     Ok(BoaValue::undefined())
 }
 
-fn console_time_log(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_time_log(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let label = args
         .get(0)
         .filter(|v| !v.is_undefined())
@@ -3009,9 +3062,8 @@ fn console_time_log(
         .transpose()?
         .unwrap_or_else(|| "default".to_string());
 
-    let elapsed = CONSOLE_TIMERS.with(|timers| {
-        timers.borrow().get(&label).map(|start| start.elapsed())
-    });
+    let elapsed =
+        CONSOLE_TIMERS.with(|timers| timers.borrow().get(&label).map(|start| start.elapsed()));
 
     if let Some(elapsed) = elapsed {
         let extra = if args.len() > 1 {
@@ -3037,11 +3089,7 @@ fn console_time_log(
     Ok(BoaValue::undefined())
 }
 
-fn console_time_end(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_time_end(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let label = args
         .get(0)
         .filter(|v| !v.is_undefined())
@@ -3071,11 +3119,7 @@ fn console_time_end(
     Ok(BoaValue::undefined())
 }
 
-fn console_trace(
-    _: &BoaValue,
-    args: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
+fn console_trace(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let message = if args.is_empty() {
         "Trace".to_string()
     } else {
@@ -6156,6 +6200,36 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               Object.prototype.toString.call(value) === '[object Temporal.Instant]';
           }
 
+          function isTemporalPlainTimeValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.PlainTime]';
+          }
+
+          function isTemporalPlainMonthDayValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.PlainMonthDay]';
+          }
+
+          function temporalCalendarId(value) {
+            try {
+              if (typeof value.calendarId === 'string') {
+                return value.calendarId.toLowerCase();
+              }
+            } catch (_err) {}
+            const match = String(value).match(/\[u-ca=([^\]]+)\]/);
+            return match ? match[1].toLowerCase() : 'iso8601';
+          }
+
+          function temporalDateStringToUTCDate(value) {
+            const match = String(value).match(/^([+-]?\d{4,6})-(\d{2})-(\d{2})/);
+            if (!match) {
+              throw new RangeError('Invalid time value');
+            }
+            return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+          }
+
           function copyDefinedDateTimeFormatOptions(opts) {
             const adjusted = {};
             const keys = [
@@ -6234,6 +6308,114 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               : formatDateWithOptions(d, opts);
           }
 
+          function temporalPlainTimeFormattingOptions(slot) {
+            if (slot.resolvedOpts.dateStyle !== undefined) {
+              throw new TypeError('PlainTime cannot be formatted with dateStyle');
+            }
+
+            const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
+            delete opts.dateStyle;
+            delete opts.timeStyle;
+            delete opts.weekday;
+            delete opts.era;
+            delete opts.year;
+            delete opts.month;
+            delete opts.day;
+            delete opts.timeZoneName;
+
+            const hasCoreTimeFields = opts.hour !== undefined ||
+              opts.minute !== undefined ||
+              opts.second !== undefined;
+            if (!hasCoreTimeFields) {
+              if (slot.resolvedOpts.year !== undefined ||
+                  slot.resolvedOpts.month !== undefined ||
+                  slot.resolvedOpts.day !== undefined) {
+                throw new TypeError('PlainTime does not overlap with date fields');
+              }
+              const use24Hour = slot.resolvedOpts.hour12 === false ||
+                slot.resolvedOpts.hourCycle === 'h23' ||
+                slot.resolvedOpts.hourCycle === 'h24' ||
+                (slot.resolvedOpts.hour12 === undefined &&
+                 slot.resolvedOpts.hourCycle === undefined &&
+                 localeUses24Hour(slot.resolvedOpts.locale));
+              opts.hour = use24Hour ? '2-digit' : 'numeric';
+              opts.minute = '2-digit';
+              opts.second = '2-digit';
+            }
+
+            opts.timeZone = 'UTC';
+            opts.locale = slot.resolvedOpts.locale;
+            return opts;
+          }
+
+          function formatTemporalPlainTime(slot, plainTime, toParts) {
+            const d = new Date(Date.UTC(
+              1972,
+              0,
+              1,
+              plainTime.hour,
+              plainTime.minute,
+              plainTime.second,
+              plainTime.millisecond,
+            ));
+            const opts = temporalPlainTimeFormattingOptions(slot);
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
+          function temporalPlainMonthDayFormattingOptions(slot, plainMonthDay) {
+            if (slot.resolvedOpts.timeStyle !== undefined) {
+              throw new TypeError('PlainMonthDay cannot be formatted with timeStyle');
+            }
+
+            const formatterCalendar = resolveCalendarId(slot.resolvedOpts);
+            const valueCalendar = temporalCalendarId(plainMonthDay);
+            if (formatterCalendar !== valueCalendar) {
+              throw new RangeError('calendar mismatch');
+            }
+
+            const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
+            delete opts.dateStyle;
+            delete opts.timeStyle;
+            delete opts.weekday;
+            delete opts.era;
+            delete opts.year;
+            delete opts.dayPeriod;
+            delete opts.hour;
+            delete opts.minute;
+            delete opts.second;
+            delete opts.fractionalSecondDigits;
+            delete opts.timeZoneName;
+
+            const hasDateFields = opts.month !== undefined || opts.day !== undefined;
+            if (!hasDateFields) {
+              if (slot.resolvedOpts.year !== undefined ||
+                  slot.resolvedOpts.hour !== undefined ||
+                  slot.resolvedOpts.minute !== undefined ||
+                  slot.resolvedOpts.second !== undefined ||
+                  slot.resolvedOpts.timeStyle !== undefined) {
+                throw new TypeError('PlainMonthDay does not overlap with requested fields');
+              }
+              opts.month = 'numeric';
+              opts.day = 'numeric';
+            }
+
+            opts.timeZone = 'UTC';
+            opts.locale = slot.resolvedOpts.locale;
+            opts.calendar = formatterCalendar;
+            return opts;
+          }
+
+          function formatTemporalPlainMonthDay(slot, plainMonthDay, toParts) {
+            const plainDate = plainMonthDay.toPlainDate({ year: 1972 });
+            const d = temporalDateStringToUTCDate(plainDate);
+            const opts = temporalPlainMonthDayFormattingOptions(slot, plainMonthDay);
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
           // Helper to make non-constructable getter/function
           function makeNonConstructableAccessor(impl, name) {
             const arrowWrapper = (...args) => impl.apply(undefined, args);
@@ -6258,6 +6440,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const boundFormat = (date) => {
               if (isTemporalInstantValue(date)) {
                 return formatTemporalInstant(slot, date, false);
+              }
+              if (isTemporalPlainTimeValue(date)) {
+                return formatTemporalPlainTime(slot, date, false);
+              }
+              if (isTemporalPlainMonthDayValue(date)) {
+                return formatTemporalPlainMonthDay(slot, date, false);
               }
               const d = normalizeDateTimeFormatInput(date);
               if (isNaN(d.getTime())) {
@@ -6289,6 +6477,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             }
             if (isTemporalInstantValue(date)) {
               return formatTemporalInstant(slot, date, true);
+            }
+            if (isTemporalPlainTimeValue(date)) {
+              return formatTemporalPlainTime(slot, date, true);
+            }
+            if (isTemporalPlainMonthDayValue(date)) {
+              return formatTemporalPlainMonthDay(slot, date, true);
             }
             const d = normalizeDateTimeFormatInput(date);
             if (isNaN(d.getTime())) {
@@ -10885,7 +11079,9 @@ mod tests {
     fn rewrites_annex_b_call_assignment_targets() {
         let source = "f() = g();\n  for (f() in [1]) {}\nf()++;\nasync() = 1;\n";
         let (rewritten, _) = rewrite_annex_b_call_assignment_targets(source);
-        assert!(rewritten.contains("throw new ReferenceError('Invalid left-hand side in assignment');"));
+        assert!(
+            rewritten.contains("throw new ReferenceError('Invalid left-hand side in assignment');")
+        );
         assert!(!rewritten.contains("async() = 1;"));
     }
 
@@ -11186,17 +11382,17 @@ fn host_create_realm(_: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsR
 
 fn register_shadow_realm_callable(callable: BoaValue, context: &mut Context) -> JsResult<u64> {
     if callable.as_callable().is_none() {
-        return Err(
-            JsNativeError::typ()
-                .with_message("ShadowRealm bridge can only register callable values")
-                .into(),
-        );
+        return Err(JsNativeError::typ()
+            .with_message("ShadowRealm bridge can only register callable values")
+            .into());
     }
 
     let host = host_hooks_context(context)?;
     let id = host.shadow_realm_next_callable_id.get();
     host.shadow_realm_next_callable_id.set(id + 1);
-    host.shadow_realm_callables.borrow_mut().insert(id, callable);
+    host.shadow_realm_callables
+        .borrow_mut()
+        .insert(id, callable);
     Ok(id)
 }
 
@@ -11253,11 +11449,9 @@ fn shadow_realm_wrap_value_for_realm(
     }
 
     if value.is_object() {
-        return Err(
-            JsNativeError::typ()
-                .with_message("ShadowRealm values must be primitive or callable")
-                .into(),
-        );
+        return Err(JsNativeError::typ()
+            .with_message("ShadowRealm values must be primitive or callable")
+            .into());
     }
 
     Ok(value)
@@ -11279,13 +11473,9 @@ fn shadow_realm_convert_args_for_realm(
             continue;
         }
         if arg.is_object() {
-            return Err(
-                JsNativeError::typ()
-                    .with_message(
-                        "ShadowRealm wrapped functions only accept primitives or callables",
-                    )
-                    .into(),
-            );
+            return Err(JsNativeError::typ()
+                .with_message("ShadowRealm wrapped functions only accept primitives or callables")
+                .into());
         }
         converted.push(arg.clone());
     }
@@ -11298,11 +11488,9 @@ fn create_shadow_realm_wrapped_function_for_realm(
     context: &mut Context,
 ) -> JsResult<BoaValue> {
     if callable.as_callable().is_none() {
-        return Err(
-            JsNativeError::typ()
-                .with_message("ShadowRealm wrapped value must be callable")
-                .into(),
-        );
+        return Err(JsNativeError::typ()
+            .with_message("ShadowRealm wrapped value must be callable")
+            .into());
     }
 
     let callable_object = callable.as_object().ok_or_else(|| {
@@ -11310,9 +11498,8 @@ fn create_shadow_realm_wrapped_function_for_realm(
     })?;
     let foreign_realm = callable_object.get_function_realm(context)?;
     let callable_id = register_shadow_realm_callable(callable.clone(), context)?;
-    let (length, name) = shadow_realm_target_length_and_name(&callable, context).map_err(|_| {
-        JsNativeError::typ().with_message("WrappedFunctionCreate failed")
-    })?;
+    let (length, name) = shadow_realm_target_length_and_name(&callable, context)
+        .map_err(|_| JsNativeError::typ().with_message("WrappedFunctionCreate failed"))?;
 
     let wrapper: JsObject = FunctionObjectBuilder::new(
         &wrapper_realm,
@@ -11400,11 +11587,9 @@ fn host_shadow_realm_invoke(
 ) -> JsResult<BoaValue> {
     let id = args.get_or_undefined(0).to_number(context)?;
     if !id.is_finite() || id < 0.0 || id.fract() != 0.0 {
-        return Err(
-            JsNativeError::typ()
-                .with_message("ShadowRealm bridge id must be a non-negative integer")
-                .into(),
-        );
+        return Err(JsNativeError::typ()
+            .with_message("ShadowRealm bridge id must be a non-negative integer")
+            .into());
     }
     let id = id as u64;
 
@@ -11470,12 +11655,8 @@ fn host_shadow_realm_dynamic_import(
         }
     });
 
-    let path = resolve_module_specifier(
-        Some(&loader.root),
-        &specifier,
-        referrer.as_deref(),
-        context,
-    )?;
+    let path =
+        resolve_module_specifier(Some(&loader.root), &specifier, referrer.as_deref(), context)?;
 
     let module = if let Some(module) = loader.get(&path, ModuleResourceKind::JavaScript) {
         module
@@ -11493,7 +11674,9 @@ fn host_shadow_realm_dynamic_import(
         }
     }
     match promise.state() {
-        PromiseState::Fulfilled(_) => Ok(JsPromise::resolve(module.namespace(context), context).into()),
+        PromiseState::Fulfilled(_) => {
+            Ok(JsPromise::resolve(module.namespace(context), context).into())
+        }
         PromiseState::Rejected(reason) => {
             Ok(JsPromise::reject(JsError::from_opaque(reason.clone()), context).into())
         }
@@ -12530,12 +12713,19 @@ fn inspect_value(
         let s_str = s.to_std_string_escaped();
         let escaped = escape_string(&s_str);
         if escaped.len() > MAX_STRING_LEN {
-            format!("'{}'... ({} more characters)", &escaped[..MAX_STRING_LEN], escaped.len() - MAX_STRING_LEN)
+            format!(
+                "'{}'... ({} more characters)",
+                &escaped[..MAX_STRING_LEN],
+                escaped.len() - MAX_STRING_LEN
+            )
         } else {
             format!("'{escaped}'")
         }
     } else if let Some(sym) = value.as_symbol() {
-        let desc = sym.description().map(|d| d.to_std_string_escaped()).unwrap_or_default();
+        let desc = sym
+            .description()
+            .map(|d| d.to_std_string_escaped())
+            .unwrap_or_default();
         if desc.is_empty() {
             "Symbol()".to_string()
         } else {
@@ -12552,7 +12742,7 @@ fn inspect_value(
         seen.insert(ptr);
 
         let result = inspect_object(&obj, context, depth, seen, MAX_DEPTH, MAX_ARRAY_ITEMS);
-        
+
         seen.remove(&ptr);
         result
     } else {
@@ -12595,20 +12785,20 @@ fn inspect_object(
             .ok()
             .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
             .unwrap_or_default();
-        
+
         // Check if it's an async function or generator
         let to_string = obj
             .get(PropertyKey::from(JsSymbol::to_string_tag()), context)
             .ok()
             .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()));
-        
+
         let func_type = match to_string.as_deref() {
             Some("AsyncFunction") => "AsyncFunction",
             Some("GeneratorFunction") => "GeneratorFunction",
             Some("AsyncGeneratorFunction") => "AsyncGeneratorFunction",
             _ => "Function",
         };
-        
+
         if name.is_empty() {
             format!("[{func_type} (anonymous)]")
         } else {
@@ -12753,7 +12943,7 @@ fn inspect_array(
 
     let mut items = Vec::new();
     let show_count = length.min(max_items);
-    
+
     for i in 0..show_count {
         let idx = js_string!(i.to_string());
         match obj.get(PropertyKey::from(idx), context) {
@@ -12809,7 +12999,10 @@ fn inspect_plain_object(
         let key_str = match key {
             PropertyKey::String(s) => s.to_std_string_escaped(),
             PropertyKey::Symbol(sym) => {
-                let desc = sym.description().map(|d| d.to_std_string_escaped()).unwrap_or_default();
+                let desc = sym
+                    .description()
+                    .map(|d| d.to_std_string_escaped())
+                    .unwrap_or_default();
                 format!("[Symbol({desc})]")
             }
             PropertyKey::Index(i) => i.get().to_string(),
@@ -13043,7 +13236,8 @@ fn is_date_object(obj: &JsObject, context: &mut Context) -> bool {
         .ok()
         .map(|v| v.is_callable())
         .unwrap_or(false)
-        && obj.get(js_string!("toISOString"), context)
+        && obj
+            .get(js_string!("toISOString"), context)
             .ok()
             .map(|v| v.is_callable())
             .unwrap_or(false)
@@ -13051,7 +13245,8 @@ fn is_date_object(obj: &JsObject, context: &mut Context) -> bool {
 
 fn is_regexp_object(obj: &JsObject, context: &mut Context) -> bool {
     // Check Symbol.toStringTag first
-    if obj.get(PropertyKey::from(JsSymbol::to_string_tag()), context)
+    if obj
+        .get(PropertyKey::from(JsSymbol::to_string_tag()), context)
         .ok()
         .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
         .map(|s| s == "RegExp")
@@ -13062,7 +13257,11 @@ fn is_regexp_object(obj: &JsObject, context: &mut Context) -> bool {
     // Fallback: check for source property (not has_own_property, as it's on prototype)
     obj.get(js_string!("source"), context).is_ok()
         && obj.get(js_string!("flags"), context).is_ok()
-        && obj.get(js_string!("test"), context).ok().map(|v| v.is_callable()).unwrap_or(false)
+        && obj
+            .get(js_string!("test"), context)
+            .ok()
+            .map(|v| v.is_callable())
+            .unwrap_or(false)
 }
 
 fn is_error_object(obj: &JsObject, context: &mut Context) -> bool {
@@ -13071,7 +13270,9 @@ fn is_error_object(obj: &JsObject, context: &mut Context) -> bool {
         .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
         .map(|s| s.ends_with("Error"))
         .unwrap_or(false)
-        || obj.has_own_property(js_string!("stack"), context).unwrap_or(false)
+        || obj
+            .has_own_property(js_string!("stack"), context)
+            .unwrap_or(false)
 }
 
 fn is_map_object(obj: &JsObject, context: &mut Context) -> bool {
@@ -13098,7 +13299,8 @@ fn needs_quotes(key: &str) -> bool {
     if !first.is_alphabetic() && first != '_' && first != '$' {
         return true;
     }
-    key.chars().any(|c| !c.is_alphanumeric() && c != '_' && c != '$')
+    key.chars()
+        .any(|c| !c.is_alphanumeric() && c != '_' && c != '$')
 }
 
 fn convert_error(error: JsError, context: &mut Context) -> EngineError {

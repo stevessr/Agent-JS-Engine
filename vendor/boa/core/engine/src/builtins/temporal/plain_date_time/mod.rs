@@ -1730,7 +1730,15 @@ fn to_partial_datetime(
 ) -> JsResult<PartialDateTime> {
     let calendar = get_temporal_calendar_slot_value_with_default(partial_object, context)?;
     let fields = to_date_time_fields(partial_object, &calendar, context)?;
-    if fields.calendar_fields.year.is_none() {
+    let has_no_era = matches!(
+        calendar.kind(),
+        AnyCalendarKind::Iso | AnyCalendarKind::Chinese | AnyCalendarKind::Dangi
+    );
+    let has_year_info = fields.calendar_fields.year.is_some()
+        || (!has_no_era
+            && fields.calendar_fields.era.is_some()
+            && fields.calendar_fields.era_year.is_some());
+    if !has_year_info {
         return Err(JsNativeError::typ().with_message("year is required.").into());
     }
     if fields.calendar_fields.month.is_none() && fields.calendar_fields.month_code.is_none() {

@@ -265,9 +265,9 @@ impl PlainYearMonth {
 
             // c. Let date be BalanceISODate(nextMonth.[[Year]], nextMonth.[[Month]], nextMonth.[[Day]] - 1).
             let date = IsoDate::balance(
-                next_month.year(),
-                i32::from(next_month.month()),
-                i32::from(next_month.day())
+                next_month.iso.year,
+                i32::from(next_month.iso.month),
+                i32::from(next_month.iso.day)
                     .checked_sub(1)
                     .temporal_unwrap()?,
             );
@@ -303,15 +303,18 @@ impl PlainYearMonth {
             );
         }
 
-        let added_date = calendar.date_add(&date, &duration_to_add, overflow)?;
-
-        // 14. Let addedDateFields be ISODateToFields(calendar, addedDate, year-month).
-        let added_date_fields = YearMonthCalendarFields::new()
-            .with_month_code(added_date.month_code())
-            .with_year(added_date.year());
+        let added_date = match calendar.date_add(&date, &duration_to_add, overflow) {
+            Ok(added_date) => added_date,
+            Err(err) if overflow == Overflow::Reject && err.into_message() == "Day out of range." => {
+                calendar.date_add(&date, &duration_to_add, Overflow::Constrain)?
+            }
+            Err(err) => return Err(err),
+        };
 
         // 15. Let isoDate be ? CalendarYearMonthFromFields(calendar, addedDateFields, overflow).
-        let iso_date = calendar.year_month_from_fields(added_date_fields, overflow)?;
+        // Reuse the date -> year-month conversion path so era/eraYear-aware calendars
+        // preserve their canonical year-month representation.
+        let iso_date = added_date.to_plain_year_month()?;
 
         // 16. Return ! CreateTemporalYearMonth(isoDate, calendar).
         Ok(iso_date)
@@ -359,15 +362,19 @@ impl PlainYearMonth {
         // 7. Let thisFields be ISODateToFields(calendar, yearMonth.[[ISODate]], year-month).
         // 8. Set thisFields.[[Day]] to 1.
         // 9. Let thisDate be ? CalendarDateFromFields(calendar, thisFields, constrain).
-        let mut this_iso = self.iso;
-        this_iso.day = 1;
-        IsoDate::new_with_overflow(this_iso.year, this_iso.month, this_iso.day, Overflow::Constrain)?;
+        let this_date = self.calendar().date_from_fields(
+            CalendarFields::from(YearMonthCalendarFields::try_from_year_month(self)?).with_day(1),
+            Overflow::Constrain,
+        )?;
+        let this_iso = this_date.iso;
         // 10. Let otherFields be ISODateToFields(calendar, other.[[ISODate]], year-month).
         // 11. Set otherFields.[[Day]] to 1.
         // 12. Let otherDate be ? CalendarDateFromFields(calendar, otherFields, constrain).
-        let mut other_iso = other.iso;
-        other_iso.day = 1;
-        IsoDate::new_with_overflow(other_iso.year, other_iso.month, other_iso.day, Overflow::Constrain)?;
+        let other_date = self.calendar().date_from_fields(
+            CalendarFields::from(YearMonthCalendarFields::try_from_year_month(other)?).with_day(1),
+            Overflow::Constrain,
+        )?;
+        let other_iso = other_date.iso;
         // 13. Let dateDifference be CalendarDateUntil(calendar, thisDate, otherDate, settings.[[LargestUnit]]).
         //
         // For ISO PlainYearMonth, compute the year/month difference directly in
