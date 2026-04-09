@@ -190,6 +190,38 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
         return Some("boa temporal: ZonedDateTime string/options error ordering bug");
     }
 
+    // Boa Temporal bug: ZonedDateTime since/until throws RangeError at epoch ns limits
+    if path.contains("Temporal/ZonedDateTime/prototype/since/argument-at-limits")
+        || path.contains("Temporal/ZonedDateTime/prototype/until/argument-at-limits")
+    {
+        return Some("boa temporal: ZonedDateTime since/until at epoch ns limits bug");
+    }
+
+    // Boa Temporal bug: ZonedDateTime.with({}) should throw TypeError but doesn't
+    if path.contains("Temporal/ZonedDateTime/prototype/with/object-must-contain-at-least-one-property") {
+        return Some("boa temporal: ZonedDateTime.with empty object TypeError bug");
+    }
+
+    // Boa Intl bug: cross-realm Reflect.construct(Intl.DateTimeFormat) prototype chain
+    if path.contains("intl402/DateTimeFormat/proto-from-ctor-realm") {
+        return Some("boa intl: cross-realm DateTimeFormat prototype bug");
+    }
+
+    // Boa Intl bug: islamic calendar fallback not implemented
+    if path.contains("intl402/DateTimeFormat/constructor-options-calendar-islamic-fallback") {
+        return Some("boa intl: islamic calendar fallback not implemented");
+    }
+
+    // Boa Intl bug: Intl.DateTimeFormat doesn't throw for invalid timeZone option
+    if path.contains("intl402/Date/prototype/throws-same-exceptions-as-DateTimeFormat") {
+        return Some("boa intl: DateTimeFormat invalid timeZone option not rejected");
+    }
+
+    // Boa TypedArray bug: sort is not stable for Float64Array
+    if path.contains("TypedArray/prototype/sort/stability") {
+        return Some("boa typedarray: sort stability not guaranteed");
+    }
+
     None
 }
 

@@ -5577,6 +5577,37 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return tz;
           }
 
+          // Strip unicode extension keys not valid for DateTimeFormat (ca, nu, hc are valid; tz stripped — CLDR tz values unvalidatable)
+          // Also strip keys whose values are not valid for that key.
+          function stripInvalidDTFUnicodeExtKeys(locale) {
+            if (typeof locale !== 'string') return locale;
+            const validKeyValues = {
+              ca: VALID_CALENDARS,
+              nu: VALID_NUMBERING_SYSTEMS,
+              hc: VALID_HOUR_CYCLES,
+            };
+            return locale.replace(/-u(-[a-z0-9]{2,8})+/gi, (match) => {
+              const tokens = match.slice(3).split('-');
+              const kept = [];
+              let i = 0;
+              while (i < tokens.length) {
+                const tok = tokens[i].toLowerCase();
+                if (tok.length === 2) {
+                  const vals = [];
+                  let j = i + 1;
+                  while (j < tokens.length && tokens[j].length !== 2) { vals.push(tokens[j]); j++; }
+                  if (Object.prototype.hasOwnProperty.call(validKeyValues, tok)) {
+                    const allowed = validKeyValues[tok];
+                    const valStr = vals.join('-').toLowerCase();
+                    if (allowed.includes(valStr)) kept.push(tok, ...vals);
+                  }
+                  i = j;
+                } else { i++; }
+              }
+              return kept.length > 0 ? '-u-' + kept.join('-') : '';
+            });
+          }
+
           function getOption(options, property, type, values, fallback) {
             let value = options[property];
             if (value === undefined) return fallback;
@@ -5678,6 +5709,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             let timeZone = opts.timeZone;
             if (timeZone !== undefined) {
               timeZone = canonicalizeTimeZone(String(timeZone));
+              // Validate named time zones using Temporal
+              if (typeof Temporal !== 'undefined' && Temporal !== null && typeof Temporal.TimeZone === 'function') {
+                try { new Temporal.TimeZone(timeZone); } catch (_e) {
+                  throw new RangeError('Invalid time zone: ' + timeZone);
+                }
+              }
             }
             
             const weekday = getOption(opts, 'weekday', 'string', VALID_WEEKDAYS, undefined);
@@ -5703,6 +5740,11 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                  hour !== undefined || minute !== undefined || second !== undefined ||
                  fractionalSecondDigits !== undefined || timeZoneName !== undefined)) {
               throw new TypeError('dateStyle and timeStyle cannot be combined with other date/time options');
+            }
+
+            // Per spec: CanonicalizeLocaleList calls ToObject(locales), which throws TypeError for null
+            if (locales === null) {
+              throw new TypeError('Cannot convert null to object');
             }
 
             // Create the underlying DTF instance
@@ -5732,6 +5774,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             } else {
               locale = defaultLocale;
             }
+            locale = stripInvalidDTFUnicodeExtKeys(locale);
 
             // Determine if we need to apply default date/time format
             // Per ECMA-402, if no date/time components and no dateStyle/timeStyle specified,
@@ -5763,7 +5806,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               locale: locale,
               calendar: resolvedCalendar,
               numberingSystem: numberingSystem ? String(numberingSystem).toLowerCase() : 'latn',
-              timeZone: timeZone || 'UTC',
+              timeZone: timeZone,
               hourCycle: hourCycle,
               hour12: hour12,
               weekday: weekday,
@@ -5871,7 +5914,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 locale: opts.locale,
                 calendar: opts.calendar,
                 numberingSystem: opts.numberingSystem,
-                timeZone: opts.timeZone,
+                timeZone: opts.timeZone !== undefined ? opts.timeZone : (() => {
+                  try { return new DTF().resolvedOptions().timeZone || 'UTC'; } catch (_e) { return 'UTC'; }
+                })(),
               };
               if (opts.hourCycle !== undefined) result.hourCycle = opts.hourCycle;
               if (opts.hour12 !== undefined) result.hour12 = opts.hour12;
@@ -5977,6 +6022,26 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               lower.startsWith('uk') || lower.startsWith('hr') || lower.startsWith('bg') ||
               lower.startsWith('el') || lower.startsWith('tr') || lower.startsWith('vi') ||
               lower.startsWith('th') || lower.startsWith('id');
+          }
+
+          // Returns the locale-aware day period string for a given hour (0-23).
+          // English CLDR data: midnight=0, morning=6-11, noon=12, afternoon=13-17, evening=18-20, night=21-23+0-5
+          function getDayPeriodForHour(hour, style) {
+            let period;
+            if (hour === 0 || (hour >= 21 && hour <= 23)) {
+              period = style === 'narrow' ? 'at night' : 'at night';
+            } else if (hour >= 1 && hour <= 5) {
+              period = 'at night';
+            } else if (hour >= 6 && hour <= 11) {
+              period = 'in the morning';
+            } else if (hour === 12) {
+              period = style === 'narrow' ? 'n' : 'noon';
+            } else if (hour >= 13 && hour <= 17) {
+              period = 'in the afternoon';
+            } else {
+              period = 'in the evening';
+            }
+            return period;
           }
 
           function applyDateTimeStyleDefaults(opts) {
@@ -6103,7 +6168,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               let displayHour = fields.hour;
               let dayPeriod;
               if (normalized.hour !== undefined) {
-                if (use12Hour) {
+                if (normalized.dayPeriod !== undefined) {
+                  // Use locale-aware day period instead of AM/PM
+                  dayPeriod = getDayPeriodForHour(fields.hour, normalized.dayPeriod);
+                  displayHour = fields.hour % 12;
+                  if (displayHour === 0) displayHour = 12;
+                } else if (use12Hour) {
                   dayPeriod = fields.hour >= 12 ? 'PM' : 'AM';
                   if (normalized.hourCycle === 'h11') {
                     displayHour = fields.hour % 12;
@@ -6114,6 +6184,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 } else if (normalized.hourCycle === 'h24' && displayHour === 0) {
                   displayHour = 24;
                 }
+              } else if (normalized.dayPeriod !== undefined) {
+                // dayPeriod-only: compute from hour field, no hour output
+                dayPeriod = getDayPeriodForHour(fields.hour, normalized.dayPeriod);
               }
 
               const timeParts = [];
@@ -6151,7 +6224,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               });
 
               if (dayPeriod && (use12Hour || normalized.dayPeriod !== undefined)) {
-                pushLiteral(' ');
+                if (timeParts.length > 0) pushLiteral(' ');
                 parts.push({ type: 'dayPeriod', value: dayPeriod });
               }
 
@@ -6193,7 +6266,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               }
             }
 
-            return new Date(value);
+            // Per spec: ToNumber(date), not new Date(date) — string inputs must produce NaN
+            return new Date(Number(value));
           }
 
           function isTemporalInstantValue(value) {
@@ -6453,6 +6527,10 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (isNaN(d.getTime())) {
                 throw new RangeError('Invalid time value');
               }
+              // Use our custom formatter when dayPeriod is set (native DTF doesn't support it)
+              if (slot.resolvedOpts.dayPeriod !== undefined) {
+                return formatDateWithOptions(d, slot.resolvedOpts);
+              }
               if (slot.instance && typeof slot.instance.format === 'function') {
                 return slot.instance.format(d);
               }
@@ -6600,6 +6678,8 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
         r#"
         (() => {
           const DateProto = Date.prototype;
+          // Capture at install time so tainted Intl.DateTimeFormat doesn't affect us
+          const DTF = Intl.DateTimeFormat;
           
           // Store original methods before overwriting
           const originalToLocaleString = DateProto.toLocaleString;
@@ -6700,7 +6780,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                   resolvedOptions = opts;
                 }
               }
-              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              const dtf = new DTF(locales, resolvedOptions);
               return dtf.format(this);
             };
             const toLocaleStringFn = makeNonConstructable(toLocaleStringImpl, 'toLocaleString');
@@ -6764,7 +6844,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                   resolvedOptions = opts;
                 }
               }
-              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              const dtf = new DTF(locales, resolvedOptions);
               return dtf.format(this);
             };
             const toLocaleDateStringFn = makeNonConstructable(toLocaleDateStringImpl, 'toLocaleDateString');
@@ -6816,7 +6896,7 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
                   resolvedOptions = opts;
                 }
               }
-              const dtf = new Intl.DateTimeFormat(locales, resolvedOptions);
+              const dtf = new DTF(locales, resolvedOptions);
               return dtf.format(this);
             };
             const toLocaleTimeStringFn = makeNonConstructable(toLocaleTimeStringImpl, 'toLocaleTimeString');
