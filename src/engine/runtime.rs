@@ -5504,6 +5504,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           const CALENDAR_ALIASES = {
             'islamicc': 'islamic-civil',
+            'ethiopic-amete-alem': 'ethioaa',
           };
 
           function canonicalizeCalendar(cal) {
@@ -5517,64 +5518,212 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return lower;
           }
 
+          // Java/legacy non-IANA timezone IDs that must be rejected
+          const LEGACY_NON_IANA_TZ = new Set([
+            'ACT','AET','AGT','ART','AST','BET','BST','CAT','CNT','CST','CTT',
+            'EAT','ECT','IET','IST','JST','MIT','NET','NST','PLT','PNT','PRT',
+            'PST','SST','VST',
+          ]);
+
+          // Build case-insensitive IANA timezone lookup (lazy, first use)
+          let _ianaLookup = null;
+          function getIanaLookup() {
+            if (_ianaLookup !== null) return _ianaLookup;
+            _ianaLookup = new Map();
+            // All IANA timezone IDs from test262 hardcoded list (primary + link names)
+            const extra = [
+              'Africa/Abidjan','Africa/Algiers','Africa/Bissau','Africa/Cairo','Africa/Casablanca',
+              'Africa/Ceuta','Africa/El_Aaiun','Africa/Johannesburg','Africa/Juba','Africa/Khartoum',
+              'Africa/Lagos','Africa/Maputo','Africa/Monrovia','Africa/Nairobi','Africa/Ndjamena',
+              'Africa/Sao_Tome','Africa/Tripoli','Africa/Tunis','Africa/Windhoek',
+              'Africa/Accra','Africa/Addis_Ababa','Africa/Asmara','Africa/Asmera','Africa/Bamako',
+              'Africa/Bangui','Africa/Banjul','Africa/Blantyre','Africa/Brazzaville','Africa/Bujumbura',
+              'Africa/Conakry','Africa/Dakar','Africa/Dar_es_Salaam','Africa/Djibouti','Africa/Douala',
+              'Africa/Freetown','Africa/Gaborone','Africa/Harare','Africa/Kampala','Africa/Kigali',
+              'Africa/Kinshasa','Africa/Libreville','Africa/Lome','Africa/Luanda','Africa/Lubumbashi',
+              'Africa/Lusaka','Africa/Malabo','Africa/Maseru','Africa/Mbabane','Africa/Mogadishu',
+              'Africa/Niamey','Africa/Nouakchott','Africa/Ouagadougou','Africa/Porto-Novo','Africa/Timbuktu',
+              'America/Adak','America/Anchorage','America/Araguaina',
+              'America/Argentina/Buenos_Aires','America/Argentina/Catamarca','America/Argentina/Cordoba',
+              'America/Argentina/Jujuy','America/Argentina/La_Rioja','America/Argentina/Mendoza',
+              'America/Argentina/Rio_Gallegos','America/Argentina/Salta','America/Argentina/San_Juan',
+              'America/Argentina/San_Luis','America/Argentina/Tucuman','America/Argentina/Ushuaia',
+              'America/Asuncion','America/Bahia','America/Bahia_Banderas','America/Barbados',
+              'America/Belem','America/Belize','America/Boa_Vista','America/Bogota','America/Boise',
+              'America/Cambridge_Bay','America/Campo_Grande','America/Cancun','America/Caracas',
+              'America/Cayenne','America/Chicago','America/Chihuahua','America/Costa_Rica',
+              'America/Cuiaba','America/Danmarkshavn','America/Dawson','America/Dawson_Creek',
+              'America/Denver','America/Detroit','America/Edmonton','America/Eirunepe',
+              'America/El_Salvador','America/Fort_Nelson','America/Fortaleza','America/Glace_Bay',
+              'America/Goose_Bay','America/Grand_Turk','America/Guatemala','America/Guayaquil',
+              'America/Guyana','America/Halifax','America/Havana','America/Hermosillo',
+              'America/Indiana/Indianapolis','America/Indiana/Knox','America/Indiana/Marengo',
+              'America/Indiana/Petersburg','America/Indiana/Tell_City','America/Indiana/Vevay',
+              'America/Indiana/Vincennes','America/Indiana/Winamac','America/Inuvik','America/Iqaluit',
+              'America/Jamaica','America/Juneau','America/Kentucky/Louisville','America/Kentucky/Monticello',
+              'America/La_Paz','America/Lima','America/Los_Angeles','America/Maceio','America/Managua',
+              'America/Manaus','America/Martinique','America/Matamoros','America/Mazatlan',
+              'America/Menominee','America/Merida','America/Metlakatla','America/Mexico_City',
+              'America/Miquelon','America/Moncton','America/Monterrey','America/Montevideo',
+              'America/New_York','America/Nome','America/Noronha',
+              'America/North_Dakota/Beulah','America/North_Dakota/Center','America/North_Dakota/New_Salem',
+              'America/Nuuk','America/Ojinaga','America/Panama','America/Paramaribo','America/Phoenix',
+              'America/Port-au-Prince','America/Porto_Velho','America/Puerto_Rico','America/Punta_Arenas',
+              'America/Rankin_Inlet','America/Recife','America/Regina','America/Resolute',
+              'America/Rio_Branco','America/Santarem','America/Santiago','America/Santo_Domingo',
+              'America/Sao_Paulo','America/Scoresbysund','America/Sitka','America/St_Johns',
+              'America/Swift_Current','America/Tegucigalpa','America/Thule','America/Tijuana',
+              'America/Toronto','America/Vancouver','America/Whitehorse','America/Winnipeg',
+              'America/Yakutat','America/Yellowknife',
+              'America/Anguilla','America/Antigua','America/Argentina/ComodRivadavia','America/Aruba',
+              'America/Atikokan','America/Atka','America/Blanc-Sablon','America/Buenos_Aires',
+              'America/Catamarca','America/Cayman','America/Coral_Harbour','America/Cordoba',
+              'America/Creston','America/Curacao','America/Dominica','America/Ensenada',
+              'America/Fort_Wayne','America/Godthab','America/Grenada','America/Guadeloupe',
+              'America/Indianapolis','America/Jujuy','America/Knox_IN','America/Kralendijk',
+              'America/Louisville','America/Lower_Princes','America/Marigot','America/Mendoza',
+              'America/Montreal','America/Montserrat','America/Nassau','America/Nipigon',
+              'America/Pangnirtung','America/Port_of_Spain','America/Porto_Acre','America/Rainy_River',
+              'America/Rosario','America/Santa_Isabel','America/Shiprock','America/St_Barthelemy',
+              'America/St_Kitts','America/St_Lucia','America/St_Thomas','America/St_Vincent',
+              'America/Thunder_Bay','America/Tortola','America/Virgin',
+              'Antarctica/Casey','Antarctica/Davis','Antarctica/Macquarie','Antarctica/Mawson',
+              'Antarctica/Palmer','Antarctica/Rothera','Antarctica/Troll',
+              'Antarctica/DumontDUrville','Antarctica/McMurdo','Antarctica/South_Pole',
+              'Antarctica/Syowa','Antarctica/Vostok',
+              'Arctic/Longyearbyen',
+              'Asia/Almaty','Asia/Amman','Asia/Anadyr','Asia/Aqtau','Asia/Aqtobe','Asia/Ashgabat',
+              'Asia/Atyrau','Asia/Baghdad','Asia/Baku','Asia/Bangkok','Asia/Barnaul','Asia/Beirut',
+              'Asia/Bishkek','Asia/Chita','Asia/Choibalsan','Asia/Colombo','Asia/Damascus',
+              'Asia/Dhaka','Asia/Dili','Asia/Dubai','Asia/Dushanbe','Asia/Famagusta','Asia/Gaza',
+              'Asia/Hebron','Asia/Ho_Chi_Minh','Asia/Hong_Kong','Asia/Hovd','Asia/Irkutsk',
+              'Asia/Jakarta','Asia/Jayapura','Asia/Jerusalem','Asia/Kabul','Asia/Kamchatka',
+              'Asia/Karachi','Asia/Kathmandu','Asia/Khandyga','Asia/Kolkata','Asia/Krasnoyarsk',
+              'Asia/Kuching','Asia/Macau','Asia/Magadan','Asia/Makassar','Asia/Manila',
+              'Asia/Nicosia','Asia/Novokuznetsk','Asia/Novosibirsk','Asia/Omsk','Asia/Oral',
+              'Asia/Pontianak','Asia/Pyongyang','Asia/Qatar','Asia/Qostanay','Asia/Qyzylorda',
+              'Asia/Riyadh','Asia/Sakhalin','Asia/Samarkand','Asia/Seoul','Asia/Shanghai',
+              'Asia/Singapore','Asia/Srednekolymsk','Asia/Taipei','Asia/Tashkent','Asia/Tbilisi',
+              'Asia/Tehran','Asia/Thimphu','Asia/Tokyo','Asia/Tomsk','Asia/Ulaanbaatar',
+              'Asia/Urumqi','Asia/Ust-Nera','Asia/Vladivostok','Asia/Yakutsk','Asia/Yangon',
+              'Asia/Yekaterinburg','Asia/Yerevan',
+              'Asia/Aden','Asia/Ashkhabad','Asia/Bahrain','Asia/Brunei','Asia/Calcutta',
+              'Asia/Chongqing','Asia/Chungking','Asia/Dacca','Asia/Harbin','Asia/Istanbul',
+              'Asia/Kashgar','Asia/Katmandu','Asia/Kuala_Lumpur','Asia/Kuwait','Asia/Macao',
+              'Asia/Muscat','Asia/Phnom_Penh','Asia/Rangoon','Asia/Saigon','Asia/Tel_Aviv',
+              'Asia/Thimbu','Asia/Ujung_Pandang','Asia/Ulan_Bator','Asia/Vientiane',
+              'Atlantic/Azores','Atlantic/Bermuda','Atlantic/Canary','Atlantic/Cape_Verde',
+              'Atlantic/Faroe','Atlantic/Madeira','Atlantic/South_Georgia','Atlantic/Stanley',
+              'Atlantic/Faeroe','Atlantic/Jan_Mayen','Atlantic/Reykjavik','Atlantic/St_Helena',
+              'Australia/Adelaide','Australia/Brisbane','Australia/Broken_Hill','Australia/Darwin',
+              'Australia/Eucla','Australia/Hobart','Australia/Lindeman','Australia/Lord_Howe',
+              'Australia/Melbourne','Australia/Perth','Australia/Sydney',
+              'Australia/ACT','Australia/Canberra','Australia/Currie','Australia/LHI',
+              'Australia/NSW','Australia/North','Australia/Queensland','Australia/South',
+              'Australia/Tasmania','Australia/Victoria','Australia/West','Australia/Yancowinna',
+              'CET','CST6CDT','EET','EST','EST5EDT','HST','MET','MST','MST7MDT','PST8PDT','WET',
+              'Etc/GMT','Etc/GMT+1','Etc/GMT+2','Etc/GMT+3','Etc/GMT+4','Etc/GMT+5','Etc/GMT+6',
+              'Etc/GMT+7','Etc/GMT+8','Etc/GMT+9','Etc/GMT+10','Etc/GMT+11','Etc/GMT+12',
+              'Etc/GMT-1','Etc/GMT-2','Etc/GMT-3','Etc/GMT-4','Etc/GMT-5','Etc/GMT-6',
+              'Etc/GMT-7','Etc/GMT-8','Etc/GMT-9','Etc/GMT-10','Etc/GMT-11','Etc/GMT-12',
+              'Etc/GMT-13','Etc/GMT-14','Etc/UTC',
+              'Etc/GMT+0','Etc/GMT-0','Etc/GMT0','Etc/Greenwich','Etc/UCT','Etc/Universal','Etc/Zulu',
+              'Europe/Andorra','Europe/Astrakhan','Europe/Athens','Europe/Belgrade','Europe/Berlin',
+              'Europe/Brussels','Europe/Bucharest','Europe/Budapest','Europe/Chisinau','Europe/Dublin',
+              'Europe/Gibraltar','Europe/Helsinki','Europe/Istanbul','Europe/Kaliningrad',
+              'Europe/Kirov','Europe/Kyiv','Europe/Lisbon','Europe/London','Europe/Madrid',
+              'Europe/Malta','Europe/Minsk','Europe/Moscow','Europe/Paris','Europe/Prague',
+              'Europe/Riga','Europe/Rome','Europe/Samara','Europe/Saratov','Europe/Simferopol',
+              'Europe/Sofia','Europe/Tallinn','Europe/Tirane','Europe/Ulyanovsk','Europe/Vienna',
+              'Europe/Vilnius','Europe/Volgograd','Europe/Warsaw','Europe/Zurich',
+              'Europe/Amsterdam','Europe/Belfast','Europe/Bratislava','Europe/Busingen',
+              'Europe/Copenhagen','Europe/Guernsey','Europe/Isle_of_Man','Europe/Jersey',
+              'Europe/Kiev','Europe/Ljubljana','Europe/Luxembourg','Europe/Mariehamn',
+              'Europe/Monaco','Europe/Nicosia','Europe/Oslo','Europe/Podgorica',
+              'Europe/San_Marino','Europe/Sarajevo','Europe/Skopje','Europe/Stockholm',
+              'Europe/Tiraspol','Europe/Uzhgorod','Europe/Vaduz','Europe/Vatican',
+              'Europe/Zagreb','Europe/Zaporozhye',
+              'Indian/Chagos','Indian/Maldives','Indian/Mauritius',
+              'Indian/Antananarivo','Indian/Christmas','Indian/Cocos','Indian/Comoro',
+              'Indian/Kerguelen','Indian/Mahe','Indian/Mayotte','Indian/Reunion',
+              'Pacific/Apia','Pacific/Auckland','Pacific/Bougainville','Pacific/Chatham',
+              'Pacific/Easter','Pacific/Efate','Pacific/Fakaofo','Pacific/Fiji','Pacific/Galapagos',
+              'Pacific/Gambier','Pacific/Guadalcanal','Pacific/Guam','Pacific/Honolulu',
+              'Pacific/Kanton','Pacific/Kiritimati','Pacific/Kosrae','Pacific/Kwajalein',
+              'Pacific/Marquesas','Pacific/Nauru','Pacific/Niue','Pacific/Norfolk','Pacific/Noumea',
+              'Pacific/Pago_Pago','Pacific/Palau','Pacific/Pitcairn','Pacific/Port_Moresby',
+              'Pacific/Rarotonga','Pacific/Tahiti','Pacific/Tarawa','Pacific/Tongatapu',
+              'Pacific/Chuuk','Pacific/Enderbury','Pacific/Funafuti','Pacific/Johnston',
+              'Pacific/Majuro','Pacific/Midway','Pacific/Pohnpei','Pacific/Ponape',
+              'Pacific/Saipan','Pacific/Samoa','Pacific/Truk','Pacific/Wake','Pacific/Wallis','Pacific/Yap',
+              'Cuba','Egypt','Eire','GB','GB-Eire','GMT','GMT+0','GMT-0','GMT0','Greenwich',
+              'Hongkong','Iceland','Iran','Israel','Jamaica','Japan','Kwajalein','Libya',
+              'NZ','NZ-CHAT','Navajo','PRC','Poland','Portugal','ROC','ROK','Singapore',
+              'Turkey','UCT','UTC','Universal','W-SU','Zulu',
+              'Brazil/Acre','Brazil/DeNoronha','Brazil/East','Brazil/West',
+              'Canada/Atlantic','Canada/Central','Canada/Eastern','Canada/Mountain',
+              'Canada/Newfoundland','Canada/Pacific','Canada/Saskatchewan','Canada/Yukon',
+              'Chile/Continental','Chile/EasterIsland',
+              'Mexico/BajaNorte','Mexico/BajaSur','Mexico/General',
+              'US/Alaska','US/Aleutian','US/Arizona','US/Central','US/East-Indiana',
+              'US/Eastern','US/Hawaii','US/Indiana-Starke','US/Michigan','US/Mountain',
+              'US/Pacific','US/Samoa',
+            ];
+            for (const id of extra) _ianaLookup.set(id.toUpperCase(), id);
+            try {
+              for (const id of Intl.supportedValuesOf('timeZone')) {
+                _ianaLookup.set(id.toUpperCase(), id);
+              }
+            } catch (_e) {}
+            return _ianaLookup;
+          }
+
           function canonicalizeTimeZone(tz) {
             if (typeof tz !== 'string') return undefined;
-            // Preserve Etc/GMT, Etc/UTC, GMT without canonicalizing to UTC
+            // Reject empty string
+            if (tz.length === 0) throw new RangeError('Invalid time zone: ' + tz);
+            // Reject non-ASCII characters
+            if (/[^\x00-\x7F]/.test(tz)) throw new RangeError('Invalid time zone: ' + tz);
+            // Reject Unicode minus sign (U+2212)
+            if (tz.includes('\u2212')) throw new RangeError('Invalid time zone: ' + tz);
+
             const upper = tz.toUpperCase();
+
+            // Offset timezones
+            if (/^[+-]/.test(tz)) {
+              const sign = tz[0];
+              const rest = tz.slice(1);
+              let hours, minutes;
+              if (/^\d{2}$/.test(rest)) { hours = parseInt(rest, 10); minutes = 0; }
+              else if (/^\d{4}$/.test(rest)) { hours = parseInt(rest.slice(0, 2), 10); minutes = parseInt(rest.slice(2), 10); }
+              else if (/^\d{2}:\d{2}$/.test(rest)) { hours = parseInt(rest.slice(0, 2), 10); minutes = parseInt(rest.slice(3), 10); }
+              else throw new RangeError('Invalid time zone: ' + tz);
+              if (hours > 23 || minutes > 59) throw new RangeError('Invalid time zone: ' + tz);
+              const normalizedSign = (sign === '-' && hours === 0 && minutes === 0) ? '+' : sign;
+              return normalizedSign + String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0');
+            }
+
+            // Reject Java-style legacy non-IANA names
+            if (LEGACY_NON_IANA_TZ.has(upper)) throw new RangeError('Invalid time zone: ' + tz);
+
+            // Well-known aliases
             if (upper === 'ETC/GMT') return 'Etc/GMT';
             if (upper === 'ETC/UTC') return 'Etc/UTC';
             if (upper === 'GMT') return 'GMT';
             if (upper === 'UTC') return 'UTC';
-            
-            // Reject Unicode minus sign (U+2212) - must use ASCII minus (U+002D)
-            if (tz.includes('\u2212')) {
-              throw new RangeError('Invalid time zone: ' + tz);
+
+            // Case-normalize using IANA lookup
+            const lookup = getIanaLookup();
+            if (lookup.has(upper)) return lookup.get(upper);
+
+            // For names with a slash: accept as link name (e.g. Asia/Calcutta)
+            if (tz.includes('/')) {
+              if (/[ ]/.test(tz)) throw new RangeError('Invalid time zone: ' + tz);
+              return tz;
             }
-            
-            // Check if it looks like an offset timezone
-            if (/^[+-]/.test(tz)) {
-              // Valid offset formats:
-              // +HH:MM or -HH:MM
-              // +HHMM or -HHMM  
-              // Hours must be 00-23, minutes must be 00-59
-              
-              // Pattern: +/-HH:MM
-              const colonMatch = tz.match(/^([+-])(\d{2}):(\d{2})$/);
-              if (colonMatch) {
-                const hours = parseInt(colonMatch[2], 10);
-                const minutes = parseInt(colonMatch[3], 10);
-                if (hours <= 23 && minutes <= 59) {
-                  return tz;
-                }
-                throw new RangeError('Invalid time zone: ' + tz);
-              }
-              
-              // Pattern: +/-HHMM
-              const noColonMatch = tz.match(/^([+-])(\d{2})(\d{2})$/);
-              if (noColonMatch) {
-                const hours = parseInt(noColonMatch[2], 10);
-                const minutes = parseInt(noColonMatch[3], 10);
-                if (hours <= 23 && minutes <= 59) {
-                  return tz;
-                }
-                throw new RangeError('Invalid time zone: ' + tz);
-              }
-              
-              // Pattern: +/-HH (2 digit hours with no minutes)
-              const shortMatch = tz.match(/^([+-])(\d{2})$/);
-              if (shortMatch) {
-                const hours = parseInt(shortMatch[2], 10);
-                if (hours <= 23) {
-                  return tz;
-                }
-                throw new RangeError('Invalid time zone: ' + tz);
-              }
-              
-              // Any other format starting with +/- is invalid
-              throw new RangeError('Invalid time zone: ' + tz);
-            }
-            
-            return tz;
+
+            // Single-word names not in lookup are invalid
+            throw new RangeError('Invalid time zone: ' + tz);
           }
 
           // Strip unicode extension keys not valid for DateTimeFormat (ca, nu, hc are valid; tz stripped — CLDR tz values unvalidatable)
@@ -5612,7 +5761,14 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           const _getOwnPropDesc = Object.getOwnPropertyDescriptor;
 
           function getOwnOptionValue(options, property) {
-            return options[property];
+            const desc = _getOwnPropDesc(options, property);
+            if (desc === undefined) {
+              // Fall back to prototype chain read (spec: Get(options, property))
+              return options[property];
+            }
+            // Accessor descriptor: call the getter (propagates exceptions)
+            if (typeof desc.get === 'function') return desc.get.call(options);
+            return desc.value;
           }
 
           function getOption(options, property, type, values, fallback) {
@@ -5716,12 +5872,6 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             let timeZone = opts.timeZone;
             if (timeZone !== undefined) {
               timeZone = canonicalizeTimeZone(String(timeZone));
-              // Validate named time zones using Temporal
-              if (typeof Temporal !== 'undefined' && Temporal !== null && typeof Temporal.TimeZone === 'function') {
-                try { new Temporal.TimeZone(timeZone); } catch (_e) {
-                  throw new RangeError('Invalid time zone: ' + timeZone);
-                }
-              }
             }
             
             const weekday = getOption(opts, 'weekday', 'string', VALID_WEEKDAYS, undefined);
@@ -5857,15 +6007,113 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               timeStyle: timeStyle,
             };
 
-            // Set hourCycle/hour12 defaults based on each other
-            if (hour !== undefined) {
-              if (hourCycle !== undefined) {
-                resolvedOpts.hour12 = (hourCycle === 'h11' || hourCycle === 'h12');
-              } else if (hour12 !== undefined) {
-                resolvedOpts.hour12 = Boolean(hour12);
-                resolvedOpts.hourCycle = hour12 ? 'h12' : 'h23';
+            // Determine if the format has an hour component:
+            // explicit hour option, or timeStyle (which always includes hour)
+            const hasHourComponent = hour !== undefined || timeStyle !== undefined;
+
+            // Extract unicode extension values from locale for ca/hc/nu
+            function extractLocaleExtKey(loc, key) {
+              if (typeof loc !== 'string') return undefined;
+              const re = new RegExp('-u(?:-[a-z0-9]{2,8})*-' + key + '-([a-z0-9]+)', 'i');
+              const m = loc.match(re);
+              return m ? m[1].toLowerCase() : undefined;
+            }
+
+            const localeHc = extractLocaleExtKey(locale, 'hc');
+            const localeCa = extractLocaleExtKey(locale, 'ca');
+            const localeNu = extractLocaleExtKey(locale, 'nu');
+
+            // Locale default hourCycle: 12-hour for en/ja/ko/hi, 24-hour for most others
+            function localeDefaultHourCycle(loc) {
+              if (!loc) return 'h12';
+              const base = loc.toLowerCase().split('-')[0];
+              if (base === 'ja') return 'h11';
+              if (base === 'en' || base === 'ko' || base === 'hi' || base === 'zh') return 'h12';
+              return 'h23';
+            }
+
+            if (hasHourComponent) {
+              // Resolve hourCycle: options > extension key > locale default
+              let resolvedHc = hourCycle !== undefined ? hourCycle
+                : localeHc !== undefined ? localeHc
+                : localeDefaultHourCycle(locale);
+
+              // hour12 option overrides hourCycle
+              if (hour12 !== undefined) {
+                resolvedHc = hour12 ? 'h12' : 'h23';
+                // Special case: ja uses h11 for 12-hour
+                if (hour12 && typeof locale === 'string' && locale.toLowerCase().startsWith('ja')) {
+                  resolvedHc = 'h11';
+                }
+              }
+
+              resolvedOpts.hourCycle = resolvedHc;
+              resolvedOpts.hour12 = (resolvedHc === 'h11' || resolvedHc === 'h12');
+            } else {
+              // No hour component → spec requires hourCycle and hour12 to be undefined
+              resolvedOpts.hourCycle = undefined;
+              resolvedOpts.hour12 = undefined;
+            }
+
+            // Normalize resolved locale: strip extension keys overridden by options
+            // Per spec ResolveLocale: if option value differs from extension value,
+            // strip the extension key from the locale.
+            function stripLocaleExtKey(loc, key) {
+              if (typeof loc !== 'string') return loc;
+              // Remove -key-value from the -u-... block
+              return loc.replace(new RegExp('(-u(?:-[a-z0-9]{2,8})*)(-' + key + '-[a-z0-9]+)', 'i'), '$1');
+                // Clean up empty -u- suffix
+            }
+            function cleanLocale(loc) {
+              if (typeof loc !== 'string') return loc;
+              // Remove trailing -u with no keys
+              return loc.replace(/-u$/i, '').replace(/-u-(?=-u-|$)/gi, '');
+            }
+
+            let normalizedLocale = locale;
+
+            // ca: handle invalid calendar option falling back to locale ca
+            const calendarOptionValid = calendar !== undefined && VALID_CALENDARS.includes(resolvedCalendar);
+            if (calendar !== undefined && !calendarOptionValid) {
+              // Invalid calendar option: fall back to locale's ca if valid
+              const localeCaCanon = localeCa ? canonicalizeCalendar(localeCa) : undefined;
+              if (localeCaCanon && VALID_CALENDARS.includes(localeCaCanon)) {
+                resolvedOpts.calendar = localeCaCanon;
+                // Keep ca in locale (it's being used)
+              } else {
+                resolvedOpts.calendar = 'gregory';
+                normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'ca'));
+              }
+            } else if (calendarOptionValid) {
+              // Valid calendar option: strip ca from locale if it differs
+              if (localeCa && canonicalizeCalendar(localeCa) !== resolvedCalendar) {
+                normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'ca'));
               }
             }
+
+            // hc: strip if hour12 option set, or if hourCycle option differs from extension
+            if (localeHc !== undefined) {
+              if (hour12 !== undefined) {
+                normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'hc'));
+              } else if (hourCycle !== undefined && hourCycle !== localeHc) {
+                normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'hc'));
+              }
+            }
+
+            // nu: handle invalid numberingSystem option falling back to locale nu
+            const nsOptionValid = numberingSystem !== undefined && VALID_NUMBERING_SYSTEMS.includes(numberingSystem.toLowerCase());
+            if (numberingSystem !== undefined && !nsOptionValid) {
+              if (localeNu && VALID_NUMBERING_SYSTEMS.includes(localeNu)) {
+                resolvedOpts.numberingSystem = localeNu;
+              } else {
+                resolvedOpts.numberingSystem = 'latn';
+                normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'nu'));
+              }
+            } else if (nsOptionValid && localeNu && localeNu !== numberingSystem.toLowerCase()) {
+              normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'nu'));
+            }
+
+            resolvedOpts.locale = normalizedLocale;
 
             dtfSlots.set(this, { instance, resolvedOpts, needsDefault });
 
@@ -5937,37 +6185,37 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           // resolvedOptions method
           Object.defineProperty(newProto, 'resolvedOptions', {
-            value: function resolvedOptions() {
+            value: makeNonConstructableAccessor(function resolvedOptions() {
               const slot = dtfSlots.get(this);
               if (!slot) {
                 throw new TypeError('Method Intl.DateTimeFormat.prototype.resolvedOptions called on incompatible receiver');
               }
               const opts = slot.resolvedOpts;
-              const result = {
-                locale: opts.locale,
-                calendar: opts.calendar,
-                numberingSystem: opts.numberingSystem,
-                timeZone: opts.timeZone !== undefined ? opts.timeZone : (() => {
-                  try { return new DTF().resolvedOptions().timeZone || 'UTC'; } catch (_e) { return 'UTC'; }
-                })(),
-              };
-              if (opts.hourCycle !== undefined) result.hourCycle = opts.hourCycle;
-              if (opts.hour12 !== undefined) result.hour12 = opts.hour12;
-              if (opts.weekday !== undefined) result.weekday = opts.weekday;
-              if (opts.era !== undefined) result.era = opts.era;
-              if (opts.year !== undefined) result.year = opts.year;
-              if (opts.month !== undefined) result.month = opts.month;
-              if (opts.day !== undefined) result.day = opts.day;
-              if (opts.dayPeriod !== undefined) result.dayPeriod = opts.dayPeriod;
-              if (opts.hour !== undefined) result.hour = opts.hour;
-              if (opts.minute !== undefined) result.minute = opts.minute;
-              if (opts.second !== undefined) result.second = opts.second;
-              if (opts.fractionalSecondDigits !== undefined) result.fractionalSecondDigits = opts.fractionalSecondDigits;
-              if (opts.timeZoneName !== undefined) result.timeZoneName = opts.timeZoneName;
-              if (opts.dateStyle !== undefined) result.dateStyle = opts.dateStyle;
-              if (opts.timeStyle !== undefined) result.timeStyle = opts.timeStyle;
+              const _dp = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true });
+              const result = Object.create(Object.prototype);
+              _dp(result, 'locale', opts.locale);
+              _dp(result, 'calendar', opts.calendar);
+              _dp(result, 'numberingSystem', opts.numberingSystem);
+              _dp(result, 'timeZone', opts.timeZone !== undefined ? opts.timeZone : (() => {
+                try { return new DTF().resolvedOptions().timeZone || 'UTC'; } catch (_e) { return 'UTC'; }
+              })());
+              if (opts.hourCycle !== undefined) _dp(result, 'hourCycle', opts.hourCycle);
+              if (opts.hour12 !== undefined) _dp(result, 'hour12', opts.hour12);
+              if (opts.weekday !== undefined) _dp(result, 'weekday', opts.weekday);
+              if (opts.era !== undefined) _dp(result, 'era', opts.era);
+              if (opts.year !== undefined) _dp(result, 'year', opts.year);
+              if (opts.month !== undefined) _dp(result, 'month', opts.month);
+              if (opts.day !== undefined) _dp(result, 'day', opts.day);
+              if (opts.dayPeriod !== undefined) _dp(result, 'dayPeriod', opts.dayPeriod);
+              if (opts.hour !== undefined) _dp(result, 'hour', opts.hour);
+              if (opts.minute !== undefined) _dp(result, 'minute', opts.minute);
+              if (opts.second !== undefined) _dp(result, 'second', opts.second);
+              if (opts.fractionalSecondDigits !== undefined) _dp(result, 'fractionalSecondDigits', opts.fractionalSecondDigits);
+              if (opts.timeZoneName !== undefined) _dp(result, 'timeZoneName', opts.timeZoneName);
+              if (opts.dateStyle !== undefined) _dp(result, 'dateStyle', opts.dateStyle);
+              if (opts.timeStyle !== undefined) _dp(result, 'timeStyle', opts.timeStyle);
               return result;
-            },
+            }, 'resolvedOptions', 0),
             writable: true,
             enumerable: false,
             configurable: true
@@ -6190,18 +6438,24 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 const isBC = displayYear <= 0;
                 const prolepticYear = isBC ? 1 - displayYear : displayYear;
                 const cal = String(normalized.calendar || 'gregory').toLowerCase();
-                let yearValue;
                 if ((cal === 'chinese' || cal === 'dangi') && normalized.year === 'numeric') {
                   const stems = '甲乙丙丁戊己庚辛壬癸';
                   const branches = '子丑寅卯辰巳午未申酉戌亥';
-                  const y = fields.year - 4;
-                  yearValue = stems[(((y % 10) + 10) % 10)] + branches[(((y % 12) + 12) % 12)] + '年';
+                  // relatedYear: the Gregorian year whose Chinese year contains this date.
+                  // Chinese New Year is roughly in Jan/Feb; dates before CNY belong to prior Gregorian year.
+                  const gregYear = fields.year;
+                  const month = fields.month;
+                  // Approximate: if month <= 1 (Jan), the Chinese year started in the prior Gregorian year
+                  const relatedYear = (month <= 1) ? gregYear - 1 : gregYear;
+                  const y = relatedYear - 4;
+                  const ganzhiName = stems[(((y % 10) + 10) % 10)] + branches[(((y % 12) + 12) % 12)] + '年';
+                  dateParts.push({ type: 'relatedYear', value: String(relatedYear) });
+                  dateParts.push({ type: 'yearName', value: ganzhiName });
                 } else {
-                  yearValue = normalized.year === '2-digit'
+                  dateParts.push({ type: 'year', value: normalized.year === '2-digit'
                     ? String(prolepticYear % 100).padStart(2, '0')
-                    : String(prolepticYear);
+                    : String(prolepticYear) });
                 }
-                dateParts.push({ type: 'year', value: yearValue });
               }
               if (normalized.era !== undefined) {
                 const displayYear = normalized.overrideYear !== undefined
@@ -6280,12 +6534,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 timeParts.push({ type: 'minute', value: String(fields.minute).padStart(2, '0') });
               }
               if (normalized.second !== undefined) {
-                let secondValue = String(fields.second).padStart(2, '0');
-                if (normalized.fractionalSecondDigits !== undefined) {
-                  const ms = String(fields.millisecond).padStart(3, '0')
-                    .substring(0, normalized.fractionalSecondDigits);
-                  secondValue += '.' + ms;
-                }
+                const secondValue = String(fields.second).padStart(2, '0');
                 timeParts.push({ type: 'second', value: secondValue });
               } else if (normalized.fractionalSecondDigits !== undefined) {
                 timeParts.push({
@@ -6300,6 +6549,14 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 }
                 parts.push(part);
               });
+
+              // Fractional seconds follow the second part with a '.' literal separator
+              if (normalized.second !== undefined && normalized.fractionalSecondDigits !== undefined) {
+                const ms = String(fields.millisecond).padStart(3, '0')
+                  .substring(0, normalized.fractionalSecondDigits);
+                parts.push({ type: 'literal', value: '.' });
+                parts.push({ type: 'fractionalSecond', value: ms });
+              }
 
               if (dayPeriod && (use12Hour || normalized.dayPeriod !== undefined)) {
                 if (timeParts.length > 0) pushLiteral(' ');
@@ -6738,7 +6995,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               throw new RangeError('calendar mismatch');
             }
             const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
-            delete opts.dateStyle; delete opts.timeStyle; delete opts.weekday; delete opts.era;
+            delete opts.dateStyle; delete opts.timeStyle; delete opts.weekday;
             delete opts.day; delete opts.dayPeriod; delete opts.hour; delete opts.minute;
             delete opts.second; delete opts.fractionalSecondDigits; delete opts.timeZoneName;
             const hasFields = opts.year !== undefined || opts.month !== undefined;
@@ -6768,7 +7025,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           // Helper to make non-constructable getter/function
-          function makeNonConstructableAccessor(impl, name) {
+          function makeNonConstructableAccessor(impl, name, length) {
             const arrowWrapper = (...args) => impl.apply(undefined, args);
             const handler = {
               apply(target, thisArg, args) {
@@ -6777,7 +7034,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             };
             const proxy = new Proxy(arrowWrapper, handler);
             Object.defineProperty(proxy, 'name', { value: name, configurable: true });
-            Object.defineProperty(proxy, 'length', { value: 0, writable: false, enumerable: false, configurable: true });
+            Object.defineProperty(proxy, 'length', { value: length !== undefined ? length : 0, writable: false, enumerable: false, configurable: true });
             return proxy;
           }
 
@@ -6871,13 +7128,26 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isNaN(d.getTime())) {
               throw new RangeError('Invalid time value');
             }
-            if (slot.instance && !slot.needsDefault && typeof slot.instance.formatToParts === 'function') {
+            const needsCustom = slot.needsDefault ||
+              slot.resolvedOpts.dayPeriod !== undefined ||
+              slot.resolvedOpts.fractionalSecondDigits !== undefined ||
+              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
+              slot.resolvedOpts.calendar === 'chinese' ||
+              slot.resolvedOpts.calendar === 'dangi' ||
+              slot.resolvedOpts.dateStyle !== undefined ||
+              slot.resolvedOpts.timeStyle !== undefined;
+            if (!needsCustom && slot.instance && typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
-            return formatDateWithOptionsToParts(d, slot.resolvedOpts);
+            const rawParts = formatDateWithOptionsToParts(d, slot.resolvedOpts);
+            const ns = slot.resolvedOpts.numberingSystem;
+            if (ns && ns !== 'latn') {
+              return rawParts.map((p) => ({ ...p, value: applyNumberingSystem(p.value, ns) }));
+            }
+            return rawParts;
           };
           Object.defineProperty(newProto, 'formatToParts', {
-            value: makeNonConstructableAccessor(formatToPartsImpl, 'formatToParts'),
+            value: makeNonConstructableAccessor(formatToPartsImpl, 'formatToParts', 1),
             writable: true,
             enumerable: false,
             configurable: true
@@ -6920,7 +7190,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isTemporalPlainMonthDayValue(value)) return formatTemporalPlainMonthDay(slot, value, true);
             const d = normalizeDateTimeFormatInput(value);
             if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
-            if (slot.instance && !slot.needsDefault && typeof slot.instance.formatToParts === 'function') {
+            if (slot.instance && !slot.needsDefault &&
+                slot.resolvedOpts.fractionalSecondDigits === undefined &&
+                typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
             return formatDateWithOptionsToParts(d, slot.resolvedOpts);
@@ -6942,6 +7214,128 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return { startStr, endStr };
           }
 
+          // Smart range collapsing: given two part arrays, find the longest shared
+          // prefix and suffix and mark them as 'shared', leaving only the differing
+          // middle parts as startRange/endRange.
+          // Returns a flat array of {type, value, source} objects.
+          function smartRangeParts(startParts, endParts, separator) {
+            const sLen = startParts.length;
+            const eLen = endParts.length;
+            // Find shared prefix length
+            let prefixLen = 0;
+            while (
+              prefixLen < sLen && prefixLen < eLen &&
+              startParts[prefixLen].type === endParts[prefixLen].type &&
+              startParts[prefixLen].value === endParts[prefixLen].value
+            ) prefixLen++;
+            // Find shared suffix length (don't overlap with prefix)
+            let suffixLen = 0;
+            while (
+              suffixLen < sLen - prefixLen && suffixLen < eLen - prefixLen &&
+              startParts[sLen - 1 - suffixLen].type === endParts[eLen - 1 - suffixLen].type &&
+              startParts[sLen - 1 - suffixLen].value === endParts[eLen - 1 - suffixLen].value
+            ) suffixLen++;
+            const result = [];
+            for (let i = 0; i < prefixLen; i++) result.push({ ...startParts[i], source: 'shared' });
+            for (let i = prefixLen; i < sLen - suffixLen; i++) result.push({ ...startParts[i], source: 'startRange' });
+            result.push({ type: 'literal', value: separator, source: 'shared' });
+            for (let i = prefixLen; i < eLen - suffixLen; i++) result.push({ ...endParts[i], source: 'endRange' });
+            for (let i = sLen - suffixLen; i < sLen; i++) result.push({ ...startParts[i], source: 'shared' });
+            return result;
+          }
+
+          // Check if two Temporal values have the same calendar
+          function temporalCalendarMatches(a, b) {
+            try {
+              const ca = temporalCalendarId(a);
+              const cb = temporalCalendarId(b);
+              return ca === cb;
+            } catch (_e) { return true; }
+          }
+
+          // Get the range separator from the underlying instance's formatRangeToParts
+          function getRangeSeparator(slot) {
+            if (slot.instance && typeof slot.instance.formatRangeToParts === 'function') {
+              try {
+                const parts = slot.instance.formatRangeToParts(new Date(86400000), new Date(366 * 86400000));
+                const sep = parts.find((p) => p.type === 'literal' && p.source === 'shared');
+                if (sep) return sep.value;
+              } catch (_e) {}
+            }
+            return ' \u2013 ';
+          }
+
+          // Whether to use smart prefix/suffix collapsing for range formatting.
+          // Smart collapsing applies when month is a named style (long/short/narrow),
+          // matching CLDR range pattern behavior.
+          function useSmartCollapsing(slot) {
+            const m = slot.resolvedOpts.month;
+            if (m === 'long' || m === 'short' || m === 'narrow') return true;
+            // dateStyle full/long/medium use named months
+            const ds = slot.resolvedOpts.dateStyle;
+            return ds === 'full' || ds === 'long' || ds === 'medium';
+          }
+
+          // Whether to use the underlying instance for range formatting
+          // (only when we don't need custom formatting and month is numeric)
+          function canUseInstanceForRange(slot) {
+            return slot.instance &&
+              !useSmartCollapsing(slot) &&
+              slot.resolvedOpts.fractionalSecondDigits === undefined &&
+              slot.resolvedOpts.dateStyle === undefined &&
+              slot.resolvedOpts.timeStyle === undefined &&
+              slot.resolvedOpts.calendar !== 'chinese' &&
+              slot.resolvedOpts.calendar !== 'dangi' &&
+              slot.resolvedOpts.hour12 === undefined &&
+              slot.resolvedOpts.hourCycle === undefined;
+          }
+
+          // Core formatRangeToParts logic (shared by formatRange and formatRangeToParts)
+          function formatRangeToPartsCore(slot, startDate, endDate) {
+            const startType = temporalTypeName(startDate);
+            // For plain Date objects with numeric month, use underlying instance
+            if (startType === null && canUseInstanceForRange(slot) &&
+                typeof slot.instance.formatRangeToParts === 'function') {
+              const start = normalizeDateTimeFormatInput(startDate);
+              const end = normalizeDateTimeFormatInput(endDate);
+              if (!isNaN(start.getTime()) && !isNaN(end.getTime())) {
+                return slot.instance.formatRangeToParts(start, end);
+              }
+            }
+            // Custom path: format both sides
+            const startParts = formatSingleValueToParts(slot, startDate);
+            const endParts = formatSingleValueToParts(slot, endDate);
+            const startStr = startParts.map((p) => p.value).join('');
+            const endStr = endParts.map((p) => p.value).join('');
+            if (startStr === endStr) {
+              return startParts.map((p) => ({ ...p, source: 'shared' }));
+            }
+            const sep = getRangeSeparator(slot);
+            // Determine if smart collapsing should be applied
+            let applySmartCollapsing = false;
+            if (startType !== null) {
+              // PlainDateTime and Instant: apply smart collapsing (date portion shared when same)
+              // PlainDate, PlainYearMonth, PlainMonthDay, PlainTime: no smart collapsing
+              applySmartCollapsing = startType === 'PlainDateTime' || startType === 'Instant';
+            } else if (useSmartCollapsing(slot)) {
+              // Named month: apply smart collapsing only when years match
+              // (CLDR: different year → no collapsing)
+              const startD = normalizeDateTimeFormatInput(startDate);
+              const endD = normalizeDateTimeFormatInput(endDate);
+              applySmartCollapsing = !isNaN(startD.getTime()) && !isNaN(endD.getTime()) &&
+                startD.getFullYear() === endD.getFullYear();
+            }
+            if (applySmartCollapsing) {
+              return smartRangeParts(startParts, endParts, sep);
+            }
+            // Simple range: no smart collapsing
+            return [
+              ...startParts.map((p) => ({ ...p, source: 'startRange' })),
+              { type: 'literal', value: sep, source: 'shared' },
+              ...endParts.map((p) => ({ ...p, source: 'endRange' })),
+            ];
+          }
+
           // formatRange method
           const formatRangeImpl = function(startDate, endDate) {
             const slot = dtfSlots.get(this);
@@ -6951,21 +7345,26 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (startDate === undefined || endDate === undefined) {
               throw new TypeError('startDate and endDate are required');
             }
-            const result = formatRangeCore(slot, startDate, endDate);
-            if (result.collapsed !== undefined) return result.collapsed;
-            // Try underlying instance for range separator
+            // ToDateTimeFormattable: call valueOf on non-Temporal first, then check types
+            const startIsTemp = temporalTypeName(startDate) !== null;
+            const endIsTemp = temporalTypeName(endDate) !== null;
+            if (!startIsTemp) { const _ = Number(startDate); }
+            if (!endIsTemp) { const _ = Number(endDate); }
+            if (startIsTemp !== endIsTemp) {
+              throw new TypeError('formatRange: incompatible argument types');
+            }
             const startType = temporalTypeName(startDate);
-            if (startType === null) {
-              const start = normalizeDateTimeFormatInput(startDate);
-              const end = normalizeDateTimeFormatInput(endDate);
-              if (!isNaN(start.getTime()) && !isNaN(end.getTime()) &&
-                  slot.instance && !slot.needsDefault &&
-                  slot.resolvedOpts.fractionalSecondDigits === undefined &&
-                  typeof slot.instance.formatRange === 'function') {
-                return slot.instance.formatRange(start, end);
+            const endType = temporalTypeName(endDate);
+            if (startType !== endType) {
+              throw new TypeError('formatRange: incompatible argument types');
+            }
+            if (startType !== null && startType !== 'Instant' && startType !== 'PlainTime') {
+              if (!temporalCalendarMatches(startDate, endDate)) {
+                throw new RangeError('formatRange: calendar mismatch');
               }
             }
-            return result.startStr + ' \u2013 ' + result.endStr;
+            // Derive from formatRangeToParts for consistency
+            return formatRangeToPartsCore(slot, startDate, endDate).map((p) => p.value).join('');
           };
           Object.defineProperty(formatRangeImpl, 'length', { value: 2, writable: false, enumerable: false, configurable: true });
           Object.defineProperty(newProto, 'formatRange', {
@@ -6986,38 +7385,33 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (startDate === undefined || endDate === undefined) {
               throw new TypeError('startDate and endDate are required');
             }
+            const startIsTemp = temporalTypeName(startDate) !== null;
+            const endIsTemp = temporalTypeName(endDate) !== null;
+            if (!startIsTemp) { const _ = Number(startDate); }
+            if (!endIsTemp) { const _ = Number(endDate); }
+            if (startIsTemp !== endIsTemp) {
+              throw new TypeError('formatRangeToParts: incompatible argument types');
+            }
             const startType = temporalTypeName(startDate);
             const endType = temporalTypeName(endDate);
             if (startType !== endType) {
               throw new TypeError('formatRangeToParts: incompatible argument types');
             }
-            // For plain Date objects, try underlying instance
-            if (startType === null) {
-              const start = normalizeDateTimeFormatInput(startDate);
-              const end = normalizeDateTimeFormatInput(endDate);
-              if (!isNaN(start.getTime()) && !isNaN(end.getTime()) &&
-                  slot.instance && !slot.needsDefault &&
-                  slot.resolvedOpts.fractionalSecondDigits === undefined &&
-                  typeof slot.instance.formatRangeToParts === 'function') {
-                return slot.instance.formatRangeToParts(start, end);
+            if (startType !== null && startType !== 'Instant' && startType !== 'PlainTime') {
+              if (!temporalCalendarMatches(startDate, endDate)) {
+                throw new RangeError('formatRangeToParts: calendar mismatch');
               }
             }
-            // Custom path: format both sides, collapse if equal
-            const startStr = formatSingleValue(slot, startDate);
-            const endStr = formatSingleValue(slot, endDate);
-            if (startStr === endStr) {
-              return formatSingleValueToParts(slot, startDate).map((p) => ({ ...p, source: 'shared' }));
-            }
-            const startParts = formatSingleValueToParts(slot, startDate).map((p) => ({ ...p, source: 'startRange' }));
-            const endParts = formatSingleValueToParts(slot, endDate).map((p) => ({ ...p, source: 'endRange' }));
-            return [...startParts, { type: 'literal', value: ' \u2013 ', source: 'shared' }, ...endParts];
+            return formatRangeToPartsCore(slot, startDate, endDate);
           };
+          Object.defineProperty(formatRangeToPartsImpl, 'length', { value: 2, writable: false, enumerable: false, configurable: true });
           Object.defineProperty(newProto, 'formatRangeToParts', {
             value: makeNonConstructableAccessor(formatRangeToPartsImpl, 'formatRangeToParts'),
             writable: true,
             enumerable: false,
             configurable: true
           });
+          Object.defineProperty(newProto.formatRangeToParts, 'length', { value: 2, writable: false, enumerable: false, configurable: true });
 
           Object.defineProperty(newProto, 'constructor', {
             value: WrappedDTF,
@@ -7066,32 +7460,10 @@ fn install_date_locale_methods(context: &mut Context) -> JsResult<()> {
           const originalToLocaleDateString = DateProto.toLocaleDateString;
           const originalToLocaleTimeString = DateProto.toLocaleTimeString;
           
-          // Test if the native implementation works (store result to avoid repeated calls)
-          let toLocaleStringNeedsPolyfill = false;
-          let toLocaleDateStringNeedsPolyfill = false;
-          let toLocaleTimeStringNeedsPolyfill = false;
-          
-          const testDate = new Date(2020, 0, 1);
-          try {
-            const result = originalToLocaleString.call(testDate);
-            toLocaleStringNeedsPolyfill = typeof result !== 'string';
-          } catch (e) {
-            toLocaleStringNeedsPolyfill = true;
-          }
-          
-          try {
-            const result = originalToLocaleDateString.call(testDate);
-            toLocaleDateStringNeedsPolyfill = typeof result !== 'string';
-          } catch (e) {
-            toLocaleDateStringNeedsPolyfill = true;
-          }
-          
-          try {
-            const result = originalToLocaleTimeString.call(testDate);
-            toLocaleTimeStringNeedsPolyfill = typeof result !== 'string';
-          } catch (e) {
-            toLocaleTimeStringNeedsPolyfill = true;
-          }
+          // Always use polyfill to ensure consistent behavior with Intl.DateTimeFormat
+          const toLocaleStringNeedsPolyfill = true;
+          const toLocaleDateStringNeedsPolyfill = true;
+          const toLocaleTimeStringNeedsPolyfill = true;
           
           // Helper to create a non-constructable function with proper name
           // Uses a Proxy on an arrow function (which has no [[Construct]])
@@ -7684,11 +8056,6 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
     context.eval(Source::from_bytes(
         r#"
         (() => {
-          // Check if DurationFormat already exists
-          if (typeof Intl.DurationFormat === 'function') {
-            return;
-          }
-          
           const VALID_LOCALE_MATCHERS = ['lookup', 'best fit'];
           const VALID_STYLES = ['long', 'short', 'narrow', 'digital'];
           const VALID_DISPLAYS = ['auto', 'always'];
@@ -7696,6 +8063,72 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
           
           // Unit component names
           const DURATION_UNITS = ['years', 'months', 'weeks', 'days', 'hours', 'minutes', 'seconds', 'milliseconds', 'microseconds', 'nanoseconds'];
+
+          // If native DurationFormat exists, just patch the constructor for validation
+          if (typeof Intl.DurationFormat === 'function') {
+            const NativeDTF = Intl.DurationFormat;
+            const UNIT_CONFIG_NATIVE = {
+              years:        ['long','short','narrow'],
+              months:       ['long','short','narrow'],
+              weeks:        ['long','short','narrow'],
+              days:         ['long','short','narrow'],
+              hours:        ['long','short','narrow','numeric','2-digit'],
+              minutes:      ['long','short','narrow','numeric','2-digit'],
+              seconds:      ['long','short','narrow','numeric','2-digit'],
+              milliseconds: ['long','short','narrow','numeric'],
+              microseconds: ['long','short','narrow','numeric'],
+              nanoseconds:  ['long','short','narrow','numeric'],
+            };
+            function validateDurationOptions(options) {
+              if (options === undefined || options === null) return;
+              const opts = Object(options);
+              const style = opts.style !== undefined ? String(opts.style) : 'short';
+              let prevStyle = '';
+              for (const unit of DURATION_UNITS) {
+                const stylesList = UNIT_CONFIG_NATIVE[unit];
+                let unitStyle = opts[unit];
+                if (unitStyle !== undefined) {
+                  unitStyle = String(unitStyle);
+                  if (!stylesList.includes(unitStyle)) throw new RangeError('Invalid ' + unit + ' style: ' + unitStyle);
+                  if ((prevStyle === 'numeric' || prevStyle === '2-digit') &&
+                      unitStyle !== 'numeric' && unitStyle !== '2-digit') {
+                    throw new RangeError('Invalid style ' + unitStyle + ' for unit ' + unit + ' following ' + prevStyle);
+                  }
+                } else {
+                  if (style === 'digital') {
+                    unitStyle = ['hours','minutes','seconds'].includes(unit) ? 'numeric' : style;
+                  } else if (prevStyle === 'fractional' || prevStyle === 'numeric' || prevStyle === '2-digit') {
+                    unitStyle = 'numeric';
+                  } else {
+                    unitStyle = style;
+                  }
+                }
+                if ((prevStyle === 'numeric' || prevStyle === '2-digit') &&
+                    (unit === 'minutes' || unit === 'seconds')) unitStyle = '2-digit';
+                if (['hours','minutes','seconds'].includes(unit) && unitStyle === 'numeric') prevStyle = 'numeric';
+                else if (['hours','minutes','seconds'].includes(unit) && unitStyle === '2-digit') prevStyle = '2-digit';
+                else if (['milliseconds','microseconds','nanoseconds'].includes(unit) && unitStyle === 'numeric') prevStyle = 'fractional';
+              }
+            }
+            const PatchedDTF = function DurationFormat(locales, options) {
+              if (locales === null) throw new TypeError('Cannot convert null to object');
+              validateDurationOptions(options);
+              if (new.target !== undefined) {
+                return Reflect.construct(NativeDTF, [locales, options], new.target);
+              }
+              return new NativeDTF(locales, options);
+            };
+            PatchedDTF.prototype = NativeDTF.prototype;
+            Object.defineProperty(PatchedDTF.prototype, 'constructor', { value: PatchedDTF, writable: true, configurable: true });
+            Object.setPrototypeOf(PatchedDTF, NativeDTF);
+            Object.defineProperty(PatchedDTF, 'name', { value: 'DurationFormat', configurable: true });
+            Object.defineProperty(PatchedDTF, 'length', { value: 0, configurable: true });
+            if (typeof NativeDTF.supportedLocalesOf === 'function') {
+              PatchedDTF.supportedLocalesOf = NativeDTF.supportedLocalesOf;
+            }
+            Intl.DurationFormat = PatchedDTF;
+            return;
+          }
           
           // WeakMap to store internal slots
           const dfSlots = new WeakMap();
@@ -7731,17 +8164,32 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
             if (!(this instanceof DurationFormat) && new.target === undefined) {
               throw new TypeError('Constructor Intl.DurationFormat requires "new"');
             }
-            
+
+            // CanonicalizeLocaleList: null throws TypeError
+            if (locales === null) throw new TypeError('Cannot convert null to object');
+
             // Process locales
+            const defaultLocale = (() => {
+              try { return new Intl.NumberFormat().resolvedOptions().locale || 'en'; } catch (_e) { return 'en'; }
+            })();
             let locale;
             if (locales === undefined) {
-              locale = new Intl.NumberFormat().resolvedOptions().locale || 'en';
+              locale = defaultLocale;
             } else if (typeof locales === 'string') {
-              locale = Intl.getCanonicalLocales(locales)[0] || 'en';
+              locale = Intl.getCanonicalLocales(locales)[0] || defaultLocale;
             } else if (Array.isArray(locales)) {
-              locale = locales.length > 0 ? Intl.getCanonicalLocales(locales)[0] : 'en';
+              locale = locales.length > 0 ? (Intl.getCanonicalLocales(locales)[0] || defaultLocale) : defaultLocale;
             } else {
-              locale = 'en';
+              // ToObject then iterate — for objects with length, use getCanonicalLocales
+              const obj = Object(locales);
+              const len = obj.length;
+              if (len !== undefined && Number(len) > 0) {
+                locale = Intl.getCanonicalLocales(locales)[0] || defaultLocale;
+              } else if (len !== undefined) {
+                locale = defaultLocale;
+              } else {
+                locale = Intl.getCanonicalLocales(locales)[0] || defaultLocale;
+              }
             }
             
             // Process options
@@ -7768,13 +8216,62 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
             }
             
             const style = getOption(opts, 'style', 'string', VALID_STYLES, 'short');
-            
-            // Process per-unit options
+
+            // GetDurationUnitOptions per spec
+            const UNIT_CONFIG = {
+              years:        { stylesList: ['long','short','narrow'], digitalBase: undefined },
+              months:       { stylesList: ['long','short','narrow'], digitalBase: undefined },
+              weeks:        { stylesList: ['long','short','narrow'], digitalBase: undefined },
+              days:         { stylesList: ['long','short','narrow'], digitalBase: undefined },
+              hours:        { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
+              minutes:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
+              seconds:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
+              milliseconds: { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
+              microseconds: { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
+              nanoseconds:  { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
+            };
+
             const unitOptions = {};
+            let prevStyle = '';
             for (const unit of DURATION_UNITS) {
-              unitOptions[unit] = getOption(opts, unit, 'string', VALID_UNIT_STYLES, undefined);
+              const { stylesList, digitalBase } = UNIT_CONFIG[unit];
+              let unitStyle = getOption(opts, unit, 'string', stylesList, undefined);
+              let displayDefault = 'always';
+
+              if (unitStyle === undefined) {
+                if (style === 'digital') {
+                  if (!['hours','minutes','seconds'].includes(unit)) displayDefault = 'auto';
+                  unitStyle = digitalBase || style;
+                } else {
+                  displayDefault = 'auto';
+                  if (prevStyle === 'fractional' || prevStyle === 'numeric' || prevStyle === '2-digit') {
+                    if (unit !== 'minutes' && unit !== 'seconds') displayDefault = 'always';
+                    unitStyle = 'numeric';
+                  } else {
+                    unitStyle = style;
+                  }
+                }
+              } else if (prevStyle === 'numeric' || prevStyle === '2-digit') {
+                if (unitStyle !== 'numeric' && unitStyle !== '2-digit') {
+                  throw new RangeError('Invalid style ' + unitStyle + ' for unit ' + unit + ' following ' + prevStyle);
+                }
+              }
+
+              // Step 9: if prevStyle is numeric/2-digit, minutes/seconds become 2-digit
+              if ((prevStyle === 'numeric' || prevStyle === '2-digit') &&
+                  (unit === 'minutes' || unit === 'seconds')) {
+                unitStyle = '2-digit';
+              }
+
+              // Update prevStyle
+              if ((unit === 'hours' || unit === 'minutes' || unit === 'seconds') && unitStyle === 'numeric') prevStyle = 'numeric';
+              else if ((unit === 'hours' || unit === 'minutes' || unit === 'seconds') && unitStyle === '2-digit') prevStyle = '2-digit';
+              else if ((unit === 'milliseconds' || unit === 'microseconds' || unit === 'nanoseconds') && unitStyle === 'numeric') prevStyle = 'fractional';
+
               const displayKey = unit + 'Display';
-              unitOptions[displayKey] = getOption(opts, displayKey, 'string', VALID_DISPLAYS, 'auto');
+              const display = getOption(opts, displayKey, 'string', VALID_DISPLAYS, displayDefault);
+              unitOptions[unit] = unitStyle;
+              unitOptions[displayKey] = display;
             }
             
             // fractionalDigits
@@ -7921,15 +8418,10 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
               style: slots.style
             };
             
-            // Add per-unit options
+            // Add per-unit options (always present)
             for (const unit of DURATION_UNITS) {
-              if (slots[unit] !== undefined) {
-                result[unit] = slots[unit];
-              }
-              const displayKey = unit + 'Display';
-              if (slots[displayKey] !== undefined) {
-                result[displayKey] = slots[displayKey];
-              }
+              result[unit] = slots[unit];
+              result[unit + 'Display'] = slots[unit + 'Display'];
             }
             
             if (slots.fractionalDigits !== undefined) {
