@@ -6232,18 +6232,20 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           function getDateTimeFields(d, opts) {
             const calendar = resolveCalendarId(opts);
-            if (opts.timeZone !== undefined &&
-                typeof Temporal === 'object' &&
+            if (typeof Temporal === 'object' &&
                 Temporal !== null &&
                 typeof Temporal.Instant === 'function') {
               try {
                 const instant = new Temporal.Instant(BigInt(d.getTime()) * 1000000n);
-                const zoned = instant.toZonedDateTimeISO(opts.timeZone);
+                const tz = opts.timeZone !== undefined ? opts.timeZone : 'UTC';
+                const zoned = instant.toZonedDateTimeISO(tz);
                 const weekday = zoned.dayOfWeek % 7;
                 let calendarYear = zoned.year;
                 let calendarMonth = zoned.month;
                 let calendarDay = zoned.day;
                 let calendarMonthCode = zoned.monthCode;
+                let calendarEraYear = undefined;
+                let calendarEra = undefined;
                 if (calendar !== 'gregory' && calendar !== 'iso8601') {
                   try {
                     const calendarZoned = zoned.withCalendar(calendar);
@@ -6251,9 +6253,14 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                     calendarMonth = calendarZoned.month;
                     calendarDay = calendarZoned.day;
                     calendarMonthCode = calendarZoned.monthCode;
+                    try { calendarEraYear = calendarZoned.eraYear; } catch (_e) {}
+                    try { calendarEra = calendarZoned.era; } catch (_e) {}
                   } catch (_calendarError) {
                     // Leave ISO fields in place.
                   }
+                } else {
+                  try { calendarEraYear = zoned.eraYear; } catch (_e) {}
+                  try { calendarEra = zoned.era; } catch (_e) {}
                 }
                 return {
                   year: zoned.year,
@@ -6269,6 +6276,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                   calendarMonth,
                   calendarDay,
                   calendarMonthCode,
+                  calendarEraYear,
+                  calendarEra,
                 };
               } catch (_err) {
                 // Fall back to local fields below.
@@ -6289,6 +6298,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               calendarMonth: d.getMonth() + 1,
               calendarDay: d.getDate(),
               calendarMonthCode: 'M' + String(d.getMonth() + 1).padStart(2, '0'),
+              calendarEraYear: undefined,
+              calendarEra: undefined,
             };
           }
 
@@ -6398,6 +6409,64 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               return narrowNames[month - 1];
             }
 
+            function getEraDisplayName(eraCode, calendar, style) {
+              const code = String(eraCode).toLowerCase();
+              const cal = String(calendar).toLowerCase();
+              const isLong = style === 'long';
+              if (cal === 'gregory' || cal === 'iso8601') {
+                if (code === 'ce' || code === 'gregory') return isLong ? 'Anno Domini' : 'AD';
+                if (code === 'bce' || code === 'gregory-inverse') return isLong ? 'Before Christ' : 'BC';
+                return code === 'ad' ? 'AD' : (code === 'bc' ? 'BC' : code.toUpperCase());
+              }
+              if (cal === 'japanese') {
+                const jpEras = {
+                  'meiji': isLong ? 'Meiji' : 'Meiji', 'taisho': isLong ? 'Taish\u014D' : 'Taish\u014D',
+                  'showa': isLong ? 'Sh\u014Dwa' : 'Sh\u014Dwa', 'heisei': isLong ? 'Heisei' : 'Heisei',
+                  'reiwa': isLong ? 'Reiwa' : 'Reiwa',
+                  'japanese': isLong ? 'Anno Domini' : 'AD',
+                  'japanese-inverse': isLong ? 'Before Christ' : 'BC',
+                  'ce': isLong ? 'Anno Domini' : 'AD', 'bce': isLong ? 'Before Christ' : 'BC',
+                };
+                return jpEras[code] || code;
+              }
+              if (cal.startsWith('islamic')) {
+                if (code === 'ah' || code === 'islamic' || code === 'islamic-civil' || code === 'islamic-tbla' || code === 'islamic-umalqura') return 'AH';
+                if (code === 'bh' || code.includes('inverse')) return 'BH';
+                return code.toUpperCase();
+              }
+              if (cal === 'roc') {
+                if (code === 'minguo' || code === 'roc') return isLong ? 'Minguo' : 'Minguo';
+                if (code === 'before-roc' || code === 'roc-inverse') return isLong ? 'Before R.O.C.' : 'Before R.O.C.';
+                return code;
+              }
+              if (cal === 'buddhist') {
+                return 'BE';
+              }
+              if (cal === 'coptic') {
+                if (code === 'coptic' || code === 'ad') return isLong ? 'Era of the Martyrs' : 'ERA1';
+                if (code === 'coptic-inverse' || code === 'bc') return isLong ? 'Before Era of the Martyrs' : 'ERA0';
+                return code;
+              }
+              if (cal === 'ethiopic') {
+                if (code === 'ethioaa' || code === 'ethiopic-amete-alem') return isLong ? 'Amete Alem' : 'ERA0';
+                if (code === 'ethiopic' || code === 'incar' || code === 'mundi') return isLong ? 'Incarnation Era' : 'ERA1';
+                return code;
+              }
+              if (cal === 'ethioaa') {
+                return isLong ? 'Amete Alem' : 'ERA0';
+              }
+              if (cal === 'persian') {
+                return 'AP';
+              }
+              if (cal === 'indian') {
+                return 'Saka';
+              }
+              if (cal === 'hebrew') {
+                return 'AM';
+              }
+              return code.toUpperCase();
+            }
+
             function weekdayName(weekday, style) {
               const longNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
               const shortNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -6441,27 +6510,35 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 if ((cal === 'chinese' || cal === 'dangi') && normalized.year === 'numeric') {
                   const stems = '甲乙丙丁戊己庚辛壬癸';
                   const branches = '子丑寅卯辰巳午未申酉戌亥';
-                  // relatedYear: the Gregorian year whose Chinese year contains this date.
-                  // Chinese New Year is roughly in Jan/Feb; dates before CNY belong to prior Gregorian year.
-                  const gregYear = fields.year;
-                  const month = fields.month;
-                  // Approximate: if month <= 1 (Jan), the Chinese year started in the prior Gregorian year
-                  const relatedYear = (month <= 1) ? gregYear - 1 : gregYear;
+                  const relatedYear = fields.calendarYear !== undefined ? fields.calendarYear : displayYear;
                   const y = relatedYear - 4;
-                  const ganzhiName = stems[(((y % 10) + 10) % 10)] + branches[(((y % 12) + 12) % 12)] + '年';
+                  const ganzhiName = stems[(((y % 10) + 10) % 10)] + branches[(((y % 12) + 12) % 12)];
                   dateParts.push({ type: 'relatedYear', value: String(relatedYear) });
                   dateParts.push({ type: 'yearName', value: ganzhiName });
+                  dateParts.push({ type: 'literal', value: '年' });
                 } else {
+                  const yearVal = fields.calendarEraYear !== undefined && fields.calendarEraYear !== null
+                    ? fields.calendarEraYear : prolepticYear;
                   dateParts.push({ type: 'year', value: normalized.year === '2-digit'
-                    ? String(prolepticYear % 100).padStart(2, '0')
-                    : String(prolepticYear) });
+                    ? String(yearVal % 100).padStart(2, '0')
+                    : String(yearVal) });
                 }
               }
               if (normalized.era !== undefined) {
-                const displayYear = normalized.overrideYear !== undefined
-                  ? normalized.overrideYear
-                  : (fields.calendarYear ?? fields.year);
-                dateParts.push({ type: 'era', value: displayYear >= 1 ? 'AD' : 'BC' });
+                const cal = String(normalized.calendar || 'gregory').toLowerCase();
+                if (cal !== 'chinese' && cal !== 'dangi') {
+                  const eraCode = fields.calendarEra;
+                  let eraDisplay;
+                  if (eraCode !== undefined && eraCode !== null) {
+                    eraDisplay = getEraDisplayName(eraCode, cal, normalized.era);
+                  } else {
+                    const dy = normalized.overrideYear !== undefined
+                      ? normalized.overrideYear
+                      : (fields.calendarYear ?? fields.year);
+                    eraDisplay = dy >= 1 ? 'AD' : 'BC';
+                  }
+                  dateParts.push({ type: 'era', value: eraDisplay });
+                }
               }
 
               // Determine if month is a named style (long/short/narrow) for locale-aware separators
@@ -6470,13 +6547,21 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 if (index > 0) {
                   const prev = dateParts[index - 1].type;
                   const cur = part.type;
-                  if (prev === 'weekday') {
+                  if (prev === 'relatedYear' && cur === 'yearName') {
+                    // No separator between relatedYear and yearName
+                  } else if (prev === 'yearName' && cur === 'literal') {
+                    // No separator before trailing literal (e.g. '年')
+                  } else if (prev === 'weekday') {
                     pushLiteral(', ');
                   } else if (namedMonth && prev === 'month' && cur === 'day') {
                     pushLiteral(' ');
                   } else if (namedMonth && prev === 'day' && cur === 'year') {
                     pushLiteral(', ');
                   } else if (namedMonth && prev === 'month' && cur === 'year') {
+                    pushLiteral(' ');
+                  } else if (namedMonth && prev === 'day' && cur === 'relatedYear') {
+                    pushLiteral(', ');
+                  } else if (namedMonth && prev === 'month' && cur === 'relatedYear') {
                     pushLiteral(' ');
                   } else {
                     pushLiteral('/');
@@ -6566,17 +6651,52 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (normalized.timeZoneName !== undefined) {
                 const tzStyle = normalized.timeZoneName;
                 let zoneName = normalized.timeZone || 'UTC';
-                if (tzStyle === 'long') {
-                  if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'Coordinated Universal Time';
-                  else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'Greenwich Mean Time';
-                  else if (zoneName === 'America/New_York') zoneName = 'Eastern Standard Time';
-                  else if (zoneName === 'America/Los_Angeles') zoneName = 'Pacific Standard Time';
-                } else {
-                  if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'UTC';
-                  else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'GMT';
-                  else if (zoneName === 'America/New_York') zoneName = 'EST';
-                  else if (zoneName === 'America/Los_Angeles') zoneName = 'PST';
-                  else if (zoneName === 'Europe/Berlin' || zoneName === 'Europe/Vienna') zoneName = 'GMT+1';
+                let resolved = false;
+                try {
+                  if (typeof Temporal === 'object' && Temporal !== null &&
+                      typeof Temporal.Instant === 'function') {
+                    const instant = new Temporal.Instant(BigInt(d.getTime()) * 1000000n);
+                    const offset = instant.toZonedDateTimeISO(zoneName).offset;
+                    const hrs = parseInt(offset.slice(1, 3), 10);
+                    const mins = parseInt(offset.slice(4, 6), 10);
+                    const totalMin = (offset[0] === '-' ? -1 : 1) * (hrs * 60 + mins);
+                    if (tzStyle === 'long' || tzStyle === 'longGeneric' || tzStyle === 'longOffset') {
+                      if (zoneName === 'UTC' || zoneName === 'Etc/UTC' || totalMin === 0 && (zoneName.startsWith('Etc/') || zoneName === 'UTC' || zoneName === 'GMT')) {
+                        zoneName = 'Coordinated Universal Time';
+                      } else {
+                        const sign = totalMin >= 0 ? '+' : '-';
+                        const absH = Math.floor(Math.abs(totalMin) / 60);
+                        const absM = Math.abs(totalMin) % 60;
+                        zoneName = 'GMT' + sign + String(absH).padStart(2, '0') + ':' + String(absM).padStart(2, '0');
+                      }
+                    } else {
+                      if (zoneName === 'UTC' || zoneName === 'Etc/UTC') {
+                        zoneName = 'UTC';
+                      } else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') {
+                        zoneName = 'GMT';
+                      } else {
+                        const sign = totalMin >= 0 ? '+' : '-';
+                        const absH = Math.floor(Math.abs(totalMin) / 60);
+                        const absM = Math.abs(totalMin) % 60;
+                        zoneName = 'GMT' + sign + String(absH) + (absM > 0 ? ':' + String(absM).padStart(2, '0') : '');
+                      }
+                    }
+                    resolved = true;
+                  }
+                } catch (_e) {}
+                if (!resolved) {
+                  if (tzStyle === 'long') {
+                    if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'Coordinated Universal Time';
+                    else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'Greenwich Mean Time';
+                    else if (zoneName === 'America/New_York') zoneName = 'Eastern Standard Time';
+                    else if (zoneName === 'America/Los_Angeles') zoneName = 'Pacific Standard Time';
+                  } else {
+                    if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'UTC';
+                    else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'GMT';
+                    else if (zoneName === 'America/New_York') zoneName = 'EST';
+                    else if (zoneName === 'America/Los_Angeles') zoneName = 'PST';
+                    else if (zoneName === 'Europe/Berlin' || zoneName === 'Europe/Vienna') zoneName = 'GMT+1';
+                  }
                 }
                 pushLiteral(' ');
                 parts.push({ type: 'timeZoneName', value: zoneName });
@@ -7078,7 +7198,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 slot.resolvedOpts.calendar === 'chinese' ||
                 slot.resolvedOpts.calendar === 'dangi' ||
                 slot.resolvedOpts.dateStyle !== undefined ||
-                slot.resolvedOpts.timeStyle !== undefined;
+                slot.resolvedOpts.timeStyle !== undefined ||
+                slot.resolvedOpts.timeZoneName !== undefined;
               if (needsCustomFormat) {
                 return formatDateWithOptions(d, slot.resolvedOpts);
               }
@@ -7135,7 +7256,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               slot.resolvedOpts.calendar === 'chinese' ||
               slot.resolvedOpts.calendar === 'dangi' ||
               slot.resolvedOpts.dateStyle !== undefined ||
-              slot.resolvedOpts.timeStyle !== undefined;
+              slot.resolvedOpts.timeStyle !== undefined ||
+              slot.resolvedOpts.timeZoneName !== undefined;
             if (!needsCustom && slot.instance && typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
@@ -8090,7 +8212,7 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
                 if (unitStyle !== undefined) {
                   unitStyle = String(unitStyle);
                   if (!stylesList.includes(unitStyle)) throw new RangeError('Invalid ' + unit + ' style: ' + unitStyle);
-                  if ((prevStyle === 'numeric' || prevStyle === '2-digit') &&
+                  if ((prevStyle === 'numeric' || prevStyle === '2-digit' || prevStyle === 'fractional') &&
                       unitStyle !== 'numeric' && unitStyle !== '2-digit') {
                     throw new RangeError('Invalid style ' + unitStyle + ' for unit ' + unit + ' following ' + prevStyle);
                   }
@@ -8251,7 +8373,7 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
                     unitStyle = style;
                   }
                 }
-              } else if (prevStyle === 'numeric' || prevStyle === '2-digit') {
+              } else if (prevStyle === 'numeric' || prevStyle === '2-digit' || prevStyle === 'fractional') {
                 if (unitStyle !== 'numeric' && unitStyle !== '2-digit') {
                   throw new RangeError('Invalid style ' + unitStyle + ' for unit ' + unit + ' following ' + prevStyle);
                 }
@@ -8333,8 +8455,27 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
               throw new RangeError('Duration cannot have mixed signs');
             }
             
+            // IsValidDurationRecord: years/months/weeks must be < 2^32
+            if (Math.abs(components.years) >= 4294967296 ||
+                Math.abs(components.months) >= 4294967296 ||
+                Math.abs(components.weeks) >= 4294967296) {
+              throw new RangeError('Duration value out of range');
+            }
+            // normalizedSeconds must be < 2^53
+            const _normSec = Math.abs(components.days) * 86400 +
+              Math.abs(components.hours) * 3600 +
+              Math.abs(components.minutes) * 60 +
+              Math.abs(components.seconds) +
+              Math.abs(components.milliseconds) * 1e-3 +
+              Math.abs(components.microseconds) * 1e-6 +
+              Math.abs(components.nanoseconds) * 1e-9;
+            if (_normSec >= 9007199254740992) {
+              throw new RangeError('Duration value out of range');
+            }
+            
             const style = slots.style;
             const parts = [];
+            const partIsDigital = [];
             
             // Unit labels based on style
             const labels = {
@@ -8373,8 +8514,10 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
                 
                 if (style === 'digital' && (unit === 'hours' || unit === 'minutes' || unit === 'seconds')) {
                   parts.push(String(Math.floor(absValue)).padStart(2, '0'));
+                  partIsDigital.push(true);
                 } else {
                   parts.push(absValue + ' ' + unitLabel);
+                  partIsDigital.push(false);
                 }
               }
             }
@@ -8387,7 +8530,19 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
             }
             
             if (style === 'digital') {
-              return (hasNegative ? '-' : '') + parts.join(':');
+              const textGroup = [];
+              const digitalGroup = [];
+              for (let _i = 0; _i < parts.length; _i++) {
+                if (partIsDigital[_i]) {
+                  digitalGroup.push(parts[_i]);
+                } else {
+                  textGroup.push(parts[_i]);
+                }
+              }
+              const segments = [];
+              if (textGroup.length > 0) segments.push(textGroup.join(', '));
+              if (digitalGroup.length > 0) segments.push(digitalGroup.join(':'));
+              return (hasNegative ? '-' : '') + segments.join(', ');
             }
             
             return (hasNegative ? '-' : '') + parts.join(', ');
