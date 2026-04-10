@@ -2,15 +2,21 @@ use boa_engine::module::SyntheticModuleInitializer;
 use boa_engine::{
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol,
     JsValue as BoaValue, Module, NativeFunction, Script, Source, Trace,
-    builtins::array_buffer::SharedArrayBuffer,
-    builtins::error::Error as BoaBuiltinError,
-    builtins::promise::PromiseState,
+    builtins::{
+        array_buffer::SharedArrayBuffer,
+        error::Error as BoaBuiltinError,
+        object::OrdinaryObject,
+        promise::PromiseState,
+    },
     gc::Tracer,
     js_string,
     module::{ModuleLoader, Referrer, resolve_module_specifier},
     object::{
         FunctionObjectBuilder, IntegrityLevel, JsObject, ObjectInitializer,
-        builtins::{JsArray, JsArrayBuffer, JsPromise, JsProxy, JsSharedArrayBuffer, JsUint8Array},
+        builtins::{
+            JsArray, JsArrayBuffer, JsPromise, JsProxy, JsSharedArrayBuffer,
+            JsUint8Array,
+        },
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     realm::Realm,
@@ -471,6 +477,117 @@ unsafe impl Trace for ShadowRealmWrappedFunctionCapture {
 }
 
 impl JsData for ShadowRealmWrappedFunctionCapture {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisposableStackStatus {
+    Pending,
+    Disposed,
+}
+
+#[derive(Debug)]
+struct DisposableResource {
+    value: BoaValue,
+    method: BoaValue,
+}
+
+impl Finalize for DisposableResource {}
+
+unsafe impl Trace for DisposableResource {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe {
+            self.value.trace(tracer);
+            self.method.trace(tracer);
+        }
+    }
+    unsafe fn trace_non_roots(&self) {}
+    fn run_finalizer(&self) {
+        self.finalize();
+    }
+}
+
+#[derive(Debug, JsData)]
+struct DisposableStackData {
+    status: Cell<DisposableStackStatus>,
+    stack: RefCell<Vec<DisposableResource>>,
+}
+
+impl Finalize for DisposableStackData {}
+
+unsafe impl Trace for DisposableStackData {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        for resource in self.stack.borrow().iter() {
+            unsafe {
+                resource.trace(tracer);
+            }
+        }
+    }
+    unsafe fn trace_non_roots(&self) {}
+    fn run_finalizer(&self) {
+        self.finalize();
+    }
+}
+
+impl DisposableStackData {
+    fn new() -> Self {
+        Self {
+            status: Cell::new(DisposableStackStatus::Pending),
+            stack: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AsyncDisposableResource {
+    value: BoaValue,
+    method: BoaValue,
+    needs_await: bool,
+}
+
+impl Finalize for AsyncDisposableResource {}
+
+unsafe impl Trace for AsyncDisposableResource {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe {
+            self.value.trace(tracer);
+            self.method.trace(tracer);
+        }
+    }
+    unsafe fn trace_non_roots(&self) {}
+    fn run_finalizer(&self) {
+        self.finalize();
+    }
+}
+
+#[derive(Debug, JsData)]
+struct AsyncDisposableStackData {
+    status: Cell<DisposableStackStatus>,
+    stack: RefCell<Vec<AsyncDisposableResource>>,
+}
+
+impl Finalize for AsyncDisposableStackData {}
+
+unsafe impl Trace for AsyncDisposableStackData {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        for resource in self.stack.borrow().iter() {
+            unsafe {
+                resource.trace(tracer);
+            }
+        }
+    }
+    unsafe fn trace_non_roots(&self) {}
+    fn run_finalizer(&self) {
+        self.finalize();
+    }
+}
+
+impl AsyncDisposableStackData {
+    fn new() -> Self {
+        Self {
+            status: Cell::new(DisposableStackStatus::Pending),
+            stack: RefCell::new(Vec::new()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct EvalOptions {
@@ -3926,49 +4043,22 @@ fn install_array_flat_undefined_fix(context: &mut Context) -> JsResult<()> {
 }
 
 fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
-    context.eval(Source::from_bytes(
-        r#"
-        (() => {
-          if (typeof Atomics === 'object' && typeof Atomics.pause !== 'function') {
-            const pauseImpl = (iterationNumber) => {
-              // This is a hint to the CPU that the thread is in a spin-wait loop.
-              // In JavaScript, we can't actually hint the CPU, so this is a no-op.
-              if (iterationNumber !== undefined) {
-                // Must be undefined or a non-negative integer
-                if (typeof iterationNumber !== 'number' ||
-                    !Number.isInteger(iterationNumber) ||
-                    iterationNumber < 0) {
-                  throw new TypeError('iterationNumber must be a non-negative integer');
-                }
-              }
-            };
-            const pauseFn = new Proxy(() => {}, {
-              apply(_target, thisArg, args) {
-                return pauseImpl.apply(thisArg, args);
-              }
-            });
-            Object.defineProperty(pauseFn, 'length', {
-              value: 0,
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(pauseFn, 'name', {
-              value: 'pause',
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(Atomics, 'pause', {
-              value: pauseFn,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            });
-          }
-        })();
-        "#,
-    ))?;
+    let atomics = context.global_object().get(js_string!("Atomics"), context)?;
+    if let Some(atomics_obj) = atomics.as_object() {
+        if !atomics_obj.has_own_property(js_string!("pause"), context)? {
+            let pause_fn = NativeFunction::from_fn_ptr(host_atomics_pause)
+                .to_js_function(context.realm());
+            atomics_obj.define_property_or_throw(
+                js_string!("pause"),
+                PropertyDescriptor::builder()
+                    .value(pause_fn)
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                context,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -3999,783 +4089,495 @@ fn install_error_is_error(context: &mut Context) -> JsResult<()> {
 }
 
 fn install_promise_keyed_builtins(context: &mut Context) -> JsResult<()> {
-    context.eval(Source::from_bytes(
-        r#"
-        (() => {
-          if (typeof Promise !== 'function') {
-            return;
-          }
-
-          function getPromiseConstructor(receiver) {
-            if (receiver === undefined || receiver === null) {
-              return Promise;
-            }
-            if (typeof receiver !== 'function') {
-              throw new TypeError('Promise keyed methods require a constructor receiver');
-            }
-            return receiver;
-          }
-
-          function getDictionaryEntries(items) {
-            if (items === null || items === undefined) {
-              throw new TypeError('Promise keyed methods require an object argument');
-            }
-            const dictionary = Object(items);
-            const keys = Object.keys(dictionary);
-            return { dictionary, keys };
-          }
-
-          function definePromiseBuiltin(name, callback) {
-            if (Object.prototype.hasOwnProperty.call(Promise, name)) {
-              return;
-            }
-
-            const fn = new Proxy(() => {}, {
-              apply(_target, thisArg, args) {
-                const items = args.length > 0 ? args[0] : undefined;
-                return callback(thisArg, items);
-              }
-            });
-
-            Object.defineProperty(fn, 'name', {
-              value: name,
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(fn, 'length', {
-              value: 1,
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-
-            Object.defineProperty(Promise, name, {
-              value: fn,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            });
-          }
-
-          definePromiseBuiltin('allKeyed', (receiver, items) => {
-            const C = getPromiseConstructor(receiver);
-            const { dictionary, keys } = getDictionaryEntries(items);
-            const values = new Array(keys.length);
-            for (let i = 0; i < keys.length; i += 1) {
-              values[i] = dictionary[keys[i]];
-            }
-            return C.all(values).then((results) => {
-              const output = {};
-              for (let i = 0; i < keys.length; i += 1) {
-                output[keys[i]] = results[i];
-              }
-              return output;
-            });
-          });
-
-          definePromiseBuiltin('allSettledKeyed', (receiver, items) => {
-            const C = getPromiseConstructor(receiver);
-            const { dictionary, keys } = getDictionaryEntries(items);
-            const values = new Array(keys.length);
-            for (let i = 0; i < keys.length; i += 1) {
-              values[i] = dictionary[keys[i]];
-            }
-            return C.allSettled(values).then((results) => {
-              const output = {};
-              for (let i = 0; i < keys.length; i += 1) {
-                output[keys[i]] = results[i];
-              }
-              return output;
-            });
-          });
-        })();
-        "#,
-    ))?;
+    let promise = context
+        .global_object()
+        .get(js_string!("Promise"), context)?;
+    if let Some(promise_obj) = promise.as_object() {
+        if !promise_obj.has_own_property(js_string!("allKeyed"), context)? {
+            promise_obj.define_property_or_throw(
+                js_string!("allKeyed"),
+                PropertyDescriptor::builder()
+                    .value(
+                        NativeFunction::from_fn_ptr(host_promise_all_keyed)
+                            .to_js_function(context.realm()),
+                    )
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                context,
+            )?;
+        }
+        if !promise_obj.has_own_property(js_string!("allSettledKeyed"), context)? {
+            promise_obj.define_property_or_throw(
+                js_string!("allSettledKeyed"),
+                PropertyDescriptor::builder()
+                    .value(
+                        NativeFunction::from_fn_ptr(host_promise_all_settled_keyed)
+                            .to_js_function(context.realm()),
+                    )
+                    .writable(true)
+                    .enumerable(false)
+                    .configurable(true),
+                context,
+            )?;
+        }
+    }
     Ok(())
 }
 
 fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
+    // 1. Symbol.dispose and Symbol.asyncDispose
+    let symbol_ctor = context.intrinsics().constructors().symbol().constructor();
+    let for_method = symbol_ctor.get(js_string!("for"), context)?;
+
+    let symbol_obj = context
+        .global_object()
+        .get(js_string!("Symbol"), context)?
+        .as_object()
+        .expect("Global Symbol object is missing")
+        .clone();
+
+    let dispose_sym = if symbol_obj
+        .get(js_string!("dispose"), context)?
+        .is_undefined()
+    {
+        let sym = for_method
+            .as_callable()
+            .unwrap()
+            .call(
+                &symbol_ctor.clone().into(),
+                &[js_string!("Symbol.dispose").into()],
+                context,
+            )?;
+        symbol_obj.define_property_or_throw(
+            js_string!("dispose"),
+            PropertyDescriptor::builder()
+                .value(sym.clone())
+                .writable(false)
+                .enumerable(false)
+                .configurable(false),
+            context,
+        )?;
+        sym
+    } else {
+        symbol_obj.get(js_string!("dispose"), context)?
+    };
+
+    let async_dispose_sym = if symbol_obj
+        .get(js_string!("asyncDispose"), context)?
+        .is_undefined()
+    {
+        let sym = for_method
+            .as_callable()
+            .unwrap()
+            .call(
+                &symbol_ctor.into(),
+                &[js_string!("Symbol.asyncDispose").into()],
+                context,
+            )?;
+        symbol_obj.define_property_or_throw(
+            js_string!("asyncDispose"),
+            PropertyDescriptor::builder()
+                .value(sym.clone())
+                .writable(false)
+                .enumerable(false)
+                .configurable(false),
+            context,
+        )?;
+        sym
+    } else {
+        symbol_obj.get(js_string!("asyncDispose"), context)?
+    };
+
+    // 1.5 Fix Symbol.keyFor to return undefined for our well-known-like symbols
+    let key_for_method = symbol_obj.get(js_string!("keyFor"), context)?;
+    if key_for_method.is_callable() {
+        let original_key_for = key_for_method.clone();
+        let dispose_sym_val = symbol_obj.get(js_string!("dispose"), context)?;
+        let async_dispose_sym_val = symbol_obj.get(js_string!("asyncDispose"), context)?;
+
+        let new_key_for = NativeFunction::from_copy_closure_with_captures(
+            move |_this: &BoaValue, args: &[BoaValue], captures: &(BoaValue, BoaValue, BoaValue), context: &mut Context| {
+                let symbol = args.get_or_undefined(0);
+                let (orig, d, ad) = captures;
+                if symbol == d || symbol == ad {
+                    return Ok(BoaValue::undefined());
+                }
+                let orig_obj = orig.as_object().unwrap();
+                orig_obj.call(&BoaValue::undefined(), args, context)
+            },
+            (
+                original_key_for,
+                dispose_sym_val,
+                async_dispose_sym_val,
+            ),
+        );
+
+        symbol_obj.define_property_or_throw(
+            js_string!("keyFor"),
+            PropertyDescriptor::builder()
+                .value(new_key_for.to_js_function(context.realm()))
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
+
+    // 2. SuppressedError
+    let error_ctor = context.intrinsics().constructors().error().constructor();
+    let error_proto = context.intrinsics().constructors().error().prototype();
+
+    let suppressed_error_proto = JsObject::from_proto_and_data(
+        error_proto,
+        OrdinaryObject,
+    );
+    suppressed_error_proto.define_property_or_throw(
+        js_string!("name"),
+        PropertyDescriptor::builder()
+            .value(js_string!("SuppressedError"))
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    suppressed_error_proto.define_property_or_throw(
+        js_string!("message"),
+        PropertyDescriptor::builder()
+            .value(js_string!(""))
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let suppressed_error_ctor = NativeFunction::from_fn_ptr(host_suppressed_error_constructor)
+        .to_js_function(context.realm());
+    suppressed_error_ctor.define_property_or_throw(
+        js_string!("prototype"),
+        PropertyDescriptor::builder()
+            .value(suppressed_error_proto.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    suppressed_error_proto.define_property_or_throw(
+        js_string!("constructor"),
+        PropertyDescriptor::builder()
+            .value(suppressed_error_ctor.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    suppressed_error_ctor.set_prototype(Some(error_ctor.into()));
+
+    context.register_global_property(
+        js_string!("SuppressedError"),
+        suppressed_error_ctor,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+
+    // 3. DisposableStack
+    let disposable_stack_proto = JsObject::with_object_proto(context.intrinsics());
+    let disposable_stack_ctor = NativeFunction::from_fn_ptr(host_disposable_stack_constructor)
+        .to_js_function(context.realm());
+    disposable_stack_ctor.define_property_or_throw(
+        js_string!("prototype"),
+        PropertyDescriptor::builder()
+            .value(disposable_stack_proto.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("constructor"),
+        PropertyDescriptor::builder()
+            .value(disposable_stack_ctor.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let dispose_sym_key = dispose_sym.to_property_key(context)?;
+
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("use"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_disposable_stack_use)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("adopt"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_disposable_stack_adopt)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("defer"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_disposable_stack_defer)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("move"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_disposable_stack_move)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let dispose_fn = NativeFunction::from_fn_ptr(host_disposable_stack_dispose)
+        .to_js_function(context.realm());
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("dispose"),
+        PropertyDescriptor::builder()
+            .value(dispose_fn.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        dispose_sym_key,
+        PropertyDescriptor::builder()
+            .value(dispose_fn)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    disposable_stack_proto.define_property_or_throw(
+        js_string!("disposed"),
+        PropertyDescriptor::builder()
+            .get(
+                NativeFunction::from_fn_ptr(host_disposable_stack_disposed_getter)
+                    .to_js_function(context.realm()),
+            )
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    disposable_stack_proto.define_property_or_throw(
+        JsSymbol::to_string_tag(),
+        PropertyDescriptor::builder()
+            .value(js_string!("DisposableStack"))
+            .writable(false)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    context.register_global_property(
+        js_string!("DisposableStack"),
+        disposable_stack_ctor,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+
+    // 4. AsyncDisposableStack
+    let async_disposable_stack_proto = JsObject::with_object_proto(context.intrinsics());
+    let async_disposable_stack_ctor =
+        NativeFunction::from_fn_ptr(host_async_disposable_stack_constructor)
+            .to_js_function(context.realm());
+    async_disposable_stack_ctor.define_property_or_throw(
+        js_string!("prototype"),
+        PropertyDescriptor::builder()
+            .value(async_disposable_stack_proto.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("constructor"),
+        PropertyDescriptor::builder()
+            .value(async_disposable_stack_ctor.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let async_dispose_sym_key = async_dispose_sym.to_property_key(context)?;
+
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("use"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_async_disposable_stack_use)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("adopt"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_async_disposable_stack_adopt)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("defer"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_async_disposable_stack_defer)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("move"),
+        PropertyDescriptor::builder()
+            .value(
+                NativeFunction::from_fn_ptr(host_async_disposable_stack_move)
+                    .to_js_function(context.realm()),
+            )
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    let dispose_async_fn = NativeFunction::from_fn_ptr(host_async_disposable_stack_dispose_async)
+        .to_js_function(context.realm());
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("disposeAsync"),
+        PropertyDescriptor::builder()
+            .value(dispose_async_fn.clone())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        async_dispose_sym_key,
+        PropertyDescriptor::builder()
+            .value(dispose_async_fn)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    async_disposable_stack_proto.define_property_or_throw(
+        js_string!("disposed"),
+        PropertyDescriptor::builder()
+            .get(
+                NativeFunction::from_fn_ptr(host_async_disposable_stack_disposed_getter)
+                    .to_js_function(context.realm()),
+            )
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    async_disposable_stack_proto.define_property_or_throw(
+        JsSymbol::to_string_tag(),
+        PropertyDescriptor::builder()
+            .value(js_string!("AsyncDisposableStack"))
+            .writable(false)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    context.register_global_property(
+        js_string!("AsyncDisposableStack"),
+        async_disposable_stack_ctor,
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+
+    // 5. Global helper functions
+    context.register_global_property(
+        js_string!("__agentjsDisposeSyncUsing__"),
+        NativeFunction::from_fn_ptr(host_dispose_sync_using).to_js_function(context.realm()),
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+    context.register_global_property(
+        js_string!("__agentjsDisposeAsyncUsing__"),
+        NativeFunction::from_fn_ptr(host_dispose_async_using).to_js_function(context.realm()),
+        Attribute::WRITABLE | Attribute::CONFIGURABLE,
+    )?;
+
+    // 6. AsyncIteratorPrototype[Symbol.asyncDispose]
     context.eval(Source::from_bytes(
         r#"
-        (() => {
-          if (typeof Symbol.dispose !== 'symbol') {
-            Object.defineProperty(Symbol, 'dispose', {
-              value: Symbol.for('Symbol.dispose'),
-              writable: false,
-              enumerable: false,
-              configurable: false,
-            });
-          }
-
-          if (typeof Symbol.asyncDispose !== 'symbol') {
-            Object.defineProperty(Symbol, 'asyncDispose', {
-              value: Symbol.for('Symbol.asyncDispose'),
-              writable: false,
-              enumerable: false,
-              configurable: false,
-            });
-          }
-
-          const originalKeyForKey = '__agentjs_original_Symbol_keyFor__';
-          if (
-            !Object.prototype.hasOwnProperty.call(Symbol, originalKeyForKey) &&
-            typeof Symbol.keyFor === 'function'
-          ) {
-            const originalKeyFor = Symbol.keyFor;
-            Object.defineProperty(Symbol, originalKeyForKey, {
-              value: originalKeyFor,
-              writable: false,
-              enumerable: false,
-              configurable: false,
-            });
-            const keyForFn = new Proxy(() => {}, {
-              apply(_target, _thisArg, args) {
-                const symbol = args.length > 0 ? args[0] : undefined;
-                if (symbol === Symbol.dispose || symbol === Symbol.asyncDispose) {
-                  return undefined;
-                }
-                return Reflect.apply(originalKeyFor, Symbol, args);
+        (function() {
+          async function* asyncGen() {}
+          const asyncGenProto = Object.getPrototypeOf(asyncGen.prototype);
+          const AsyncIteratorPrototype = Object.getPrototypeOf(asyncGenProto);
+          if (AsyncIteratorPrototype && !AsyncIteratorPrototype[Symbol.asyncDispose]) {
+            Object.defineProperty(AsyncIteratorPrototype, Symbol.asyncDispose, {
+              value: async function() {
+                return await this.return();
               },
-            });
-            Object.defineProperty(keyForFn, 'name', {
-              value: 'keyFor',
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(keyForFn, 'length', {
-              value: 1,
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(Symbol, 'keyFor', {
-              value: keyForFn,
               writable: true,
               enumerable: false,
               configurable: true,
             });
           }
-
-          if (typeof globalThis.SuppressedError !== 'function') {
-            const isObjectLike = (value) =>
-              (typeof value === 'object' && value !== null) || typeof value === 'function';
-
-            function getIntrinsicSuppressedErrorPrototype(newTarget) {
-              if (newTarget === undefined || newTarget === SuppressedError) {
-                return SuppressedError.prototype;
-              }
-              const proto = newTarget.prototype;
-              if (isObjectLike(proto)) {
-                return proto;
-              }
-              try {
-                const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
-                const otherSuppressedError = otherGlobal && otherGlobal.SuppressedError;
-                const otherProto = otherSuppressedError && otherSuppressedError.prototype;
-                if (isObjectLike(otherProto)) {
-                  return otherProto;
-                }
-              } catch {}
-              return SuppressedError.prototype;
-            }
-
-            function SuppressedError(error, suppressed, message) {
-              const target = new.target ?? SuppressedError;
-              const instance = Reflect.construct(Error, message === undefined ? [] : [message], target);
-              const expectedProto = getIntrinsicSuppressedErrorPrototype(target);
-              if (Object.getPrototypeOf(instance) !== expectedProto) {
-                Object.setPrototypeOf(instance, expectedProto);
-              }
-              Object.defineProperty(instance, 'error', {
-                value: error,
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              });
-              Object.defineProperty(instance, 'suppressed', {
-                value: suppressed,
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              });
-              return instance;
-            }
-            Object.defineProperty(SuppressedError, 'length', {
-              value: 3,
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            Object.defineProperty(SuppressedError, 'name', {
-              value: 'SuppressedError',
-              writable: false,
-              enumerable: false,
-              configurable: true,
-            });
-            const suppressedErrorPrototype = Object.create(Error.prototype, {
-              constructor: {
-                value: SuppressedError,
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              },
-              message: {
-                value: '',
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              },
-              name: {
-                value: 'SuppressedError',
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              },
-            });
-            Object.defineProperty(SuppressedError, 'prototype', {
-              value: suppressedErrorPrototype,
-              writable: false,
-              enumerable: false,
-              configurable: false,
-            });
-            Object.setPrototypeOf(SuppressedError, Error);
-            Object.defineProperty(globalThis, 'SuppressedError', {
-              value: SuppressedError,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            });
-          }
-
-          const stateSlot = new WeakMap();
-          const stackSlot = new WeakMap();
-          const asyncStateSlot = new WeakMap();
-          const asyncStackSlot = new WeakMap();
-
-          function getIntrinsicDisposableStackPrototype(newTarget) {
-            if (newTarget === undefined || newTarget === DisposableStack) {
-              return DisposableStack.prototype;
-            }
-            const proto = newTarget.prototype;
-            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
-              return proto;
-            }
-            try {
-              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
-              const otherDisposableStack = otherGlobal && otherGlobal.DisposableStack;
-              const otherProto = otherDisposableStack && otherDisposableStack.prototype;
-              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
-                return otherProto;
-              }
-            } catch {}
-            return DisposableStack.prototype;
-          }
-
-          function getIntrinsicAsyncDisposableStackPrototype(newTarget) {
-            if (newTarget === undefined || newTarget === AsyncDisposableStack) {
-              return AsyncDisposableStack.prototype;
-            }
-            const proto = newTarget.prototype;
-            if ((typeof proto === 'object' && proto !== null) || typeof proto === 'function') {
-              return proto;
-            }
-            try {
-              const otherGlobal = newTarget && newTarget.constructor && newTarget.constructor('return this')();
-              const otherAsyncDisposableStack = otherGlobal && otherGlobal.AsyncDisposableStack;
-              const otherProto = otherAsyncDisposableStack && otherAsyncDisposableStack.prototype;
-              if ((typeof otherProto === 'object' && otherProto !== null) || typeof otherProto === 'function') {
-                return otherProto;
-              }
-            } catch {}
-            return AsyncDisposableStack.prototype;
-          }
-
-          function requireDisposableStack(value, name) {
-            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !stateSlot.has(value)) {
-              throw new TypeError(name + ' called on incompatible receiver');
-            }
-          }
-
-          function requireAsyncDisposableStack(value, name) {
-            if ((typeof value !== 'object' && typeof value !== 'function') || value === null || !asyncStateSlot.has(value)) {
-              throw new TypeError(name + ' called on incompatible receiver');
-            }
-          }
-
-          function ensurePending(stack, name) {
-            requireDisposableStack(stack, name);
-            if (stateSlot.get(stack) === 'disposed') {
-              throw new ReferenceError('DisposableStack is disposed');
-            }
-          }
-
-          function ensureAsyncPending(stack, name) {
-            requireAsyncDisposableStack(stack, name);
-            if (asyncStateSlot.get(stack) === 'disposed') {
-              throw new ReferenceError('AsyncDisposableStack is disposed');
-            }
-          }
-
-          function pushResource(stack, value, method) {
-            stackSlot.get(stack).push({ value, method });
-          }
-
-          function pushAsyncResource(stack, value, method, needsAwait) {
-            asyncStackSlot.get(stack).push({ value, method, needsAwait });
-          }
-
-          function pushAsyncPlaceholder(stack) {
-            asyncStackSlot.get(stack).push({ needsAwait: true });
-          }
-
-          function getAsyncDisposeMethod(value) {
-            let method = value[Symbol.asyncDispose];
-            if (method !== undefined) {
-              return { method, needsAwait: true };
-            }
-            method = value[Symbol.dispose];
-            if (method !== undefined) {
-              return { method, needsAwait: false };
-            }
-            return { method: undefined, needsAwait: true };
-          }
-
-          Object.defineProperty(globalThis, '__agentjsDisposeSyncUsing__', {
-            value: function(stack, hasBodyError, bodyError) {
-              try {
-                stack.dispose();
-              } catch (disposeError) {
-                if (hasBodyError) {
-                  throw new SuppressedError(disposeError, bodyError, undefined);
-                }
-                throw disposeError;
-              }
-            },
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-
-          Object.defineProperty(globalThis, '__agentjsDisposeAsyncUsing__', {
-            value: async function(stack, hasBodyError, bodyError) {
-              try {
-                await stack.disposeAsync();
-              } catch (disposeError) {
-                if (hasBodyError) {
-                  throw new SuppressedError(disposeError, bodyError, undefined);
-                }
-                throw disposeError;
-              }
-            },
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-
-          const __agentjsDisposeSyncUsing__ = globalThis.__agentjsDisposeSyncUsing__;
-          const __agentjsDisposeAsyncUsing__ = globalThis.__agentjsDisposeAsyncUsing__;
-
-          function DisposableStack() {
-            if (new.target === undefined) {
-              throw new TypeError('Constructor DisposableStack requires new');
-            }
-            const instance = this;
-            const proto = getIntrinsicDisposableStackPrototype(new.target);
-            if (Object.getPrototypeOf(instance) !== proto) {
-              Object.setPrototypeOf(instance, proto);
-            }
-            stateSlot.set(instance, 'pending');
-            stackSlot.set(instance, []);
-            return instance;
-          }
-
-          function AsyncDisposableStack() {
-            if (new.target === undefined) {
-              throw new TypeError('Constructor AsyncDisposableStack requires new');
-            }
-            const instance = this;
-            const proto = getIntrinsicAsyncDisposableStackPrototype(new.target);
-            if (Object.getPrototypeOf(instance) !== proto) {
-              Object.setPrototypeOf(instance, proto);
-            }
-            asyncStateSlot.set(instance, 'pending');
-            asyncStackSlot.set(instance, []);
-            return instance;
-          }
-
-          const asyncDisposableStackMethods = {
-            use(value) {
-              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.use');
-              if (value === null || value === undefined) {
-                pushAsyncPlaceholder(this);
-                return value;
-              }
-              if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
-                throw new TypeError('AsyncDisposableStack.prototype.use requires an object value');
-              }
-              const record = getAsyncDisposeMethod(value);
-              const method = record.method;
-              if (method === undefined || method === null || typeof method !== 'function') {
-                throw new TypeError('Disposable value must have a callable Symbol.asyncDispose');
-              }
-              pushAsyncResource(this, value, method, record.needsAwait);
-              return value;
-            },
-            adopt(value, onDisposeAsync) {
-              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.adopt');
-              if (typeof onDisposeAsync !== 'function') {
-                throw new TypeError('onDisposeAsync must be callable');
-              }
-              pushAsyncResource(this, undefined, function() {
-                return onDisposeAsync(value);
-              }, true);
-              return value;
-            },
-            defer(onDisposeAsync) {
-              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.defer');
-              if (typeof onDisposeAsync !== 'function') {
-                throw new TypeError('onDisposeAsync must be callable');
-              }
-              pushAsyncResource(this, undefined, function() {
-                return onDisposeAsync();
-              }, true);
-              return undefined;
-            },
-            move() {
-              ensureAsyncPending(this, 'AsyncDisposableStack.prototype.move');
-              const next = new AsyncDisposableStack();
-              asyncStackSlot.set(next, asyncStackSlot.get(this));
-              asyncStackSlot.set(this, []);
-              asyncStateSlot.set(this, 'disposed');
-              return next;
-            },
-            disposeAsync() {
-              try {
-                requireAsyncDisposableStack(this, 'AsyncDisposableStack.prototype.disposeAsync');
-              } catch (error) {
-                return Promise.reject(error);
-              }
-              if (asyncStateSlot.get(this) === 'disposed') {
-                return Promise.resolve(undefined);
-              }
-              asyncStateSlot.set(this, 'disposed');
-              const resources = asyncStackSlot.get(this);
-              if (resources.length === 0) {
-                return Promise.resolve(undefined);
-              }
-              return (async () => {
-                let hasCompletion = false;
-                let completion;
-                while (resources.length > 0) {
-                  const resource = resources.pop();
-                  try {
-                    if (resource.needsAwait === true) {
-                      if (resource.method !== undefined) {
-                        await resource.method.call(resource.value);
-                      } else {
-                        await undefined;
-                      }
-                    } else {
-                      resource.method.call(resource.value);
-                    }
-                  } catch (error) {
-                    if (!hasCompletion) {
-                      completion = error;
-                      hasCompletion = true;
-                    } else {
-                      completion = new SuppressedError(error, completion, undefined);
-                    }
-                  }
-                }
-                if (hasCompletion) {
-                  throw completion;
-                }
-                return undefined;
-              })();
-            },
-            get disposed() {
-              requireAsyncDisposableStack(this, 'get AsyncDisposableStack.prototype.disposed');
-              return asyncStateSlot.get(this) === 'disposed';
-            },
-          };
-          const asyncDisposedGetter = Object.getOwnPropertyDescriptor(asyncDisposableStackMethods, 'disposed').get;
-
-          Object.defineProperties(AsyncDisposableStack.prototype, {
-            constructor: {
-              value: AsyncDisposableStack,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            use: {
-              value: asyncDisposableStackMethods.use,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            adopt: {
-              value: asyncDisposableStackMethods.adopt,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            defer: {
-              value: asyncDisposableStackMethods.defer,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            move: {
-              value: asyncDisposableStackMethods.move,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            disposeAsync: {
-              value: asyncDisposableStackMethods.disposeAsync,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            disposed: {
-              get: asyncDisposedGetter,
-              enumerable: false,
-              configurable: true,
-            },
-          });
-          Object.defineProperty(AsyncDisposableStack.prototype, Symbol.asyncDispose, {
-            value: AsyncDisposableStack.prototype.disposeAsync,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-          Object.defineProperty(AsyncDisposableStack.prototype, Symbol.toStringTag, {
-            value: 'AsyncDisposableStack',
-            writable: false,
-            enumerable: false,
-            configurable: true,
-          });
-          Object.defineProperty(AsyncDisposableStack, 'prototype', {
-            value: AsyncDisposableStack.prototype,
-            writable: false,
-            enumerable: false,
-            configurable: false,
-          });
-          Object.defineProperty(globalThis, 'AsyncDisposableStack', {
-            value: AsyncDisposableStack,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-
-          if (typeof globalThis.DisposableStack === 'function') {
-            return;
-          }
-
-          const disposableStackMethods = {
-            use(value) {
-              ensurePending(this, 'DisposableStack.prototype.use');
-              if (value === null || value === undefined) {
-                return value;
-              }
-              if ((typeof value !== 'object' && typeof value !== 'function') || value === null) {
-                throw new TypeError('DisposableStack.prototype.use requires an object value');
-              }
-              const method = value[Symbol.dispose];
-              if (method === undefined || method === null || typeof method !== 'function') {
-                throw new TypeError('Disposable value must have a callable Symbol.dispose');
-              }
-              pushResource(this, value, method);
-              return value;
-            },
-            adopt(value, onDispose) {
-              ensurePending(this, 'DisposableStack.prototype.adopt');
-              if (typeof onDispose !== 'function') {
-                throw new TypeError('onDispose must be callable');
-              }
-              pushResource(this, value, function() {
-                return onDispose(value);
-              });
-              return value;
-            },
-            defer(onDispose) {
-              ensurePending(this, 'DisposableStack.prototype.defer');
-              if (typeof onDispose !== 'function') {
-                throw new TypeError('onDispose must be callable');
-              }
-              pushResource(this, undefined, function() {
-                return onDispose();
-              });
-              return undefined;
-            },
-            move() {
-              ensurePending(this, 'DisposableStack.prototype.move');
-              const next = new DisposableStack();
-              stackSlot.set(next, stackSlot.get(this));
-              stackSlot.set(this, []);
-              stateSlot.set(this, 'disposed');
-              return next;
-            },
-            dispose() {
-              requireDisposableStack(this, 'DisposableStack.prototype.dispose');
-              if (stateSlot.get(this) === 'disposed') {
-                return undefined;
-              }
-              stateSlot.set(this, 'disposed');
-              const resources = stackSlot.get(this);
-              let hasCompletion = false;
-              let completion;
-              while (resources.length > 0) {
-                const resource = resources.pop();
-                try {
-                  resource.method.call(resource.value);
-                } catch (error) {
-                  if (!hasCompletion) {
-                    completion = error;
-                    hasCompletion = true;
-                  } else {
-                    completion = new SuppressedError(error, completion, undefined);
-                  }
-                }
-              }
-              if (hasCompletion) {
-                throw completion;
-              }
-              return undefined;
-            },
-            get disposed() {
-              requireDisposableStack(this, 'get DisposableStack.prototype.disposed');
-              return stateSlot.get(this) === 'disposed';
-            },
-          };
-          const disposedGetter = Object.getOwnPropertyDescriptor(disposableStackMethods, 'disposed').get;
-
-          Object.defineProperties(DisposableStack.prototype, {
-            constructor: {
-              value: DisposableStack,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            use: {
-              value: disposableStackMethods.use,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            adopt: {
-              value: disposableStackMethods.adopt,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            defer: {
-              value: disposableStackMethods.defer,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            move: {
-              value: disposableStackMethods.move,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            dispose: {
-              value: disposableStackMethods.dispose,
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            },
-            disposed: {
-              get: disposedGetter,
-              enumerable: false,
-              configurable: true,
-            },
-          });
-
-          Object.defineProperty(DisposableStack.prototype, Symbol.dispose, {
-            value: DisposableStack.prototype.dispose,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-          Object.defineProperty(DisposableStack.prototype, Symbol.toStringTag, {
-            value: 'DisposableStack',
-            writable: false,
-            enumerable: false,
-            configurable: true,
-          });
-          Object.defineProperty(DisposableStack, 'prototype', {
-            value: DisposableStack.prototype,
-            writable: false,
-            enumerable: false,
-            configurable: false,
-          });
-          Object.defineProperty(globalThis, 'DisposableStack', {
-            value: DisposableStack,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-
-          // Add Symbol.asyncDispose to AsyncIteratorPrototype
-          (function() {
-            async function* asyncGen() {}
-            const asyncGenProto = Object.getPrototypeOf(asyncGen.prototype);
-            const AsyncIteratorPrototype = Object.getPrototypeOf(asyncGenProto);
-            if (AsyncIteratorPrototype && !AsyncIteratorPrototype[Symbol.asyncDispose]) {
-              const asyncDisposeImpl = async function() {
-                return this.return?.();
-              };
-              const asyncDisposeFn = new Proxy(async () => {}, {
-                apply(_target, thisArg, args) {
-                  return asyncDisposeImpl.apply(thisArg, args);
-                }
-              });
-              Object.defineProperty(asyncDisposeFn, 'name', {
-                value: '[Symbol.asyncDispose]',
-                writable: false,
-                enumerable: false,
-                configurable: true,
-              });
-              Object.defineProperty(AsyncIteratorPrototype, Symbol.asyncDispose, {
-                value: asyncDisposeFn,
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              });
-            }
-          })();
-
-          // Add Symbol.dispose to IteratorPrototype
-          (function() {
-            function* gen() {}
-            const genProto = Object.getPrototypeOf(gen.prototype);
-            const IteratorPrototype = Object.getPrototypeOf(genProto);
-            if (IteratorPrototype && !IteratorPrototype[Symbol.dispose]) {
-              const disposeFn = function() {
-                this.return?.();
-              };
-              Object.defineProperty(disposeFn, 'name', {
-                value: '[Symbol.dispose]',
-                writable: false,
-                enumerable: false,
-                configurable: true,
-              });
-              Object.defineProperty(IteratorPrototype, Symbol.dispose, {
-                value: disposeFn,
-                writable: true,
-                enumerable: false,
-                configurable: true,
-              });
-            }
-          })();
         })();
         "#,
     ))?;
+
+    // 7. IteratorPrototype[Symbol.dispose]
+    context.eval(Source::from_bytes(
+        r#"
+        (function() {
+          function* gen() {}
+          const genProto = Object.getPrototypeOf(gen.prototype);
+          const IteratorPrototype = Object.getPrototypeOf(genProto);
+          if (IteratorPrototype && !IteratorPrototype[Symbol.dispose]) {
+            Object.defineProperty(IteratorPrototype, Symbol.dispose, {
+              value: function() {
+                return this.return?.();
+              },
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
+          }
+        })();
+        "#,
+    ))?;
+
     Ok(())
 }
 
@@ -12952,31 +12754,31 @@ fn host_abstract_module_source_to_string_tag(
     Ok(BoaValue::undefined())
 }
 
-fn host_agent_start(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
-    let source = script_source_from_args(args, context)?;
-    agent_runtime(context)?.start_worker(source)?;
+fn host_agent_start(_: &BoaValue, args: &[BoaValue], _context: &mut Context) -> JsResult<BoaValue> {
+    let source = script_source_from_args(args, _context)?;
+    agent_runtime(_context)?.start_worker(source)?;
     Ok(BoaValue::undefined())
 }
 
 fn host_agent_broadcast(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let buffer = args.get_or_undefined(0).as_object().ok_or_else(|| {
         JsNativeError::typ().with_message("broadcast requires a SharedArrayBuffer")
     })?;
     let buffer = JsSharedArrayBuffer::from_object(buffer)?.inner();
-    agent_runtime(context)?.broadcast(buffer);
+    agent_runtime(_context)?.broadcast(buffer);
     Ok(BoaValue::undefined())
 }
 
 fn host_agent_get_report(
     _: &BoaValue,
     _: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
-    Ok(agent_runtime(context)?
+    Ok(agent_runtime(_context)?
         .pop_report()
         .map_or_else(BoaValue::null, |report| {
             BoaValue::from(boa_engine::JsString::from(report.as_str()))
@@ -13027,6 +12829,918 @@ fn host_worker_report(
         .to_std_string_lossy();
     agent_runtime(context)?.push_report(report);
     Ok(BoaValue::undefined())
+}
+
+fn host_async_disposable_stack_constructor(
+    _this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    // Get AsyncDisposableStack.prototype
+    let async_disposable_stack = context
+        .global_object()
+        .get(js_string!("AsyncDisposableStack"), context)?;
+    let prototype = async_disposable_stack
+        .as_object()
+        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
+        .and_then(|v| v.as_object());
+
+    let instance = JsObject::from_proto_and_data(prototype, AsyncDisposableStackData::new());
+
+    Ok(instance.into())
+}
+
+fn host_async_disposable_stack_use(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.use requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for AsyncDisposableStack.prototype.use")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("AsyncDisposableStack is disposed")
+            .into());
+    }
+
+    let value = args.get_or_undefined(0);
+    if value.is_null_or_undefined() {
+        data.stack.borrow_mut().push(AsyncDisposableResource {
+            value: BoaValue::undefined(),
+            method: BoaValue::undefined(),
+            needs_await: true,
+        });
+        return Ok(value.clone());
+    }
+
+    let value_obj = value.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.use requires an object value")
+    })?;
+
+    let symbol_ctor = context.intrinsics().constructors().symbol().constructor();
+    let for_method = symbol_ctor.get(js_string!("for"), context)?;
+    let async_dispose_symbol = for_method
+        .as_callable()
+        .unwrap()
+        .call(
+            &symbol_ctor.clone().into(),
+            &[js_string!("Symbol.asyncDispose").into()],
+            context,
+        )?;
+    let mut method = value_obj.get(async_dispose_symbol.to_property_key(context)?, context)?;
+    let mut needs_await = true;
+
+    if method.is_undefined() {
+        let dispose_symbol = for_method
+            .as_callable()
+            .unwrap()
+            .call(
+                &symbol_ctor.into(),
+                &[js_string!("Symbol.dispose").into()],
+                context,
+            )?;
+        method = value_obj.get(dispose_symbol.to_property_key(context)?, context)?;
+        needs_await = false;
+    }
+
+    if !method.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message(
+                "Disposable value must have a callable Symbol.asyncDispose or Symbol.dispose",
+            )
+            .into());
+    }
+
+    data.stack.borrow_mut().push(AsyncDisposableResource {
+        value: value.clone(),
+        method,
+        needs_await,
+    });
+
+    Ok(value.clone())
+}
+
+fn host_async_disposable_stack_adopt(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.adopt requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for AsyncDisposableStack.prototype.adopt")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("AsyncDisposableStack is disposed")
+            .into());
+    }
+
+    let value = args.get_or_undefined(0);
+    let on_dispose_async = args.get_or_undefined(1);
+    if !on_dispose_async.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("onDisposeAsync must be callable")
+            .into());
+    }
+
+    let value_capture = value.clone();
+    let on_dispose_async_capture = on_dispose_async.clone();
+    let method = NativeFunction::from_copy_closure_with_captures(
+        move |_this, _args, (v, f), context| {
+            let f_obj = f.as_object().expect("onDisposeAsync must be an object");
+            f_obj.call(&BoaValue::undefined(), &[v.clone()], context)
+        },
+        (value_capture, on_dispose_async_capture),
+    );
+
+    data.stack.borrow_mut().push(AsyncDisposableResource {
+        value: BoaValue::undefined(),
+        method: method.to_js_function(context.realm()).into(),
+        needs_await: true,
+    });
+
+    Ok(value.clone())
+}
+
+fn host_async_disposable_stack_defer(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.defer requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for AsyncDisposableStack.prototype.defer")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("AsyncDisposableStack is disposed")
+            .into());
+    }
+
+    let on_dispose_async = args.get_or_undefined(0);
+    if !on_dispose_async.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("onDisposeAsync must be callable")
+            .into());
+    }
+
+    data.stack.borrow_mut().push(AsyncDisposableResource {
+        value: BoaValue::undefined(),
+        method: on_dispose_async.clone(),
+        needs_await: true,
+    });
+
+    Ok(BoaValue::undefined())
+}
+
+fn host_async_disposable_stack_move(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.move requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for AsyncDisposableStack.prototype.move")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("AsyncDisposableStack is disposed")
+            .into());
+    }
+
+    let instance = JsObject::from_proto_and_data(obj.prototype(), AsyncDisposableStackData::new());
+
+    {
+        let next_data = instance
+            .downcast_ref::<AsyncDisposableStackData>()
+            .unwrap();
+        *next_data.stack.borrow_mut() = std::mem::take(&mut *data.stack.borrow_mut());
+    }
+    data.status.set(DisposableStackStatus::Disposed);
+
+    Ok(instance.into())
+}
+
+fn host_async_disposable_stack_dispose_async(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.disposeAsync requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ().with_message(
+            "Incompatible receiver for AsyncDisposableStack.prototype.disposeAsync",
+        )
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Ok(JsPromise::resolve(BoaValue::undefined(), context).into());
+    }
+
+    data.status.set(DisposableStackStatus::Disposed);
+
+    let resources = std::mem::take(&mut *data.stack.borrow_mut());
+    if resources.is_empty() {
+        return Ok(JsPromise::resolve(BoaValue::undefined(), context).into());
+    }
+
+    let mut js_resources = Vec::with_capacity(resources.len());
+    for res in resources {
+        let res_obj = ObjectInitializer::new(context)
+            .property(js_string!("value"), res.value, Attribute::all())
+            .property(js_string!("method"), res.method, Attribute::all())
+            .property(js_string!("needsAwait"), res.needs_await, Attribute::all())
+            .build();
+        js_resources.push(res_obj.into());
+    }
+    let resources_array = JsArray::from_iter(js_resources, context);
+
+    let loop_fn = context.eval(Source::from_bytes(
+        r#"
+        (async function(resources) {
+            let hasCompletion = false;
+            let completion;
+            while (resources.length > 0) {
+                const resource = resources.pop();
+                try {
+                    if (resource.method !== undefined) {
+                        if (resource.needsAwait) {
+                            await resource.method.call(resource.value);
+                        } else {
+                            resource.method.call(resource.value);
+                        }
+                    } else if (resource.needsAwait) {
+                        await undefined;
+                    }
+                } catch (error) {
+                    if (!hasCompletion) {
+                        completion = error;
+                        hasCompletion = true;
+                    } else {
+                        completion = new SuppressedError(error, completion, undefined);
+                    }
+                }
+            }
+            if (hasCompletion) {
+                throw completion;
+            }
+        })
+        "#,
+    ))?;
+
+    if let Some(callable) = loop_fn.as_object() {
+        callable.call(&BoaValue::undefined(), &[resources_array.into()], context)
+    } else {
+        Err(JsNativeError::typ()
+            .with_message("Internal error: loop_fn is not callable")
+            .into())
+    }
+}
+
+fn host_async_disposable_stack_disposed_getter(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("AsyncDisposableStack.prototype.disposed requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for AsyncDisposableStack.prototype.disposed")
+    })?;
+
+    Ok((data.status.get() == DisposableStackStatus::Disposed).into())
+}
+
+fn host_dispose_sync_using(
+    _this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let stack = args.get_or_undefined(0);
+    let has_body_error = args.get_or_undefined(1).to_boolean();
+    let body_error = args.get_or_undefined(2).clone();
+
+    let stack_obj = stack.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("__agentjsDisposeSyncUsing__ requires an object stack")
+    })?;
+
+    let dispose_method = stack_obj.get(js_string!("dispose"), context)?;
+    let result = if let Some(callable) = dispose_method.as_object() {
+        callable.call(stack, &[], context)
+    } else {
+        return Err(JsNativeError::typ().with_message("dispose is not callable").into());
+    };
+    if let Err(dispose_error) = result {
+        if has_body_error {
+            let suppressed_error_ctor = context
+                .global_object()
+                .get(js_string!("SuppressedError"), context)?;
+            if let Some(ctor) = suppressed_error_ctor.as_object() {
+                let err = ctor.call(
+                    &BoaValue::undefined(),
+                    &[dispose_error.to_opaque(context).into(), body_error, BoaValue::undefined()],
+                    context,
+                )?;
+                return Err(JsError::from_opaque(err));
+            }
+        }
+        return Err(dispose_error);
+    }
+
+    Ok(BoaValue::undefined())
+}
+
+fn host_dispose_async_using(
+    _this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let stack = args.get_or_undefined(0).clone();
+    let has_body_error = args.get_or_undefined(1).to_boolean();
+    let body_error = args.get_or_undefined(2).clone();
+
+    let stack_obj = stack.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("__agentjsDisposeAsyncUsing__ requires an object stack")
+    })?;
+
+    let dispose_async_method = stack_obj.get(js_string!("disposeAsync"), context)?;
+    let result = if let Some(callable) = dispose_async_method.as_object() {
+        callable.call(&stack, &[], context)?
+    } else {
+        return Err(JsNativeError::typ().with_message("disposeAsync is not callable").into());
+    };
+    let promise_obj = result.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("disposeAsync must return an object")
+    })?;
+    let promise = JsPromise::from_object(promise_obj.clone())?;
+
+    if has_body_error {
+        let on_rejected = NativeFunction::from_copy_closure_with_captures(
+            move |_this, args, captures, context| {
+                let dispose_error = args.get_or_undefined(0).clone();
+                let body_error = captures.clone();
+                let suppressed_error_ctor = context
+                    .global_object()
+                    .get(js_string!("SuppressedError"), context)?;
+                if let Some(ctor) = suppressed_error_ctor.as_object() {
+                    let err = ctor.call(
+                        &BoaValue::undefined(),
+                        &[dispose_error, body_error, BoaValue::undefined()],
+                        context,
+                    )?;
+                    return Err(JsError::from_opaque(err));
+                }
+                Err(JsError::from_opaque(dispose_error))
+            },
+            body_error,
+        );
+        Ok(promise
+            .then(
+                None,
+                Some(on_rejected.to_js_function(context.realm())),
+                context,
+            )
+            .into())
+    } else {
+        Ok(promise.into())
+    }
+}
+
+fn host_disposable_stack_constructor(
+    _this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    // Get DisposableStack.prototype
+    let disposable_stack = context
+        .global_object()
+        .get(js_string!("DisposableStack"), context)?;
+    let prototype = disposable_stack
+        .as_object()
+        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
+        .and_then(|v| v.as_object());
+
+    let instance = JsObject::from_proto_and_data(prototype, DisposableStackData::new());
+
+    Ok(instance.into())
+}
+
+fn host_disposable_stack_use(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("DisposableStack.prototype.use requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ().with_message("Incompatible receiver for DisposableStack.prototype.use")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("DisposableStack is disposed")
+            .into());
+    }
+
+    let value = args.get_or_undefined(0);
+    if value.is_null_or_undefined() {
+        return Ok(value.clone());
+    }
+
+    let value_obj = value.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.use requires an object value")
+    })?;
+
+    let symbol_ctor = context.intrinsics().constructors().symbol().constructor();
+    let for_method = symbol_ctor.get(js_string!("for"), context)?;
+    let dispose_symbol = for_method
+        .as_callable()
+        .unwrap()
+        .call(
+            &symbol_ctor.into(),
+            &[js_string!("Symbol.dispose").into()],
+            context,
+        )?;
+    let method = value_obj.get(dispose_symbol.to_property_key(context)?, context)?;
+    if !method.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("Disposable value must have a callable Symbol.dispose")
+            .into());
+    }
+
+    data.stack.borrow_mut().push(DisposableResource {
+        value: value.clone(),
+        method,
+    });
+
+    Ok(value.clone())
+}
+
+fn host_disposable_stack_adopt(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.adopt requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for DisposableStack.prototype.adopt")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("DisposableStack is disposed")
+            .into());
+    }
+
+    let value = args.get_or_undefined(0);
+    let on_dispose = args.get_or_undefined(1);
+    if !on_dispose.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("onDispose must be callable")
+            .into());
+    }
+
+    let value_capture = value.clone();
+    let on_dispose_capture = on_dispose.clone();
+    let method = NativeFunction::from_copy_closure_with_captures(
+        move |_this, _args, (v, f), context| {
+            let f_obj = f.as_object().expect("onDispose must be an object");
+            f_obj.call(&BoaValue::undefined(), &[v.clone()], context)
+        },
+        (value_capture, on_dispose_capture),
+    );
+
+    data.stack.borrow_mut().push(DisposableResource {
+        value: BoaValue::undefined(),
+        method: method.to_js_function(context.realm()).into(),
+    });
+
+    Ok(value.clone())
+}
+
+fn host_disposable_stack_defer(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.defer requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for DisposableStack.prototype.defer")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("DisposableStack is disposed")
+            .into());
+    }
+
+    let on_dispose = args.get_or_undefined(0);
+    if !on_dispose.is_callable() {
+        return Err(JsNativeError::typ()
+            .with_message("onDispose must be callable")
+            .into());
+    }
+
+    data.stack.borrow_mut().push(DisposableResource {
+        value: BoaValue::undefined(),
+        method: on_dispose.clone(),
+    });
+
+    Ok(BoaValue::undefined())
+}
+
+fn host_disposable_stack_move(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.move requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ().with_message("Incompatible receiver for DisposableStack.prototype.move")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Err(JsNativeError::reference()
+            .with_message("DisposableStack is disposed")
+            .into());
+    }
+
+    let instance = JsObject::from_proto_and_data(obj.prototype(), DisposableStackData::new());
+
+    {
+        let next_data = instance.downcast_ref::<DisposableStackData>().unwrap();
+        *next_data.stack.borrow_mut() = std::mem::take(&mut *data.stack.borrow_mut());
+    }
+    data.status.set(DisposableStackStatus::Disposed);
+
+    Ok(instance.into())
+}
+
+
+fn host_disposable_stack_dispose(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.dispose requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for DisposableStack.prototype.dispose")
+    })?;
+
+    if data.status.get() == DisposableStackStatus::Disposed {
+        return Ok(BoaValue::undefined());
+    }
+
+    data.status.set(DisposableStackStatus::Disposed);
+
+    let mut resources = std::mem::take(&mut *data.stack.borrow_mut());
+    let mut errors = Vec::new();
+
+    while let Some(resource) = resources.pop() {
+        let method_obj = resource.method.as_object().expect("method must be an object");
+        if let Err(e) = method_obj.call(&resource.value, &[], context) {
+            errors.push(e.to_opaque(context));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(BoaValue::undefined())
+    } else {
+        let mut completion = errors.remove(0);
+        let suppressed_error_ctor = context
+            .global_object()
+            .get(js_string!("SuppressedError"), context)?;
+
+        if let Some(ctor) = suppressed_error_ctor.as_object() {
+            for error in errors {
+                completion = ctor.call(
+                    &BoaValue::undefined(),
+                    &[error, completion, BoaValue::undefined()],
+                    context,
+                )?;
+            }
+        }
+        Err(JsError::from_opaque(completion))
+    }
+}
+
+fn host_disposable_stack_disposed_getter(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.as_object().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("DisposableStack.prototype.disposed requires an object receiver")
+    })?;
+    let data = obj.downcast_ref::<DisposableStackData>().ok_or_else(|| {
+        JsNativeError::typ()
+            .with_message("Incompatible receiver for DisposableStack.prototype.disposed")
+    })?;
+
+    Ok((data.status.get() == DisposableStackStatus::Disposed).into())
+}
+
+fn host_atomics_pause(
+    _: &BoaValue,
+    args: &[BoaValue],
+    _context: &mut Context,
+) -> JsResult<BoaValue> {
+    let iteration_number = args.get_or_undefined(0);
+    if !iteration_number.is_undefined() {
+        if !iteration_number.is_number() {
+            return Err(JsNativeError::typ()
+                .with_message("iterationNumber must be a non-negative integer")
+                .into());
+        }
+        let num = iteration_number.as_number().unwrap();
+        if num < 0.0 || num.is_nan() || num.is_infinite() || num.fract() != 0.0 {
+            return Err(JsNativeError::typ()
+                .with_message("iterationNumber must be a non-negative integer")
+                .into());
+        }
+    }
+    Ok(BoaValue::undefined())
+}
+
+fn host_suppressed_error_constructor(
+    _this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let error = args.get_or_undefined(0).clone();
+    let suppressed = args.get_or_undefined(1).clone();
+    let message = args.get_or_undefined(2);
+
+    let error_constructor = context.intrinsics().constructors().error().constructor();
+
+    let message_args = if message.is_undefined() {
+        vec![]
+    } else {
+        vec![message.clone()]
+    };
+
+    let instance = if error_constructor.is_callable() {
+        error_constructor.call(&BoaValue::undefined(), &message_args, context)?
+    } else {
+        return Err(JsNativeError::typ().with_message("Error constructor is not callable").into());
+    };
+    let instance_obj = instance.as_object().expect("Error constructor must return an object");
+
+    // Get SuppressedError.prototype
+    let suppressed_error = context
+        .global_object()
+        .get(js_string!("SuppressedError"), context)?;
+    if let Some(proto) = suppressed_error
+        .as_object()
+        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
+        .and_then(|v| v.as_object())
+    {
+        instance_obj.set_prototype(Some(proto));
+    }
+
+    instance_obj.define_property_or_throw(
+        js_string!("error"),
+        PropertyDescriptor::builder()
+            .value(error)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+    instance_obj.define_property_or_throw(
+        js_string!("suppressed"),
+        PropertyDescriptor::builder()
+            .value(suppressed)
+            .writable(true)
+            .enumerable(false)
+            .configurable(true),
+        context,
+    )?;
+
+    Ok(instance)
+}
+
+fn host_promise_all_keyed(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let promise_constructor = if let Some(obj) = this.as_object() {
+        if obj.is_callable() {
+            obj.clone()
+        } else {
+            context.intrinsics().constructors().promise().constructor()
+        }
+    } else {
+        context.intrinsics().constructors().promise().constructor()
+    };
+
+    let items = args.get_or_undefined(0);
+    if items.is_null() || items.is_undefined() {
+        return Err(JsNativeError::typ()
+            .with_message("Promise keyed methods require an object argument")
+            .into());
+    }
+    let dictionary = items.to_object(context)?;
+    let object_ctor = context.intrinsics().constructors().object().constructor();
+    let keys_method = object_ctor.get(js_string!("keys"), context)?;
+    let keys_val = if let Some(callable) = keys_method.as_object() {
+        callable.call(&object_ctor.into(), &[items.clone()], context)?
+    } else {
+        return Err(JsNativeError::typ().with_message("Object.keys is not callable").into());
+    };
+    let keys_obj = keys_val.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("Object.keys must return an object")
+    })?;
+    let keys_array = JsArray::from_object(keys_obj.clone())?;
+    let keys_len = keys_array.length(context)?;
+
+    let mut values = Vec::with_capacity(keys_len as usize);
+    let mut keys_values = Vec::with_capacity(keys_len as usize);
+    for i in 0..keys_len {
+        let key_val = keys_array.at(i as i64, context)?;
+        let key = key_val.to_property_key(context)?;
+        keys_values.push(key_val.clone());
+        values.push(dictionary.get(key, context)?);
+    }
+
+    let values_array = JsArray::from_iter(values, context);
+
+    let all_method = promise_constructor.get(js_string!("all"), context)?;
+    let promise_value = if let Some(callable) = all_method.as_object() {
+        callable.call(
+            &promise_constructor.clone().into(),
+            &[values_array.into()],
+            context,
+        )?
+    } else {
+        return Err(JsNativeError::typ().with_message("Promise.all is not callable").into());
+    };
+    let promise_obj = promise_value.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("Promise.all must return an object")
+    })?;
+    let promise = JsPromise::from_object(promise_obj.clone())?;
+
+    let on_fulfilled = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, captures, context| {
+            let results = args.get_or_undefined(0);
+            let results_obj = results.as_object().ok_or_else(|| {
+                JsNativeError::typ().with_message("Promise.all result must be an object")
+            })?;
+            let results_array = JsArray::from_object(results_obj.clone())?;
+            let output = JsObject::with_null_proto();
+            for (i, key_value) in captures.iter().enumerate() {
+                let result = results_array.at(i as i64, context)?;
+                let key = key_value.to_property_key(context)?;
+                output.create_data_property_or_throw(key, result, context)?;
+            }
+            Ok(output.into())
+        },
+        keys_values,
+    );
+
+    Ok(promise
+        .then(
+            Some(on_fulfilled.to_js_function(context.realm())),
+            None,
+            context,
+        )
+        .into())
+}
+
+fn host_promise_all_settled_keyed(
+    this: &BoaValue,
+    args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let promise_constructor = if let Some(obj) = this.as_object() {
+        if obj.is_callable() {
+            obj.clone()
+        } else {
+            context.intrinsics().constructors().promise().constructor()
+        }
+    } else {
+        context.intrinsics().constructors().promise().constructor()
+    };
+
+    let items = args.get_or_undefined(0);
+    if items.is_null() || items.is_undefined() {
+        return Err(JsNativeError::typ()
+            .with_message("Promise keyed methods require an object argument")
+            .into());
+    }
+    let dictionary = items.to_object(context)?;
+    let object_ctor = context.intrinsics().constructors().object().constructor();
+    let keys_method = object_ctor.get(js_string!("keys"), context)?;
+    let keys_val = if let Some(callable) = keys_method.as_object() {
+        callable.call(&object_ctor.into(), &[items.clone()], context)?
+    } else {
+        return Err(JsNativeError::typ().with_message("Object.keys is not callable").into());
+    };
+    let keys_obj = keys_val.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("Object.keys must return an object")
+    })?;
+    let keys_array = JsArray::from_object(keys_obj.clone())?;
+    let keys_len = keys_array.length(context)?;
+
+    let mut values = Vec::with_capacity(keys_len as usize);
+    let mut keys_values = Vec::with_capacity(keys_len as usize);
+    for i in 0..keys_len {
+        let key_val = keys_array.at(i as i64, context)?;
+        let key = key_val.to_property_key(context)?;
+        keys_values.push(key_val.clone());
+        values.push(dictionary.get(key, context)?);
+    }
+
+    let values_array = JsArray::from_iter(values, context);
+
+    let all_settled_method = promise_constructor.get(js_string!("allSettled"), context)?;
+    let promise_value = if let Some(callable) = all_settled_method.as_object() {
+        callable.call(
+            &promise_constructor.clone().into(),
+            &[values_array.into()],
+            context,
+        )?
+    } else {
+        return Err(JsNativeError::typ().with_message("Promise.allSettled is not callable").into());
+    };
+    let promise_obj = promise_value.as_object().ok_or_else(|| {
+        JsNativeError::typ().with_message("Promise.allSettled must return an object")
+    })?;
+    let promise = JsPromise::from_object(promise_obj.clone())?;
+
+    let on_fulfilled = NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, captures, context| {
+            let results = args.get_or_undefined(0);
+            let results_obj = results.as_object().ok_or_else(|| {
+                JsNativeError::typ().with_message("Promise.allSettled result must be an object")
+            })?;
+            let results_array = JsArray::from_object(results_obj.clone())?;
+            let output = JsObject::with_null_proto();
+            for (i, key_value) in captures.iter().enumerate() {
+                let result = results_array.at(i as i64, context)?;
+                let key = key_value.to_property_key(context)?;
+                output.create_data_property_or_throw(key, result, context)?;
+            }
+            Ok(output.into())
+        },
+        keys_values,
+    );
+
+    Ok(promise
+        .then(
+            Some(on_fulfilled.to_js_function(context.realm())),
+            None,
+            context,
+        )
+        .into())
 }
 
 fn host_get_cached_import(
