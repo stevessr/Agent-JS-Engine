@@ -5608,8 +5608,15 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             });
           }
 
+          const _hasOwn = Object.prototype.hasOwnProperty;
+          const _getOwnPropDesc = Object.getOwnPropertyDescriptor;
+
+          function getOwnOptionValue(options, property) {
+            return options[property];
+          }
+
           function getOption(options, property, type, values, fallback) {
-            let value = options[property];
+            let value = getOwnOptionValue(options, property);
             if (value === undefined) return fallback;
             if (type === 'boolean') {
               value = Boolean(value);
@@ -5628,7 +5635,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           function getNumberOption(options, property, minimum, maximum, fallback) {
-            let value = options[property];
+            let value = getOwnOptionValue(options, property);
             if (value === undefined) return fallback;
             value = Number(value);
             if (!Number.isFinite(value) || value < minimum || value > maximum) {
@@ -5801,11 +5808,37 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const resolvedCalendar = calendar ||
               (localeCalendarMatch ? canonicalizeCalendar(localeCalendarMatch[1]) : 'gregory');
 
+            // Detect locale's default numbering system if not explicitly specified
+            function detectLocaleNumberingSystem(loc) {
+              if (!loc) return 'latn';
+              const nuMatch = loc.match(/-u(?:-[a-z0-9]{2,8})*-nu-([a-z0-9]+)/i);
+              if (nuMatch) return nuMatch[1].toLowerCase();
+              // Known locales with non-Latin default numbering systems
+              const lower = loc.toLowerCase();
+              if (lower.startsWith('ar')) return 'arab';
+              if (lower.startsWith('fa') || lower.startsWith('ps')) return 'arabext';
+              if (lower.startsWith('ne') || lower.startsWith('mr')) return 'deva';
+              if (lower.startsWith('bn')) return 'beng';
+              if (lower.startsWith('gu')) return 'gujr';
+              if (lower.startsWith('pa')) return 'guru';
+              if (lower.startsWith('km')) return 'khmr';
+              if (lower.startsWith('kn')) return 'knda';
+              if (lower.startsWith('lo')) return 'laoo';
+              if (lower.startsWith('ml')) return 'mlym';
+              if (lower.startsWith('my')) return 'mymr';
+              if (lower.startsWith('or')) return 'orya';
+              if (lower.startsWith('ta')) return 'tamldec';
+              if (lower.startsWith('te')) return 'telu';
+              if (lower.startsWith('th')) return 'thai';
+              if (lower.startsWith('bo')) return 'tibt';
+              return 'latn';
+            }
+
             // Store resolved options
             const resolvedOpts = {
               locale: locale,
               calendar: resolvedCalendar,
-              numberingSystem: numberingSystem ? String(numberingSystem).toLowerCase() : 'latn',
+              numberingSystem: numberingSystem ? String(numberingSystem).toLowerCase() : detectLocaleNumberingSystem(locale),
               timeZone: timeZone,
               hourCycle: hourCycle,
               hour12: hour12,
@@ -6012,6 +6045,14 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           function localeUses24Hour(locale) {
+            if (typeof locale === 'string') {
+              // Check unicode hc extension first
+              const hcMatch = locale.match(/-u(?:-[a-z0-9]{2,8})*-hc-([a-z0-9]+)/i);
+              if (hcMatch) {
+                const hc = hcMatch[1].toLowerCase();
+                return hc === 'h23' || hc === 'h24';
+              }
+            }
             const lower = (locale || 'en-US').toLowerCase();
             return lower.startsWith('zh') || lower.startsWith('ja') ||
               lower.startsWith('ko') || lower.startsWith('de') || lower.startsWith('ru') ||
@@ -6044,23 +6085,31 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return period;
           }
 
+          function safeSet(obj, key, value) {
+            Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+          }
+
           function applyDateTimeStyleDefaults(opts) {
-            const adjusted = Object.assign({}, opts);
+            // Use Object.create(null) to avoid triggering tainted Object.prototype setters
+            const adjusted = Object.create(null);
+            const keys = ['calendar','numberingSystem','timeZone','weekday','era','year','month','day',
+              'dayPeriod','hour','minute','second','fractionalSecondDigits','timeZoneName',
+              'hourCycle','hour12','dateStyle','timeStyle','overrideYear','locale'];
+            for (const k of keys) {
+              if (opts[k] !== undefined) safeSet(adjusted, k, opts[k]);
+            }
             if (opts.dateStyle !== undefined) {
-              adjusted.year ??= 'numeric';
-              adjusted.month ??= opts.dateStyle === 'short' ? 'numeric' : (opts.dateStyle === 'medium' ? 'short' : 'long');
-              adjusted.day ??= 'numeric';
-              if (opts.dateStyle === 'full') {
-                adjusted.weekday ??= 'long';
-              }
+              if (adjusted.year === undefined) safeSet(adjusted, 'year', opts.dateStyle === 'short' ? '2-digit' : 'numeric');
+              if (adjusted.month === undefined) safeSet(adjusted, 'month', opts.dateStyle === 'short' ? 'numeric' : (opts.dateStyle === 'medium' ? 'short' : 'long'));
+              if (adjusted.day === undefined) safeSet(adjusted, 'day', 'numeric');
+              if (opts.dateStyle === 'full' && adjusted.weekday === undefined) safeSet(adjusted, 'weekday', 'long');
             }
             if (opts.timeStyle !== undefined) {
-              adjusted.hour ??= 'numeric';
-              adjusted.minute ??= 'numeric';
-              adjusted.second ??= 'numeric';
-              if (opts.timeStyle === 'full' || opts.timeStyle === 'long') {
-                adjusted.timeZoneName ??= 'short';
-              }
+              if (adjusted.hour === undefined) safeSet(adjusted, 'hour', 'numeric');
+              if (adjusted.minute === undefined) safeSet(adjusted, 'minute', 'numeric');
+              if (opts.timeStyle !== 'short' && adjusted.second === undefined) safeSet(adjusted, 'second', 'numeric');
+              if (opts.timeStyle === 'full' && adjusted.timeZoneName === undefined) safeSet(adjusted, 'timeZoneName', 'long');
+              else if (opts.timeStyle === 'long' && adjusted.timeZoneName === undefined) safeSet(adjusted, 'timeZoneName', 'short');
             }
             return adjusted;
           }
@@ -6134,21 +6183,50 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 });
               }
               if (normalized.year !== undefined) {
-                const displayYear = fields.calendarYear ?? fields.year;
-                dateParts.push({
-                  type: 'year',
-                  value: normalized.year === '2-digit'
-                    ? String(displayYear % 100).padStart(2, '0')
-                    : String(displayYear),
-                });
+                const displayYear = normalized.overrideYear !== undefined
+                  ? normalized.overrideYear
+                  : (fields.calendarYear ?? fields.year);
+                // Proleptic Gregorian: no year 0; year 0 CE = 1 BC, year -1 CE = 2 BC, etc.
+                const isBC = displayYear <= 0;
+                const prolepticYear = isBC ? 1 - displayYear : displayYear;
+                const cal = String(normalized.calendar || 'gregory').toLowerCase();
+                let yearValue;
+                if ((cal === 'chinese' || cal === 'dangi') && normalized.year === 'numeric') {
+                  const stems = '甲乙丙丁戊己庚辛壬癸';
+                  const branches = '子丑寅卯辰巳午未申酉戌亥';
+                  const y = fields.year - 4;
+                  yearValue = stems[(((y % 10) + 10) % 10)] + branches[(((y % 12) + 12) % 12)] + '年';
+                } else {
+                  yearValue = normalized.year === '2-digit'
+                    ? String(prolepticYear % 100).padStart(2, '0')
+                    : String(prolepticYear);
+                }
+                dateParts.push({ type: 'year', value: yearValue });
               }
               if (normalized.era !== undefined) {
-                dateParts.push({ type: 'era', value: fields.year >= 1 ? 'AD' : 'BC' });
+                const displayYear = normalized.overrideYear !== undefined
+                  ? normalized.overrideYear
+                  : (fields.calendarYear ?? fields.year);
+                dateParts.push({ type: 'era', value: displayYear >= 1 ? 'AD' : 'BC' });
               }
 
+              // Determine if month is a named style (long/short/narrow) for locale-aware separators
+              const namedMonth = normalized.month === 'long' || normalized.month === 'short' || normalized.month === 'narrow';
               dateParts.forEach((part, index) => {
                 if (index > 0) {
-                  pushLiteral(index === 1 && dateParts[0].type === 'weekday' ? ', ' : '/');
+                  const prev = dateParts[index - 1].type;
+                  const cur = part.type;
+                  if (prev === 'weekday') {
+                    pushLiteral(', ');
+                  } else if (namedMonth && prev === 'month' && cur === 'day') {
+                    pushLiteral(' ');
+                  } else if (namedMonth && prev === 'day' && cur === 'year') {
+                    pushLiteral(', ');
+                  } else if (namedMonth && prev === 'month' && cur === 'year') {
+                    pushLiteral(' ');
+                  } else {
+                    pushLiteral('/');
+                  }
                 }
                 parts.push(part);
               });
@@ -6229,13 +6307,22 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               }
 
               if (normalized.timeZoneName !== undefined) {
-                let zoneName = normalized.timeZone;
-                if (zoneName === 'America/New_York') zoneName = 'EST';
-                else if (zoneName === 'America/Los_Angeles') zoneName = 'PST';
-                else if (zoneName === 'Europe/Berlin' || zoneName === 'Europe/Vienna') zoneName = 'GMT+1';
-                else if (zoneName === 'UTC') zoneName = 'UTC';
+                const tzStyle = normalized.timeZoneName;
+                let zoneName = normalized.timeZone || 'UTC';
+                if (tzStyle === 'long') {
+                  if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'Coordinated Universal Time';
+                  else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'Greenwich Mean Time';
+                  else if (zoneName === 'America/New_York') zoneName = 'Eastern Standard Time';
+                  else if (zoneName === 'America/Los_Angeles') zoneName = 'Pacific Standard Time';
+                } else {
+                  if (zoneName === 'UTC' || zoneName === 'Etc/UTC') zoneName = 'UTC';
+                  else if (zoneName === 'GMT' || zoneName === 'Etc/GMT') zoneName = 'GMT';
+                  else if (zoneName === 'America/New_York') zoneName = 'EST';
+                  else if (zoneName === 'America/Los_Angeles') zoneName = 'PST';
+                  else if (zoneName === 'Europe/Berlin' || zoneName === 'Europe/Vienna') zoneName = 'GMT+1';
+                }
                 pushLiteral(' ');
-                parts.push({ type: 'timeZoneName', value: zoneName || 'UTC' });
+                parts.push({ type: 'timeZoneName', value: zoneName });
               }
             }
 
@@ -6245,9 +6332,35 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return parts;
           }
 
+          const NUMBERING_SYSTEM_DIGITS = {
+            arab: 0x0660, arabext: 0x06F0, beng: 0x09E6, deva: 0x0966,
+            gujr: 0x0AE6, guru: 0x0A66, khmr: 0x17E0, knda: 0x0CE6,
+            laoo: 0x0ED0, mlym: 0x0D66, mong: 0x1810, mymr: 0x1040,
+            orya: 0x0B66, tamldec: 0x0BE6, telu: 0x0C66, thai: 0x0E50, tibt: 0x0F20,
+          };
+          // Decimal separators for non-Latin numbering systems
+          const NUMBERING_SYSTEM_DECIMAL = {
+            arab: '\u066B', arabext: '\u066B',
+          };
+
+          function applyNumberingSystem(str, ns) {
+            if (!ns || ns === 'latn') return str;
+            if (ns === 'hanidec') {
+              const hanidec = ['〇','一','二','三','四','五','六','七','八','九'];
+              return str.replace(/[0-9]/g, (d) => hanidec[Number(d)]);
+            }
+            const base = NUMBERING_SYSTEM_DIGITS[ns];
+            if (base === undefined) return str;
+            let result = str.replace(/[0-9]/g, (d) => String.fromCodePoint(base + Number(d)));
+            const dec = NUMBERING_SYSTEM_DECIMAL[ns];
+            if (dec) result = result.replace(/\./g, dec);
+            return result;
+          }
+
           // Helper function to format date according to resolved options
           function formatDateWithOptions(d, opts) {
-            return formatDateWithOptionsToParts(d, opts).map((part) => part.value).join('');
+            const raw = formatDateWithOptionsToParts(d, opts).map((part) => part.value).join('');
+            return applyNumberingSystem(raw, opts.numberingSystem);
           }
 
           function normalizeDateTimeFormatInput(value) {
@@ -6288,6 +6401,24 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               Object.prototype.toString.call(value) === '[object Temporal.PlainMonthDay]';
           }
 
+          function isTemporalPlainDateValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.PlainDate]';
+          }
+
+          function isTemporalPlainDateTimeValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.PlainDateTime]';
+          }
+
+          function isTemporalPlainYearMonthValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.PlainYearMonth]';
+          }
+
           function temporalCalendarId(value) {
             try {
               if (typeof value.calendarId === 'string') {
@@ -6307,7 +6438,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           function copyDefinedDateTimeFormatOptions(opts) {
-            const adjusted = {};
+            const adjusted = Object.create(null);
             const keys = [
               'calendar',
               'numberingSystem',
@@ -6330,7 +6461,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             ];
             for (const key of keys) {
               if (opts[key] !== undefined) {
-                adjusted[key] = opts[key];
+                Object.defineProperty(adjusted, key, { value: opts[key], writable: true, enumerable: true, configurable: true });
               }
             }
             return adjusted;
@@ -6385,7 +6516,10 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           function temporalPlainTimeFormattingOptions(slot) {
-            if (slot.resolvedOpts.dateStyle !== undefined) {
+            // dateStyle-only (no timeStyle) is a no-overlap error
+            if (slot.resolvedOpts.dateStyle !== undefined && slot.resolvedOpts.timeStyle === undefined &&
+                slot.resolvedOpts.hour === undefined && slot.resolvedOpts.minute === undefined &&
+                slot.resolvedOpts.second === undefined && !slot.needsDefault) {
               throw new TypeError('PlainTime cannot be formatted with dateStyle');
             }
 
@@ -6403,9 +6537,10 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               opts.minute !== undefined ||
               opts.second !== undefined;
             if (!hasCoreTimeFields) {
-              if (slot.resolvedOpts.year !== undefined ||
+              // Only throw if explicit date-only fields were requested (not needsDefault)
+              if (!slot.needsDefault && (slot.resolvedOpts.year !== undefined ||
                   slot.resolvedOpts.month !== undefined ||
-                  slot.resolvedOpts.day !== undefined) {
+                  slot.resolvedOpts.day !== undefined)) {
                 throw new TypeError('PlainTime does not overlap with date fields');
               }
               const use24Hour = slot.resolvedOpts.hour12 === false ||
@@ -6441,7 +6576,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
           }
 
           function temporalPlainMonthDayFormattingOptions(slot, plainMonthDay) {
-            if (slot.resolvedOpts.timeStyle !== undefined) {
+            if (slot.resolvedOpts.timeStyle !== undefined && slot.resolvedOpts.dateStyle === undefined) {
               throw new TypeError('PlainMonthDay cannot be formatted with timeStyle');
             }
 
@@ -6492,6 +6627,146 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               : formatDateWithOptions(d, opts);
           }
 
+          function temporalPlainDateFormattingOptions(slot, plainDate) {
+            // PlainDate has no time data; timeStyle-only is a no-overlap error
+            if (slot.resolvedOpts.timeStyle !== undefined && slot.resolvedOpts.dateStyle === undefined &&
+                slot.resolvedOpts.year === undefined && slot.resolvedOpts.month === undefined &&
+                slot.resolvedOpts.day === undefined && slot.resolvedOpts.weekday === undefined &&
+                slot.resolvedOpts.era === undefined && !slot.needsDefault) {
+              throw new TypeError('PlainDate does not overlap with timeStyle');
+            }
+            const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
+            // Strip time-only fields
+            delete opts.hour; delete opts.minute; delete opts.second;
+            delete opts.fractionalSecondDigits; delete opts.dayPeriod;
+            delete opts.timeZoneName; delete opts.dateStyle; delete opts.timeStyle;
+            const hasNonEraDateFields = opts.weekday !== undefined ||
+              opts.year !== undefined || opts.month !== undefined || opts.day !== undefined;
+            const hasAnyDateFields = hasNonEraDateFields || opts.era !== undefined;
+            if (!hasAnyDateFields || (!hasNonEraDateFields && opts.era !== undefined)) {
+              if (!slot.needsDefault && slot.resolvedOpts.hour !== undefined) {
+                throw new TypeError('PlainDate does not overlap with time fields');
+              }
+              opts.year = 'numeric'; opts.month = 'numeric'; opts.day = 'numeric';
+            }
+            opts.timeZone = 'UTC';
+            opts.locale = slot.resolvedOpts.locale;
+            return opts;
+          }
+
+          // Shift a UTC ms timestamp into the valid JS Date range by adding/subtracting
+          // multiples of 400 years (146097 days) to preserve weekday and calendar cycle.
+          const MS_PER_DAY = 86400000;
+          const DAYS_PER_400Y = 146097;
+          const MS_PER_400Y = DAYS_PER_400Y * MS_PER_DAY;
+          const MAX_DATE_MS = 8640000000000000;
+
+          function temporalDateToInRangeUTC(year, month0, day) {
+            // month0 is 0-based
+            let y = year, m = month0, d = day;
+            // Shift year into range by multiples of 400
+            while (true) {
+              const ms = Date.UTC(y, m, d);
+              if (!isNaN(ms) && ms >= -MAX_DATE_MS && ms <= MAX_DATE_MS) return ms;
+              if (y < 0) y += 400; else y -= 400;
+            }
+          }
+
+          function formatTemporalPlainDate(slot, plainDate, toParts) {
+            const match = String(plainDate).match(/^([+-]?\d{4,6})-(\d{2})-(\d{2})/);
+            if (!match) throw new RangeError('Invalid PlainDate');
+            const actualYear = Number(match[1]);
+            const ms = temporalDateToInRangeUTC(actualYear, Number(match[2]) - 1, Number(match[3]));
+            const d = new Date(ms);
+            const opts = temporalPlainDateFormattingOptions(slot, plainDate);
+            opts.overrideYear = actualYear;
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
+          function temporalPlainDateTimeFormattingOptions(slot) {
+            const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
+            delete opts.timeZoneName; delete opts.dateStyle; delete opts.timeStyle;
+            const hasNonEraDateFields = opts.weekday !== undefined ||
+              opts.year !== undefined || opts.month !== undefined || opts.day !== undefined;
+            const hasDateFields = hasNonEraDateFields || opts.era !== undefined;
+            const hasTimeFields = opts.hour !== undefined || opts.minute !== undefined ||
+              opts.second !== undefined || opts.fractionalSecondDigits !== undefined ||
+              opts.dayPeriod !== undefined;
+            if (!hasDateFields && !hasTimeFields) {
+              opts.year = 'numeric'; opts.month = 'numeric'; opts.day = 'numeric';
+              opts.hour = 'numeric'; opts.minute = '2-digit'; opts.second = '2-digit';
+            } else if (slot.needsDefault || (!hasNonEraDateFields && opts.era !== undefined && !hasTimeFields)) {
+              // needsDefault or era-only: add both date and time defaults for PlainDateTime
+              opts.year ??= 'numeric'; opts.month ??= 'numeric'; opts.day ??= 'numeric';
+              opts.hour ??= 'numeric'; opts.minute ??= '2-digit'; opts.second ??= '2-digit';
+            }
+            opts.timeZone = 'UTC';
+            opts.locale = slot.resolvedOpts.locale;
+            return opts;
+          }
+
+          function formatTemporalPlainDateTime(slot, plainDateTime, toParts) {
+            const match = String(plainDateTime).match(/^([+-]?\d{4,6})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?/);
+            if (!match) throw new RangeError('Invalid PlainDateTime');
+            const actualYear = Number(match[1]);
+            const fracMs = match[7] ? Math.round(Number(match[7].substring(0, 3).padEnd(3, '0'))) : 0;
+            const timeOffset = Number(match[4]) * 3600000 + Number(match[5]) * 60000 + Number(match[6]) * 1000 + fracMs;
+            let baseMs = temporalDateToInRangeUTC(actualYear, Number(match[2]) - 1, Number(match[3]));
+            let totalMs = baseMs + timeOffset;
+            // If adding time offset pushes out of range, shift base by -400 years
+            if (isNaN(totalMs) || totalMs > 8640000000000000 || totalMs < -8640000000000000) {
+              baseMs = temporalDateToInRangeUTC(actualYear - 400, Number(match[2]) - 1, Number(match[3]));
+              totalMs = baseMs + timeOffset;
+            }
+            const d = new Date(totalMs);
+            const opts = temporalPlainDateTimeFormattingOptions(slot);
+            opts.overrideYear = actualYear;
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
+          function temporalPlainYearMonthFormattingOptions(slot, plainYearMonth) {
+            if (slot.resolvedOpts.timeStyle !== undefined && slot.resolvedOpts.dateStyle === undefined) {
+              throw new TypeError('PlainYearMonth cannot be formatted with timeStyle');
+            }
+            const formatterCalendar = resolveCalendarId(slot.resolvedOpts);
+            const valueCalendar = temporalCalendarId(plainYearMonth);
+            if (formatterCalendar !== valueCalendar && formatterCalendar !== 'gregory' && formatterCalendar !== 'iso8601') {
+              throw new RangeError('calendar mismatch');
+            }
+            const opts = applyDateTimeStyleDefaults(copyDefinedDateTimeFormatOptions(slot.resolvedOpts));
+            delete opts.dateStyle; delete opts.timeStyle; delete opts.weekday; delete opts.era;
+            delete opts.day; delete opts.dayPeriod; delete opts.hour; delete opts.minute;
+            delete opts.second; delete opts.fractionalSecondDigits; delete opts.timeZoneName;
+            const hasFields = opts.year !== undefined || opts.month !== undefined;
+            if (!hasFields) {
+              if (slot.resolvedOpts.day !== undefined || slot.resolvedOpts.hour !== undefined ||
+                  slot.resolvedOpts.minute !== undefined || slot.resolvedOpts.second !== undefined) {
+                throw new TypeError('PlainYearMonth does not overlap with requested fields');
+              }
+              opts.year = 'numeric'; opts.month = 'numeric';
+            }
+            opts.timeZone = 'UTC';
+            opts.locale = slot.resolvedOpts.locale;
+            return opts;
+          }
+
+          function formatTemporalPlainYearMonth(slot, plainYearMonth, toParts) {
+            const match = String(plainYearMonth).match(/^([+-]?\d{4,6})-(\d{2})/);
+            if (!match) throw new RangeError('Invalid PlainYearMonth');
+            const actualYear = Number(match[1]);
+            const ms = temporalDateToInRangeUTC(actualYear, Number(match[2]) - 1, 1);
+            const d = new Date(ms);
+            const opts = temporalPlainYearMonthFormattingOptions(slot, plainYearMonth);
+            opts.overrideYear = actualYear;
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
           // Helper to make non-constructable getter/function
           function makeNonConstructableAccessor(impl, name) {
             const arrowWrapper = (...args) => impl.apply(undefined, args);
@@ -6520,6 +6795,15 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (isTemporalPlainTimeValue(date)) {
                 return formatTemporalPlainTime(slot, date, false);
               }
+              if (isTemporalPlainDateTimeValue(date)) {
+                return formatTemporalPlainDateTime(slot, date, false);
+              }
+              if (isTemporalPlainDateValue(date)) {
+                return formatTemporalPlainDate(slot, date, false);
+              }
+              if (isTemporalPlainYearMonthValue(date)) {
+                return formatTemporalPlainYearMonth(slot, date, false);
+              }
               if (isTemporalPlainMonthDayValue(date)) {
                 return formatTemporalPlainMonthDay(slot, date, false);
               }
@@ -6527,8 +6811,18 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (isNaN(d.getTime())) {
                 throw new RangeError('Invalid time value');
               }
-              // Use our custom formatter when dayPeriod is set (native DTF doesn't support it)
-              if (slot.resolvedOpts.dayPeriod !== undefined) {
+              // Use our custom formatter when dayPeriod, fractionalSecondDigits, non-Latin numbering system,
+              // or needsDefault is set (needsDefault: underlying DTF was created without explicit fields,
+              // so it may add time components when hour12/hourCycle is set)
+              const needsCustomFormat = slot.needsDefault ||
+                slot.resolvedOpts.dayPeriod !== undefined ||
+                slot.resolvedOpts.fractionalSecondDigits !== undefined ||
+                (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
+                slot.resolvedOpts.calendar === 'chinese' ||
+                slot.resolvedOpts.calendar === 'dangi' ||
+                slot.resolvedOpts.dateStyle !== undefined ||
+                slot.resolvedOpts.timeStyle !== undefined;
+              if (needsCustomFormat) {
                 return formatDateWithOptions(d, slot.resolvedOpts);
               }
               if (slot.instance && typeof slot.instance.format === 'function') {
@@ -6561,6 +6855,15 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isTemporalPlainTimeValue(date)) {
               return formatTemporalPlainTime(slot, date, true);
             }
+            if (isTemporalPlainDateTimeValue(date)) {
+              return formatTemporalPlainDateTime(slot, date, true);
+            }
+            if (isTemporalPlainDateValue(date)) {
+              return formatTemporalPlainDate(slot, date, true);
+            }
+            if (isTemporalPlainYearMonthValue(date)) {
+              return formatTemporalPlainYearMonth(slot, date, true);
+            }
             if (isTemporalPlainMonthDayValue(date)) {
               return formatTemporalPlainMonthDay(slot, date, true);
             }
@@ -6568,7 +6871,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isNaN(d.getTime())) {
               throw new RangeError('Invalid time value');
             }
-            if (slot.instance && typeof slot.instance.formatToParts === 'function') {
+            if (slot.instance && !slot.needsDefault && typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
             return formatDateWithOptionsToParts(d, slot.resolvedOpts);
@@ -6580,34 +6883,99 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             configurable: true
           });
 
+          // Classify a value into a Temporal type name, or null for non-Temporal
+          function temporalTypeName(value) {
+            if (typeof value !== 'object' || value === null) return null;
+            const tag = Object.prototype.toString.call(value);
+            const m = tag.match(/^\[object Temporal\.(\w+)\]$/);
+            return m ? m[1] : null;
+          }
+
+          // Format a single value (Date or Temporal) using this slot
+          function formatSingleValue(slot, value) {
+            if (isTemporalInstantValue(value)) return formatTemporalInstant(slot, value, false);
+            if (isTemporalPlainTimeValue(value)) return formatTemporalPlainTime(slot, value, false);
+            if (isTemporalPlainDateTimeValue(value)) return formatTemporalPlainDateTime(slot, value, false);
+            if (isTemporalPlainDateValue(value)) return formatTemporalPlainDate(slot, value, false);
+            if (isTemporalPlainYearMonthValue(value)) return formatTemporalPlainYearMonth(slot, value, false);
+            if (isTemporalPlainMonthDayValue(value)) return formatTemporalPlainMonthDay(slot, value, false);
+            const d = normalizeDateTimeFormatInput(value);
+            if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
+            const needsCustom = slot.needsDefault || slot.resolvedOpts.dayPeriod !== undefined ||
+              slot.resolvedOpts.fractionalSecondDigits !== undefined ||
+              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn');
+            if (!needsCustom && slot.instance && typeof slot.instance.format === 'function') {
+              return slot.instance.format(d);
+            }
+            return formatDateWithOptions(d, slot.resolvedOpts);
+          }
+
+          // Format a single value to parts
+          function formatSingleValueToParts(slot, value) {
+            if (isTemporalInstantValue(value)) return formatTemporalInstant(slot, value, true);
+            if (isTemporalPlainTimeValue(value)) return formatTemporalPlainTime(slot, value, true);
+            if (isTemporalPlainDateTimeValue(value)) return formatTemporalPlainDateTime(slot, value, true);
+            if (isTemporalPlainDateValue(value)) return formatTemporalPlainDate(slot, value, true);
+            if (isTemporalPlainYearMonthValue(value)) return formatTemporalPlainYearMonth(slot, value, true);
+            if (isTemporalPlainMonthDayValue(value)) return formatTemporalPlainMonthDay(slot, value, true);
+            const d = normalizeDateTimeFormatInput(value);
+            if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
+            if (slot.instance && !slot.needsDefault && typeof slot.instance.formatToParts === 'function') {
+              return slot.instance.formatToParts(d);
+            }
+            return formatDateWithOptionsToParts(d, slot.resolvedOpts);
+          }
+
+          // Core formatRange logic: returns {startStr, endStr, separator}
+          // or {collapsed: str} when practically equal
+          function formatRangeCore(slot, startDate, endDate) {
+            const startType = temporalTypeName(startDate);
+            const endType = temporalTypeName(endDate);
+            // Mixed Temporal types → TypeError
+            if (startType !== endType) {
+              throw new TypeError('formatRange: incompatible argument types');
+            }
+            const startStr = formatSingleValue(slot, startDate);
+            const endStr = formatSingleValue(slot, endDate);
+            // Practically equal: same formatted output
+            if (startStr === endStr) return { collapsed: startStr };
+            return { startStr, endStr };
+          }
+
           // formatRange method
           const formatRangeImpl = function(startDate, endDate) {
             const slot = dtfSlots.get(this);
             if (!slot) {
-                throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRange called on incompatible receiver');
-              }
-              if (startDate === undefined || endDate === undefined) {
-                throw new TypeError('startDate and endDate are required');
-              }
+              throw new TypeError('Method Intl.DateTimeFormat.prototype.formatRange called on incompatible receiver');
+            }
+            if (startDate === undefined || endDate === undefined) {
+              throw new TypeError('startDate and endDate are required');
+            }
+            const result = formatRangeCore(slot, startDate, endDate);
+            if (result.collapsed !== undefined) return result.collapsed;
+            // Try underlying instance for range separator
+            const startType = temporalTypeName(startDate);
+            if (startType === null) {
               const start = normalizeDateTimeFormatInput(startDate);
               const end = normalizeDateTimeFormatInput(endDate);
-              if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-                throw new RangeError('Invalid time value');
-              }
-              // Use the underlying instance if it has formatRange
-              if (slot.instance && typeof slot.instance.formatRange === 'function') {
+              if (!isNaN(start.getTime()) && !isNaN(end.getTime()) &&
+                  slot.instance && !slot.needsDefault &&
+                  slot.resolvedOpts.fractionalSecondDigits === undefined &&
+                  typeof slot.instance.formatRange === 'function') {
                 return slot.instance.formatRange(start, end);
               }
-              // Fallback
-              const opts = slot.resolvedOpts;
-              return start.toLocaleString(opts.locale) + ' – ' + end.toLocaleString(opts.locale);
-            };
+            }
+            return result.startStr + ' \u2013 ' + result.endStr;
+          };
+          Object.defineProperty(formatRangeImpl, 'length', { value: 2, writable: false, enumerable: false, configurable: true });
           Object.defineProperty(newProto, 'formatRange', {
             value: makeNonConstructableAccessor(formatRangeImpl, 'formatRange'),
             writable: true,
             enumerable: false,
             configurable: true
           });
+          // Ensure the proxy wrapper also has length 2
+          Object.defineProperty(newProto.formatRange, 'length', { value: 2, writable: false, enumerable: false, configurable: true });
 
           // formatRangeToParts method
           const formatRangeToPartsImpl = function(startDate, endDate) {
@@ -6618,19 +6986,31 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (startDate === undefined || endDate === undefined) {
               throw new TypeError('startDate and endDate are required');
             }
-            const start = normalizeDateTimeFormatInput(startDate);
-            const end = normalizeDateTimeFormatInput(endDate);
-            if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-              throw new RangeError('Invalid time value');
+            const startType = temporalTypeName(startDate);
+            const endType = temporalTypeName(endDate);
+            if (startType !== endType) {
+              throw new TypeError('formatRangeToParts: incompatible argument types');
             }
-            // Use the underlying instance if it has formatRangeToParts
-            if (slot.instance && typeof slot.instance.formatRangeToParts === 'function') {
-              return slot.instance.formatRangeToParts(start, end);
+            // For plain Date objects, try underlying instance
+            if (startType === null) {
+              const start = normalizeDateTimeFormatInput(startDate);
+              const end = normalizeDateTimeFormatInput(endDate);
+              if (!isNaN(start.getTime()) && !isNaN(end.getTime()) &&
+                  slot.instance && !slot.needsDefault &&
+                  slot.resolvedOpts.fractionalSecondDigits === undefined &&
+                  typeof slot.instance.formatRangeToParts === 'function') {
+                return slot.instance.formatRangeToParts(start, end);
+              }
             }
-            // Fallback
-            return [
-              { type: 'literal', value: this.formatRange(startDate, endDate), source: 'shared' }
-            ];
+            // Custom path: format both sides, collapse if equal
+            const startStr = formatSingleValue(slot, startDate);
+            const endStr = formatSingleValue(slot, endDate);
+            if (startStr === endStr) {
+              return formatSingleValueToParts(slot, startDate).map((p) => ({ ...p, source: 'shared' }));
+            }
+            const startParts = formatSingleValueToParts(slot, startDate).map((p) => ({ ...p, source: 'startRange' }));
+            const endParts = formatSingleValueToParts(slot, endDate).map((p) => ({ ...p, source: 'endRange' }));
+            return [...startParts, { type: 'literal', value: ' \u2013 ', source: 'shared' }, ...endParts];
           };
           Object.defineProperty(newProto, 'formatRangeToParts', {
             value: makeNonConstructableAccessor(formatRangeToPartsImpl, 'formatRangeToParts'),
