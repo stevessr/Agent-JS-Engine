@@ -4048,8 +4048,11 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
     let atomics = context.global_object().get(js_string!("Atomics"), context)?;
     if let Some(atomics_obj) = atomics.as_object() {
         if !atomics_obj.has_own_property(js_string!("pause"), context)? {
-            let pause_fn = NativeFunction::from_fn_ptr(host_atomics_pause)
-                .to_js_function(context.realm());
+            let pause_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_atomics_pause))
+                .name(js_string!("pause"))
+                .length(1)
+                .constructor(false)
+                .build();
             atomics_obj.define_property_or_throw(
                 js_string!("pause"),
                 PropertyDescriptor::builder()
@@ -12900,16 +12903,18 @@ fn host_worker_report(
 }
 
 fn host_async_disposable_stack_constructor(
-    _this: &BoaValue,
+    new_target: &BoaValue,
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    let new_target = context.active_function_object().map(BoaValue::from).ok_or_else(|| {
-        JsNativeError::typ().with_message("Constructor AsyncDisposableStack requires new")
-    })?;
+    if new_target.is_undefined() {
+        return Err(JsNativeError::typ()
+            .with_message("Constructor AsyncDisposableStack requires new")
+            .into());
+    }
 
     let prototype = get_prototype_from_constructor(
-        &new_target,
+        new_target,
         |intrinsics: &StandardConstructors| intrinsics.object(),
         context,
     )?;
@@ -13118,15 +13123,26 @@ fn host_async_disposable_stack_dispose_async(
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    let obj = this.as_object().ok_or_else(|| {
-        JsNativeError::typ()
-            .with_message("AsyncDisposableStack.prototype.disposeAsync requires an object receiver")
-    })?;
-    let data = obj.downcast_ref::<AsyncDisposableStackData>().ok_or_else(|| {
-        JsNativeError::typ().with_message(
-            "Incompatible receiver for AsyncDisposableStack.prototype.disposeAsync",
-        )
-    })?;
+    let obj = match this.as_object() {
+        Some(obj) => obj,
+        None => {
+            return Ok(JsPromise::reject(
+                JsNativeError::typ()
+                    .with_message("AsyncDisposableStack.prototype.disposeAsync requires an object receiver"),
+                context,
+            ).into());
+        }
+    };
+    let data = match obj.downcast_ref::<AsyncDisposableStackData>() {
+        Some(data) => data,
+        None => {
+            return Ok(JsPromise::reject(
+                JsNativeError::typ()
+                    .with_message("Incompatible receiver for AsyncDisposableStack.prototype.disposeAsync"),
+                context,
+            ).into());
+        }
+    };
 
     if data.status.get() == DisposableStackStatus::Disposed {
         return Ok(JsPromise::resolve(BoaValue::undefined(), context).into());
@@ -13305,16 +13321,18 @@ fn host_dispose_async_using(
 }
 
 fn host_disposable_stack_constructor(
-    _this: &BoaValue,
+    new_target: &BoaValue,
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    let new_target = context.active_function_object().map(BoaValue::from).ok_or_else(|| {
-        JsNativeError::typ().with_message("Constructor DisposableStack requires new")
-    })?;
+    if new_target.is_undefined() {
+        return Err(JsNativeError::typ()
+            .with_message("Constructor DisposableStack requires new")
+            .into());
+    }
 
     let prototype = get_prototype_from_constructor(
-        &new_target,
+        new_target,
         |intrinsics: &StandardConstructors| intrinsics.object(),
         context,
     )?;
@@ -13584,8 +13602,14 @@ fn host_async_iterator_dispose(
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    let obj = this.to_object(context)?;
-    let return_method = obj.get(js_string!("return"), context)?;
+    let obj = match this.to_object(context) {
+        Ok(obj) => obj,
+        Err(e) => return Ok(JsPromise::reject(e, context).into()),
+    };
+    let return_method = match obj.get(js_string!("return"), context) {
+        Ok(v) => v,
+        Err(e) => return Ok(JsPromise::reject(e, context).into()),
+    };
     if let Some(callable) = return_method.as_object() {
         callable.call(this, &[], context)
     } else {
@@ -13608,31 +13632,30 @@ fn host_iterator_dispose(
 }
 
 fn host_suppressed_error_constructor(
-    _this: &BoaValue,
+    new_target: &BoaValue,
     args: &[BoaValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<BoaValue> {
     let error = args.get_or_undefined(0).clone();
     let suppressed = args.get_or_undefined(1).clone();
     let message = args.get_or_undefined(2);
 
-    let new_target = _context
-        .active_function_object()
-        .map(BoaValue::from)
-        .unwrap_or_else(|| {
-            _context
-                .global_object()
-                .get(js_string!("SuppressedError"), _context)
-                .unwrap_or_else(|_| BoaValue::undefined())
-        });
+    let new_target = if new_target.is_undefined() {
+        context
+            .global_object()
+            .get(js_string!("SuppressedError"), context)
+            .unwrap_or_else(|_| BoaValue::undefined())
+    } else {
+        new_target.clone()
+    };
 
     let prototype = get_prototype_from_constructor(
         &new_target,
         |intrinsics: &StandardConstructors| intrinsics.error(),
-        _context,
+        context,
     )?;
 
-    let error_constructor = _context.intrinsics().constructors().error().constructor();
+    let error_constructor = context.intrinsics().constructors().error().constructor();
 
     let message_args = if message.is_undefined() {
         vec![]
@@ -13641,7 +13664,7 @@ fn host_suppressed_error_constructor(
     };
 
     let instance = if error_constructor.is_callable() {
-        error_constructor.call(&BoaValue::undefined(), &message_args, _context)?
+        error_constructor.call(&BoaValue::undefined(), &message_args, context)?
     } else {
         return Err(JsNativeError::typ()
             .with_message("Error constructor is not callable")
@@ -13660,7 +13683,7 @@ fn host_suppressed_error_constructor(
             .writable(true)
             .enumerable(false)
             .configurable(true),
-        _context,
+        context,
     )?;
     instance_obj.define_property_or_throw(
         js_string!("suppressed"),
@@ -13669,7 +13692,7 @@ fn host_suppressed_error_constructor(
             .writable(true)
             .enumerable(false)
             .configurable(true),
-        _context,
+        context,
     )?;
 
     Ok(instance)
