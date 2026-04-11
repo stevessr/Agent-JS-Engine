@@ -198,7 +198,9 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
     }
 
     // Boa Temporal bug: ZonedDateTime.with({}) should throw TypeError but doesn't
-    if path.contains("Temporal/ZonedDateTime/prototype/with/object-must-contain-at-least-one-property") {
+    if path
+        .contains("Temporal/ZonedDateTime/prototype/with/object-must-contain-at-least-one-property")
+    {
         return Some("boa temporal: ZonedDateTime.with empty object TypeError bug");
     }
 
@@ -229,12 +231,11 @@ impl HarnessCache {
     fn load(root: &Path) -> Self {
         let mut files = HashMap::new();
 
-        for entry in WalkDir::new(root)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
+        for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
             println!("DEBUG: WalkDir entry: {:?}", entry.path());
-            if !entry.file_type().is_file() { continue; }
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let Ok(contents) = fs::read_to_string(entry.path()) else {
                 continue;
             };

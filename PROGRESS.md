@@ -158,6 +158,19 @@
     - 回归结果：
       - `TEST262_MAX_CASES=5000`：`4997 passed / 3 skipped / 0 failed`，总通过率 `99.94%`
       - `TEST262_FILTER='annexB/' TEST262_MAX_CASES=1200`：`1083 passed / 3 skipped / 0 failed`
+25. 修复 `Explicit Resource Management` (Stage 3/4) 相关真实失败：
+    - 修复 `DisposableStack` / `AsyncDisposableStack` / `SuppressedError` 构造函数对 `new.target` 和跨 realm prototype 的支持
+    - 修复 `DisposableStack.prototype.move` / `AsyncDisposableStack.prototype.move` 确保其始终返回固有原型实例
+    - 确保 `[Symbol.dispose]` 与 `dispose` 为同一函数对象，`[Symbol.asyncDispose]` 与 `disposeAsync` 为同一函数对象
+    - 修复 `Atomics.pause.length` 为 `0`
+    - 修复 `%AsyncIteratorPrototype%[Symbol.asyncDispose]` 在 `return()` 抛出同步错误时正确返回 rejected promise
+    - 验证：
+      - `AsyncDisposableStack`: 全部通过
+      - `DisposableStack`: 全部通过
+      - `SuppressedError`: 全部通过
+      - `Atomics.pause`: 全部通过
+      - `AsyncIteratorPrototype`: 全部通过
+      - `Iterator`, `Promise`, `RegExp`, `Array`, `Object`, `String`, `Map`, `Set`: 抽样 2609 个 case 全部通过
 
 详细实现说明见：`TEST262_IMPLEMENTATION.md`
 
