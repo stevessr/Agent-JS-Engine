@@ -4205,27 +4205,34 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         let dispose_sym_val = symbol_obj.get(js_string!("dispose"), context)?;
         let async_dispose_sym_val = symbol_obj.get(js_string!("asyncDispose"), context)?;
 
-        let new_key_for = NativeFunction::from_copy_closure_with_captures(
-            move |_this: &BoaValue, args: &[BoaValue], captures: &(BoaValue, BoaValue, BoaValue), context: &mut Context| {
-                let symbol = args.get_or_undefined(0);
-                let (orig, d, ad) = captures;
-                if symbol == d || symbol == ad {
-                    return Ok(BoaValue::undefined());
-                }
-                let orig_obj = orig.as_object().unwrap();
-                orig_obj.call(&BoaValue::undefined(), args, context)
-            },
-            (
-                original_key_for,
-                dispose_sym_val,
-                async_dispose_sym_val,
-            ),
-        );
+        let new_key_for = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_copy_closure_with_captures(
+                move |_this: &BoaValue, args: &[BoaValue], captures: &(BoaValue, BoaValue, BoaValue), context: &mut Context| {
+                    let symbol = args.get_or_undefined(0);
+                    let (orig, d, ad) = captures;
+                    if symbol == d || symbol == ad {
+                        return Ok(BoaValue::undefined());
+                    }
+                    let orig_obj = orig.as_object().unwrap();
+                    orig_obj.call(&BoaValue::undefined(), args, context)
+                },
+                (
+                    original_key_for,
+                    dispose_sym_val,
+                    async_dispose_sym_val,
+                ),
+            )
+        )
+        .name(js_string!("keyFor"))
+        .length(1)
+        .constructor(false)
+        .build();
 
         symbol_obj.define_property_or_throw(
             js_string!("keyFor"),
             PropertyDescriptor::builder()
-                .value(new_key_for.to_js_function(context.realm()))
+                .value(new_key_for)
                 .writable(true)
                 .enumerable(false)
                 .configurable(true),
@@ -6100,10 +6107,11 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const calendar = resolveCalendarId(opts);
             if (typeof Temporal === 'object' &&
                 Temporal !== null &&
-                typeof Temporal.Instant === 'function') {
+                typeof Temporal.Instant === 'function' &&
+                opts.timeZone !== undefined) {
               try {
                 const instant = new Temporal.Instant(BigInt(d.getTime()) * 1000000n);
-                const tz = opts.timeZone !== undefined ? opts.timeZone : 'UTC';
+                const tz = opts.timeZone;
                 const zoned = instant.toZonedDateTimeISO(tz);
                 const weekday = zoned.dayOfWeek % 7;
                 let calendarYear = zoned.year;
@@ -6293,17 +6301,20 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                   'japanese-inverse': isLong ? 'Before Christ' : 'BC',
                   'ce': isLong ? 'Anno Domini' : 'AD', 'bce': isLong ? 'Before Christ' : 'BC',
                 };
-                return jpEras[code] || code;
+                return jpEras[code] || code.toUpperCase();
               }
-              if (cal.startsWith('islamic')) {
-                if (code === 'ah' || code === 'islamic' || code === 'islamic-civil' || code === 'islamic-tbla' || code === 'islamic-umalqura') return 'AH';
+              if (cal.startsWith('islamic') || cal === 'islamic-civil') {
+                const dy = normalized.overrideYear !== undefined
+                  ? normalized.overrideYear
+                  : (fields.calendarYear ?? fields.year);
+                if (code === 'ah') return 'AH';
                 if (code === 'bh' || code.includes('inverse')) return 'BH';
-                return code.toUpperCase();
+                return dy <= 0 ? 'BH' : 'AH';
               }
               if (cal === 'roc') {
                 if (code === 'minguo' || code === 'roc') return isLong ? 'Minguo' : 'Minguo';
                 if (code === 'before-roc' || code === 'roc-inverse') return isLong ? 'Before R.O.C.' : 'Before R.O.C.';
-                return code;
+                return code.toUpperCase();
               }
               if (cal === 'buddhist') {
                 return 'BE';
@@ -6311,12 +6322,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (cal === 'coptic') {
                 if (code === 'coptic' || code === 'ad') return isLong ? 'Era of the Martyrs' : 'ERA1';
                 if (code === 'coptic-inverse' || code === 'bc') return isLong ? 'Before Era of the Martyrs' : 'ERA0';
-                return code;
+                return code.toUpperCase();
               }
               if (cal === 'ethiopic') {
                 if (code === 'ethioaa' || code === 'ethiopic-amete-alem') return isLong ? 'Amete Alem' : 'ERA0';
                 if (code === 'ethiopic' || code === 'incar' || code === 'mundi') return isLong ? 'Incarnation Era' : 'ERA1';
-                return code;
+                return code.toUpperCase();
               }
               if (cal === 'ethioaa') {
                 return isLong ? 'Amete Alem' : 'ERA0';
@@ -6348,12 +6359,26 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 dateParts.push({ type: 'weekday', value: weekdayName(fields.weekday, normalized.weekday) });
               }
               if (normalized.month !== undefined) {
-                const displayMonth = fields.calendarMonth ?? fields.month;
-                const value = normalized.month === '2-digit'
-                  ? String(displayMonth).padStart(2, '0')
-                  : normalized.month === 'numeric'
+                const cal = String(fields.calendar || 'gregory').toLowerCase();
+                const isLunisolar = cal === 'chinese' || cal === 'dangi';
+                let displayMonth = fields.calendarMonth ?? fields.month;
+                let value;
+                if (isLunisolar && fields.calendarMonthCode && fields.calendarMonthCode.endsWith('L')) {
+                  const baseMonth = fields.calendarMonthCode.slice(1, -1);
+                  value = (normalized.month === '2-digit' || normalized.month === 'numeric')
+                    ? String(parseInt(baseMonth, 10))
+                    : ('闰' + String(parseInt(baseMonth, 10)) + '月');
+                } else if (isLunisolar) {
+                  value = (normalized.month === '2-digit' || normalized.month === 'numeric')
                     ? String(displayMonth)
-                    : monthName(displayMonth, normalized.month, fields.calendar);
+                    : (String(displayMonth) + '月');
+                } else {
+                  value = normalized.month === '2-digit'
+                    ? String(displayMonth).padStart(2, '0')
+                    : normalized.month === 'numeric'
+                      ? String(displayMonth)
+                      : monthName(displayMonth, normalized.month, fields.calendar);
+                }
                 dateParts.push({ type: 'month', value });
               }
               if (normalized.day !== undefined) {
@@ -6413,10 +6438,16 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 if (index > 0) {
                   const prev = dateParts[index - 1].type;
                   const cur = part.type;
+                  const cal = String(normalized.calendar || 'gregory').toLowerCase();
+                  const isLunisolar = cal === 'chinese' || cal === 'dangi';
                   if (prev === 'relatedYear' && cur === 'yearName') {
                     // No separator between relatedYear and yearName
                   } else if (prev === 'yearName' && cur === 'literal') {
                     // No separator before trailing literal (e.g. '年')
+                  } else if (isLunisolar && prev === 'month' && cur === 'day') {
+                    // No separator between month and day in lunisolar
+                  } else if (isLunisolar && prev === 'day' && (cur === 'relatedYear' || cur === 'year')) {
+                    pushLiteral('日');
                   } else if (prev === 'weekday') {
                     pushLiteral(', ');
                   } else if (namedMonth && prev === 'month' && cur === 'day') {
