@@ -8,6 +8,7 @@ use boa_engine::{
         object::OrdinaryObject,
         promise::PromiseState,
     },
+    context::intrinsics::StandardConstructors,
     gc::Tracer,
     js_string,
     module::{ModuleLoader, Referrer, resolve_module_specifier},
@@ -17,6 +18,7 @@ use boa_engine::{
             JsArray, JsArrayBuffer, JsPromise, JsProxy, JsSharedArrayBuffer,
             JsUint8Array,
         },
+        internal_methods::get_prototype_from_constructor,
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     realm::Realm,
@@ -4098,8 +4100,11 @@ fn install_promise_keyed_builtins(context: &mut Context) -> JsResult<()> {
                 js_string!("allKeyed"),
                 PropertyDescriptor::builder()
                     .value(
-                        NativeFunction::from_fn_ptr(host_promise_all_keyed)
-                            .to_js_function(context.realm()),
+                        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_promise_all_keyed))
+                            .name(js_string!("allKeyed"))
+                            .length(1)
+                            .constructor(false)
+                            .build()
                     )
                     .writable(true)
                     .enumerable(false)
@@ -4112,8 +4117,11 @@ fn install_promise_keyed_builtins(context: &mut Context) -> JsResult<()> {
                 js_string!("allSettledKeyed"),
                 PropertyDescriptor::builder()
                     .value(
-                        NativeFunction::from_fn_ptr(host_promise_all_settled_keyed)
-                            .to_js_function(context.realm()),
+                        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_promise_all_settled_keyed))
+                            .name(js_string!("allSettledKeyed"))
+                            .length(1)
+                            .constructor(false)
+                            .build()
                     )
                     .writable(true)
                     .enumerable(false)
@@ -4228,10 +4236,7 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     let error_ctor = context.intrinsics().constructors().error().constructor();
     let error_proto = context.intrinsics().constructors().error().prototype();
 
-    let suppressed_error_proto = JsObject::from_proto_and_data(
-        error_proto,
-        OrdinaryObject,
-    );
+    let suppressed_error_proto = JsObject::from_proto_and_data(error_proto, OrdinaryObject);
     suppressed_error_proto.define_property_or_throw(
         js_string!("name"),
         PropertyDescriptor::builder()
@@ -4251,8 +4256,13 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         context,
     )?;
 
-    let suppressed_error_ctor = NativeFunction::from_fn_ptr(host_suppressed_error_constructor)
-        .to_js_function(context.realm());
+    let suppressed_error_ctor =
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_suppressed_error_constructor))
+            .name(js_string!("SuppressedError"))
+            .length(3)
+            .constructor(true)
+            .build();
+
     suppressed_error_ctor.define_property_or_throw(
         js_string!("prototype"),
         PropertyDescriptor::builder()
@@ -4281,8 +4291,13 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
 
     // 3. DisposableStack
     let disposable_stack_proto = JsObject::with_object_proto(context.intrinsics());
-    let disposable_stack_ctor = NativeFunction::from_fn_ptr(host_disposable_stack_constructor)
-        .to_js_function(context.realm());
+    let disposable_stack_ctor =
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_constructor))
+            .name(js_string!("DisposableStack"))
+            .length(0)
+            .constructor(true)
+            .build();
+
     disposable_stack_ctor.define_property_or_throw(
         js_string!("prototype"),
         PropertyDescriptor::builder()
@@ -4308,8 +4323,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("use"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_disposable_stack_use)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_use))
+                    .name(js_string!("use"))
+                    .length(1)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4320,8 +4338,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("adopt"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_disposable_stack_adopt)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_adopt))
+                    .name(js_string!("adopt"))
+                    .length(2)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4332,8 +4353,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("defer"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_disposable_stack_defer)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_defer))
+                    .name(js_string!("defer"))
+                    .length(1)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4344,8 +4368,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("move"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_disposable_stack_move)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_move))
+                    .name(js_string!("move"))
+                    .length(0)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4353,21 +4380,32 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         context,
     )?;
 
-    let dispose_fn = NativeFunction::from_fn_ptr(host_disposable_stack_dispose)
-        .to_js_function(context.realm());
+    let dispose_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_dispose))
+        .name(js_string!("dispose"))
+        .length(0)
+        .constructor(false)
+        .build();
+
     disposable_stack_proto.define_property_or_throw(
         js_string!("dispose"),
         PropertyDescriptor::builder()
-            .value(dispose_fn.clone())
+            .value(dispose_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
         context,
     )?;
+
+    let dispose_symbol_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_dispose))
+        .name(js_string!("[Symbol.dispose]"))
+        .length(0)
+        .constructor(false)
+        .build();
+
     disposable_stack_proto.define_property_or_throw(
-        dispose_sym_key,
+        dispose_sym_key.clone(),
         PropertyDescriptor::builder()
-            .value(dispose_fn)
+            .value(dispose_symbol_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
@@ -4378,8 +4416,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("disposed"),
         PropertyDescriptor::builder()
             .get(
-                NativeFunction::from_fn_ptr(host_disposable_stack_disposed_getter)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_disposed_getter))
+                    .name(js_string!("get disposed"))
+                    .length(0)
+                    .constructor(false)
+                    .build()
             )
             .enumerable(false)
             .configurable(true),
@@ -4404,8 +4445,12 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     // 4. AsyncDisposableStack
     let async_disposable_stack_proto = JsObject::with_object_proto(context.intrinsics());
     let async_disposable_stack_ctor =
-        NativeFunction::from_fn_ptr(host_async_disposable_stack_constructor)
-            .to_js_function(context.realm());
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_constructor))
+            .name(js_string!("AsyncDisposableStack"))
+            .length(0)
+            .constructor(true)
+            .build();
+
     async_disposable_stack_ctor.define_property_or_throw(
         js_string!("prototype"),
         PropertyDescriptor::builder()
@@ -4431,8 +4476,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("use"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_async_disposable_stack_use)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_use))
+                    .name(js_string!("use"))
+                    .length(1)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4443,8 +4491,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("adopt"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_async_disposable_stack_adopt)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_adopt))
+                    .name(js_string!("adopt"))
+                    .length(2)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4455,8 +4506,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("defer"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_async_disposable_stack_defer)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_defer))
+                    .name(js_string!("defer"))
+                    .length(1)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4467,8 +4521,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("move"),
         PropertyDescriptor::builder()
             .value(
-                NativeFunction::from_fn_ptr(host_async_disposable_stack_move)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_move))
+                    .name(js_string!("move"))
+                    .length(0)
+                    .constructor(false)
+                    .build()
             )
             .writable(true)
             .enumerable(false)
@@ -4476,21 +4533,32 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         context,
     )?;
 
-    let dispose_async_fn = NativeFunction::from_fn_ptr(host_async_disposable_stack_dispose_async)
-        .to_js_function(context.realm());
+    let dispose_async_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_dispose_async))
+        .name(js_string!("disposeAsync"))
+        .length(0)
+        .constructor(false)
+        .build();
+
     async_disposable_stack_proto.define_property_or_throw(
         js_string!("disposeAsync"),
         PropertyDescriptor::builder()
-            .value(dispose_async_fn.clone())
+            .value(dispose_async_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
         context,
     )?;
+
+    let dispose_async_symbol_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_dispose_async))
+        .name(js_string!("[Symbol.asyncDispose]"))
+        .length(0)
+        .constructor(false)
+        .build();
+
     async_disposable_stack_proto.define_property_or_throw(
-        async_dispose_sym_key,
+        async_dispose_sym_key.clone(),
         PropertyDescriptor::builder()
-            .value(dispose_async_fn)
+            .value(dispose_async_symbol_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
@@ -4501,8 +4569,11 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         js_string!("disposed"),
         PropertyDescriptor::builder()
             .get(
-                NativeFunction::from_fn_ptr(host_async_disposable_stack_disposed_getter)
-                    .to_js_function(context.realm()),
+                FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_disposed_getter))
+                    .name(js_string!("get disposed"))
+                    .length(0)
+                    .constructor(false)
+                    .build()
             )
             .enumerable(false)
             .configurable(true),
@@ -4527,56 +4598,60 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     // 5. Global helper functions
     context.register_global_property(
         js_string!("__agentjsDisposeSyncUsing__"),
-        NativeFunction::from_fn_ptr(host_dispose_sync_using).to_js_function(context.realm()),
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_dispose_sync_using))
+            .name(js_string!("__agentjsDisposeSyncUsing__"))
+            .length(3)
+            .constructor(false)
+            .build(),
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
     context.register_global_property(
         js_string!("__agentjsDisposeAsyncUsing__"),
-        NativeFunction::from_fn_ptr(host_dispose_async_using).to_js_function(context.realm()),
+        FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_dispose_async_using))
+            .name(js_string!("__agentjsDisposeAsyncUsing__"))
+            .length(3)
+            .constructor(false)
+            .build(),
         Attribute::WRITABLE | Attribute::CONFIGURABLE,
     )?;
 
     // 6. AsyncIteratorPrototype[Symbol.asyncDispose]
-    context.eval(Source::from_bytes(
-        r#"
-        (function() {
-          async function* asyncGen() {}
-          const asyncGenProto = Object.getPrototypeOf(asyncGen.prototype);
-          const AsyncIteratorPrototype = Object.getPrototypeOf(asyncGenProto);
-          if (AsyncIteratorPrototype && !AsyncIteratorPrototype[Symbol.asyncDispose]) {
-            Object.defineProperty(AsyncIteratorPrototype, Symbol.asyncDispose, {
-              value: async function() {
-                return await this.return();
-              },
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            });
-          }
-        })();
-        "#,
-    ))?;
+    let async_iterator_proto = context.intrinsics().objects().iterator_prototypes().async_iterator();
+    if !async_iterator_proto.has_own_property(async_dispose_sym_key.clone(), context)? {
+        let async_dispose_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_iterator_dispose))
+            .name(js_string!("[Symbol.asyncDispose]"))
+            .length(0)
+            .constructor(false)
+            .build();
+        async_iterator_proto.define_property_or_throw(
+            async_dispose_sym_key,
+            PropertyDescriptor::builder()
+                .value(async_dispose_fn)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
 
     // 7. IteratorPrototype[Symbol.dispose]
-    context.eval(Source::from_bytes(
-        r#"
-        (function() {
-          function* gen() {}
-          const genProto = Object.getPrototypeOf(gen.prototype);
-          const IteratorPrototype = Object.getPrototypeOf(genProto);
-          if (IteratorPrototype && !IteratorPrototype[Symbol.dispose]) {
-            Object.defineProperty(IteratorPrototype, Symbol.dispose, {
-              value: function() {
-                return this.return?.();
-              },
-              writable: true,
-              enumerable: false,
-              configurable: true,
-            });
-          }
-        })();
-        "#,
-    ))?;
+    let iterator_proto = context.intrinsics().objects().iterator_prototypes().iterator();
+    if !iterator_proto.has_own_property(dispose_sym_key.clone(), context)? {
+        let dispose_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_iterator_dispose))
+            .name(js_string!("[Symbol.dispose]"))
+            .length(0)
+            .constructor(false)
+            .build();
+        iterator_proto.define_property_or_throw(
+            dispose_sym_key,
+            PropertyDescriptor::builder()
+                .value(dispose_fn)
+                .writable(true)
+                .enumerable(false)
+                .configurable(true),
+            context,
+        )?;
+    }
 
     Ok(())
 }
@@ -12530,14 +12605,6 @@ fn host_shadow_realm_wrap_callable(
     create_shadow_realm_wrapped_function_for_realm(callable, wrapper_realm, context)
 }
 
-fn host_shadowrealm_placeholder_finalization_registry(
-    _: &BoaValue,
-    _: &[BoaValue],
-    context: &mut Context,
-) -> JsResult<BoaValue> {
-    Ok(ObjectInitializer::new(context).build().into())
-}
-
 fn host_shadow_realm_dynamic_import(
     _: &BoaValue,
     args: &[BoaValue],
@@ -12763,22 +12830,22 @@ fn host_agent_start(_: &BoaValue, args: &[BoaValue], _context: &mut Context) -> 
 fn host_agent_broadcast(
     _: &BoaValue,
     args: &[BoaValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<BoaValue> {
     let buffer = args.get_or_undefined(0).as_object().ok_or_else(|| {
         JsNativeError::typ().with_message("broadcast requires a SharedArrayBuffer")
     })?;
     let buffer = JsSharedArrayBuffer::from_object(buffer)?.inner();
-    agent_runtime(_context)?.broadcast(buffer);
+    agent_runtime(context)?.broadcast(buffer);
     Ok(BoaValue::undefined())
 }
 
 fn host_agent_get_report(
     _: &BoaValue,
     _: &[BoaValue],
-    _context: &mut Context,
+    context: &mut Context,
 ) -> JsResult<BoaValue> {
-    Ok(agent_runtime(_context)?
+    Ok(agent_runtime(context)?
         .pop_report()
         .map_or_else(BoaValue::null, |report| {
             BoaValue::from(boa_engine::JsString::from(report.as_str()))
@@ -12793,41 +12860,42 @@ fn host_agent_sleep(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> J
 fn host_agent_monotonic_now(
     _: &BoaValue,
     _: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
-    Ok(agent_runtime(context)?.monotonic_now().into())
+    Ok(agent_runtime(_context)?
+.monotonic_now().into())
 }
 
 fn host_worker_receive_broadcast(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let callback = args
         .get_or_undefined(0)
         .as_callable()
         .ok_or_else(|| JsNativeError::typ().with_message("receiveBroadcast requires a callback"))?;
-    let envelope = worker_mailbox(context)?.receive().ok_or_else(|| {
+    let envelope = worker_mailbox(_context)?.receive().ok_or_else(|| {
         JsNativeError::typ().with_message("test262 worker agent mailbox is closed")
     })?;
-    let sab = JsSharedArrayBuffer::from_buffer(envelope.buffer.clone(), context);
+    let sab = JsSharedArrayBuffer::from_buffer(envelope.buffer.clone(), _context);
     envelope.completion.acknowledge();
-    let result = callback.call(&BoaValue::undefined(), &[sab.into()], context);
+    let result = callback.call(&BoaValue::undefined(), &[sab.into()], _context);
     result?;
-    context.run_jobs()?;
+    _context.run_jobs()?;
     Ok(BoaValue::undefined())
 }
 
 fn host_worker_report(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let report = args
         .get_or_undefined(0)
-        .to_string(context)?
+        .to_string(_context)?
         .to_std_string_lossy();
-    agent_runtime(context)?.push_report(report);
+    agent_runtime(_context)?.push_report(report);
     Ok(BoaValue::undefined())
 }
 
@@ -12836,16 +12904,17 @@ fn host_async_disposable_stack_constructor(
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    // Get AsyncDisposableStack.prototype
-    let async_disposable_stack = context
-        .global_object()
-        .get(js_string!("AsyncDisposableStack"), context)?;
-    let prototype = async_disposable_stack
-        .as_object()
-        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
-        .and_then(|v| v.as_object());
+    let new_target = context.active_function_object().map(BoaValue::from).ok_or_else(|| {
+        JsNativeError::typ().with_message("Constructor AsyncDisposableStack requires new")
+    })?;
 
-    let instance = JsObject::from_proto_and_data(prototype, AsyncDisposableStackData::new());
+    let prototype = get_prototype_from_constructor(
+        &new_target,
+        |intrinsics: &StandardConstructors| intrinsics.object(),
+        context,
+    )?;
+
+    let instance = JsObject::from_proto_and_data(Some(prototype), AsyncDisposableStackData::new());
 
     Ok(instance.into())
 }
@@ -12978,7 +13047,7 @@ fn host_async_disposable_stack_adopt(
 fn host_async_disposable_stack_defer(
     this: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let obj = this.as_object().ok_or_else(|| {
         JsNativeError::typ()
@@ -13014,7 +13083,7 @@ fn host_async_disposable_stack_defer(
 fn host_async_disposable_stack_move(
     this: &BoaValue,
     _args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let obj = this.as_object().ok_or_else(|| {
         JsNativeError::typ()
@@ -13240,16 +13309,17 @@ fn host_disposable_stack_constructor(
     _args: &[BoaValue],
     context: &mut Context,
 ) -> JsResult<BoaValue> {
-    // Get DisposableStack.prototype
-    let disposable_stack = context
-        .global_object()
-        .get(js_string!("DisposableStack"), context)?;
-    let prototype = disposable_stack
-        .as_object()
-        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
-        .and_then(|v| v.as_object());
+    let new_target = context.active_function_object().map(BoaValue::from).ok_or_else(|| {
+        JsNativeError::typ().with_message("Constructor DisposableStack requires new")
+    })?;
 
-    let instance = JsObject::from_proto_and_data(prototype, DisposableStackData::new());
+    let prototype = get_prototype_from_constructor(
+        &new_target,
+        |intrinsics: &StandardConstructors| intrinsics.object(),
+        context,
+    )?;
+
+    let instance = JsObject::from_proto_and_data(Some(prototype), DisposableStackData::new());
 
     Ok(instance.into())
 }
@@ -13356,7 +13426,7 @@ fn host_disposable_stack_adopt(
 fn host_disposable_stack_defer(
     this: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let obj = this.as_object().ok_or_else(|| {
         JsNativeError::typ()
@@ -13391,7 +13461,7 @@ fn host_disposable_stack_defer(
 fn host_disposable_stack_move(
     this: &BoaValue,
     _args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let obj = this.as_object().ok_or_else(|| {
         JsNativeError::typ()
@@ -13509,16 +13579,60 @@ fn host_atomics_pause(
     Ok(BoaValue::undefined())
 }
 
+fn host_async_iterator_dispose(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.to_object(context)?;
+    let return_method = obj.get(js_string!("return"), context)?;
+    if let Some(callable) = return_method.as_object() {
+        callable.call(this, &[], context)
+    } else {
+        Ok(JsPromise::resolve(BoaValue::undefined(), context).into())
+    }
+}
+
+fn host_iterator_dispose(
+    this: &BoaValue,
+    _args: &[BoaValue],
+    context: &mut Context,
+) -> JsResult<BoaValue> {
+    let obj = this.to_object(context)?;
+    let return_method = obj.get(js_string!("return"), context)?;
+    if let Some(callable) = return_method.as_object() {
+        callable.call(this, &[], context)
+    } else {
+        Ok(BoaValue::undefined())
+    }
+}
+
 fn host_suppressed_error_constructor(
     _this: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let error = args.get_or_undefined(0).clone();
     let suppressed = args.get_or_undefined(1).clone();
     let message = args.get_or_undefined(2);
 
-    let error_constructor = context.intrinsics().constructors().error().constructor();
+    let new_target = _context
+        .active_function_object()
+        .map(BoaValue::from)
+        .unwrap_or_else(|| {
+            _context
+                .global_object()
+                .get(js_string!("SuppressedError"), _context)
+                .unwrap_or_else(|_| BoaValue::undefined())
+        });
+
+    let prototype = get_prototype_from_constructor(
+        &new_target,
+        |intrinsics: &StandardConstructors| intrinsics.error(),
+        _context,
+    )?;
+
+    let error_constructor = _context.intrinsics().constructors().error().constructor();
 
     let message_args = if message.is_undefined() {
         vec![]
@@ -13527,23 +13641,17 @@ fn host_suppressed_error_constructor(
     };
 
     let instance = if error_constructor.is_callable() {
-        error_constructor.call(&BoaValue::undefined(), &message_args, context)?
+        error_constructor.call(&BoaValue::undefined(), &message_args, _context)?
     } else {
-        return Err(JsNativeError::typ().with_message("Error constructor is not callable").into());
+        return Err(JsNativeError::typ()
+            .with_message("Error constructor is not callable")
+            .into());
     };
-    let instance_obj = instance.as_object().expect("Error constructor must return an object");
-
-    // Get SuppressedError.prototype
-    let suppressed_error = context
-        .global_object()
-        .get(js_string!("SuppressedError"), context)?;
-    if let Some(proto) = suppressed_error
+    let instance_obj = instance
         .as_object()
-        .and_then(|obj| obj.get(js_string!("prototype"), context).ok())
-        .and_then(|v| v.as_object())
-    {
-        instance_obj.set_prototype(Some(proto));
-    }
+        .expect("Error constructor must return an object");
+
+    instance_obj.set_prototype(Some(prototype));
 
     instance_obj.define_property_or_throw(
         js_string!("error"),
@@ -13552,7 +13660,7 @@ fn host_suppressed_error_constructor(
             .writable(true)
             .enumerable(false)
             .configurable(true),
-        context,
+        _context,
     )?;
     instance_obj.define_property_or_throw(
         js_string!("suppressed"),
@@ -13561,7 +13669,7 @@ fn host_suppressed_error_constructor(
             .writable(true)
             .enumerable(false)
             .configurable(true),
-        context,
+        _context,
     )?;
 
     Ok(instance)
@@ -13957,20 +14065,20 @@ fn host_deferred_namespace_get_prototype_of(
 fn host_deferred_namespace_has(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let target = args
         .get_or_undefined(0)
         .as_object()
         .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
-    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let key = args.get_or_undefined(1).to_property_key(_context)?;
     let metadata = deferred_namespace_target_metadata(&target)?;
 
     if is_symbol_like_deferred_namespace_key(&key) {
         return Ok(deferred_namespace_ordinary_has(&metadata, &key).into());
     }
 
-    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    let _ = evaluate_deferred_namespace_module(&metadata.path, _context)?;
     Ok(deferred_namespace_exports_include(&metadata, &key).into())
 }
 
@@ -13985,7 +14093,7 @@ fn host_deferred_namespace_is_extensible(
 fn host_deferred_namespace_own_keys(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let target = args
         .get_or_undefined(0)
@@ -13993,7 +14101,7 @@ fn host_deferred_namespace_own_keys(
         .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
     let metadata = deferred_namespace_target_metadata(&target)?;
 
-    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    let _ = evaluate_deferred_namespace_module(&metadata.path, _context)?;
     let keys = metadata
         .exports
         .iter()
@@ -14004,7 +14112,7 @@ fn host_deferred_namespace_own_keys(
         .chain(std::iter::once(BoaValue::from(PropertyKey::from(
             JsSymbol::to_string_tag(),
         ))));
-    Ok(JsArray::from_iter(keys, context).into())
+    Ok(JsArray::from_iter(keys, _context).into())
 }
 
 fn host_deferred_namespace_prevent_extensions(
@@ -14018,17 +14126,17 @@ fn host_deferred_namespace_prevent_extensions(
 fn host_deferred_namespace_define_property(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let target = args
         .get_or_undefined(0)
         .as_object()
         .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
-    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let key = args.get_or_undefined(1).to_property_key(_context)?;
     let metadata = deferred_namespace_target_metadata(&target)?;
 
     if !is_symbol_like_deferred_namespace_key(&key) {
-        let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+        let _ = evaluate_deferred_namespace_module(&metadata.path, _context)?;
     }
 
     Ok(false.into())
@@ -14037,20 +14145,20 @@ fn host_deferred_namespace_define_property(
 fn host_deferred_namespace_delete_property(
     _: &BoaValue,
     args: &[BoaValue],
-    context: &mut Context,
+    _context: &mut Context,
 ) -> JsResult<BoaValue> {
     let target = args
         .get_or_undefined(0)
         .as_object()
         .ok_or_else(|| JsNativeError::typ().with_message("deferred namespace target missing"))?;
-    let key = args.get_or_undefined(1).to_property_key(context)?;
+    let key = args.get_or_undefined(1).to_property_key(_context)?;
     let metadata = deferred_namespace_target_metadata(&target)?;
 
     if is_symbol_like_deferred_namespace_key(&key) {
         return Ok(deferred_namespace_delete_symbol_like_key(&metadata, &key).into());
     }
 
-    let _ = evaluate_deferred_namespace_module(&metadata.path, context)?;
+    let _ = evaluate_deferred_namespace_module(&metadata.path, _context)?;
     Ok(false.into())
 }
 

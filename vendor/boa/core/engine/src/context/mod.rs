@@ -873,7 +873,9 @@ impl Context {
     ///  - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#active-function-object
-    pub(crate) fn active_function_object(&self) -> Option<JsObject> {
+    #[inline]
+    #[must_use]
+    pub fn active_function_object(&self) -> Option<JsObject> {
         if self.vm.native_active_function.is_some() {
             return self.vm.native_active_function.clone();
         }
