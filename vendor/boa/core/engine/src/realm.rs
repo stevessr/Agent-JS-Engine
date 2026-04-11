@@ -172,8 +172,10 @@ impl Realm {
         &self.inner.scope
     }
 
-    pub(crate) fn global_object(&self) -> &JsObject {
-        &self.inner.global_object
+    /// Returns the global object of this realm.
+    #[must_use]
+    pub fn global_object(&self) -> JsObject {
+        self.inner.global_object.clone()
     }
 
     pub(crate) fn global_this(&self) -> &JsObject {

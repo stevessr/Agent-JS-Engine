@@ -8,7 +8,6 @@ use boa_engine::{
         object::OrdinaryObject,
         promise::PromiseState,
     },
-    context::intrinsics::StandardConstructors,
     gc::Tracer,
     js_string,
     module::{ModuleLoader, Referrer, resolve_module_specifier},
@@ -18,7 +17,6 @@ use boa_engine::{
             JsArray, JsArrayBuffer, JsPromise, JsProxy, JsSharedArrayBuffer,
             JsUint8Array,
         },
-        internal_methods::get_prototype_from_constructor,
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     realm::Realm,
@@ -4050,7 +4048,7 @@ fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
         if !atomics_obj.has_own_property(js_string!("pause"), context)? {
             let pause_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_atomics_pause))
                 .name(js_string!("pause"))
-                .length(1)
+                .length(0)
                 .constructor(false)
                 .build();
             atomics_obj.define_property_or_throw(
@@ -4392,23 +4390,17 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     disposable_stack_proto.define_property_or_throw(
         js_string!("dispose"),
         PropertyDescriptor::builder()
-            .value(dispose_fn)
+            .value(dispose_fn.clone())
             .writable(true)
             .enumerable(false)
             .configurable(true),
         context,
     )?;
 
-    let dispose_symbol_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_disposable_stack_dispose))
-        .name(js_string!("[Symbol.dispose]"))
-        .length(0)
-        .constructor(false)
-        .build();
-
     disposable_stack_proto.define_property_or_throw(
         dispose_sym_key.clone(),
         PropertyDescriptor::builder()
-            .value(dispose_symbol_fn)
+            .value(dispose_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
@@ -4545,23 +4537,17 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
     async_disposable_stack_proto.define_property_or_throw(
         js_string!("disposeAsync"),
         PropertyDescriptor::builder()
-            .value(dispose_async_fn)
+            .value(dispose_async_fn.clone())
             .writable(true)
             .enumerable(false)
             .configurable(true),
         context,
     )?;
 
-    let dispose_async_symbol_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_async_disposable_stack_dispose_async))
-        .name(js_string!("[Symbol.asyncDispose]"))
-        .length(0)
-        .constructor(false)
-        .build();
-
     async_disposable_stack_proto.define_property_or_throw(
         async_dispose_sym_key.clone(),
         PropertyDescriptor::builder()
-            .value(dispose_async_symbol_fn)
+            .value(dispose_async_fn)
             .writable(true)
             .enumerable(false)
             .configurable(true),
@@ -12902,6 +12888,44 @@ fn host_worker_report(
     Ok(BoaValue::undefined())
 }
 
+fn get_custom_intrinsic_prototype(name: &str, context: &mut Context) -> JsResult<JsObject> {
+    let ctor: BoaValue = context.global_object().get(js_string!(name), context)?;
+    if let Some(ctor_obj) = ctor.as_object() {
+        let prototype: BoaValue = ctor_obj.get(js_string!("prototype"), context)?;
+        if let Some(proto_obj) = prototype.as_object() {
+            return Ok(proto_obj.clone());
+        }
+    }
+    Ok(context.intrinsics().constructors().object().prototype())
+}
+
+fn get_prototype_from_custom_constructor(
+    new_target: &BoaValue,
+    intrinsic_name: &str,
+    context: &mut Context,
+) -> JsResult<JsObject> {
+    if let Some(new_target_obj) = new_target.as_object() {
+        let prototype: BoaValue = new_target_obj.get(js_string!("prototype"), context)?;
+        if let Some(proto_obj) = prototype.as_object() {
+            return Ok(proto_obj.clone());
+        }
+    }
+
+    let realm = new_target
+        .as_object()
+        .expect("new_target must be an object")
+        .get_function_realm(context)?;
+    let global: JsObject = realm.global_object();
+    let ctor: BoaValue = global.get(js_string!(intrinsic_name), context)?;
+    if let Some(ctor_obj) = ctor.as_object() {
+        let prototype: BoaValue = ctor_obj.get(js_string!("prototype"), context)?;
+        if let Some(proto_obj) = prototype.as_object() {
+            return Ok(proto_obj.clone());
+        }
+    }
+    Ok(realm.intrinsics().constructors().object().prototype())
+}
+
 fn host_async_disposable_stack_constructor(
     new_target: &BoaValue,
     _args: &[BoaValue],
@@ -12913,9 +12937,9 @@ fn host_async_disposable_stack_constructor(
             .into());
     }
 
-    let prototype = get_prototype_from_constructor(
+    let prototype = get_prototype_from_custom_constructor(
         new_target,
-        |intrinsics: &StandardConstructors| intrinsics.object(),
+        "AsyncDisposableStack",
         context,
     )?;
 
@@ -13105,7 +13129,8 @@ fn host_async_disposable_stack_move(
             .into());
     }
 
-    let instance = JsObject::from_proto_and_data(obj.prototype(), AsyncDisposableStackData::new());
+    let prototype = get_custom_intrinsic_prototype("AsyncDisposableStack", _context)?;
+    let instance = JsObject::from_proto_and_data(Some(prototype), AsyncDisposableStackData::new());
 
     {
         let next_data = instance
@@ -13331,9 +13356,9 @@ fn host_disposable_stack_constructor(
             .into());
     }
 
-    let prototype = get_prototype_from_constructor(
+    let prototype = get_prototype_from_custom_constructor(
         new_target,
-        |intrinsics: &StandardConstructors| intrinsics.object(),
+        "DisposableStack",
         context,
     )?;
 
@@ -13495,7 +13520,8 @@ fn host_disposable_stack_move(
             .into());
     }
 
-    let instance = JsObject::from_proto_and_data(obj.prototype(), DisposableStackData::new());
+    let prototype = get_custom_intrinsic_prototype("DisposableStack", _context)?;
+    let instance = JsObject::from_proto_and_data(Some(prototype), DisposableStackData::new());
 
     {
         let next_data = instance.downcast_ref::<DisposableStackData>().unwrap();
@@ -13611,7 +13637,10 @@ fn host_async_iterator_dispose(
         Err(e) => return Ok(JsPromise::reject(e, context).into()),
     };
     if let Some(callable) = return_method.as_object() {
-        callable.call(this, &[], context)
+        match callable.call(this, &[], context) {
+            Ok(v) => Ok(v),
+            Err(e) => Ok(JsPromise::reject(e, context).into()),
+        }
     } else {
         Ok(JsPromise::resolve(BoaValue::undefined(), context).into())
     }
@@ -13649,9 +13678,9 @@ fn host_suppressed_error_constructor(
         new_target.clone()
     };
 
-    let prototype = get_prototype_from_constructor(
+    let prototype = get_prototype_from_custom_constructor(
         &new_target,
-        |intrinsics: &StandardConstructors| intrinsics.error(),
+        "SuppressedError",
         context,
     )?;
 
