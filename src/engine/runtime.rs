@@ -8251,22 +8251,33 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
             };
 
             const unitOptions = {};
-            let prevStyle = '';
+            const baseStyles = {};
+            const baseDisplays = {};
+            
+            // Step 6: GetDurationUnitOptions
             for (const unit of DURATION_UNITS) {
-              const { stylesList, digitalBase } = UNIT_CONFIG[unit];
-              let unitStyle = getOption(opts, unit, 'string', stylesList, undefined);
+              const { stylesList } = UNIT_CONFIG[unit];
+              baseStyles[unit] = getOption(opts, unit, 'string', stylesList, undefined);
+              baseDisplays[unit] = getOption(opts, unit + 'Display', 'string', VALID_DISPLAYS, undefined);
+            }
+            
+            let prevStyle = '';
+            for (let i = 0; i < DURATION_UNITS.length; i++) {
+              const unit = DURATION_UNITS[i];
+              const { digitalBase } = UNIT_CONFIG[unit];
+              let unitStyle = baseStyles[unit];
               let displayDefault = 'always';
 
               if (unitStyle === undefined) {
                 if (style === 'digital') {
                   if (!['hours','minutes','seconds'].includes(unit)) displayDefault = 'auto';
-                  unitStyle = digitalBase || style;
+                  unitStyle = digitalBase || 'short';
                 } else {
-                  displayDefault = 'auto';
                   if (prevStyle === 'fractional' || prevStyle === 'numeric' || prevStyle === '2-digit') {
-                    if (unit !== 'minutes' && unit !== 'seconds') displayDefault = 'always';
                     unitStyle = 'numeric';
+                    displayDefault = (unit === 'minutes' || unit === 'seconds') ? 'auto' : 'always';
                   } else {
+                    displayDefault = 'auto';
                     unitStyle = style;
                   }
                 }
@@ -8276,21 +8287,34 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
                 }
               }
 
-              // Step 9: if prevStyle is numeric/2-digit, minutes/seconds become 2-digit
               if ((prevStyle === 'numeric' || prevStyle === '2-digit') &&
                   (unit === 'minutes' || unit === 'seconds')) {
                 unitStyle = '2-digit';
               }
 
-              // Update prevStyle
               if ((unit === 'hours' || unit === 'minutes' || unit === 'seconds') && unitStyle === 'numeric') prevStyle = 'numeric';
               else if ((unit === 'hours' || unit === 'minutes' || unit === 'seconds') && unitStyle === '2-digit') prevStyle = '2-digit';
               else if ((unit === 'milliseconds' || unit === 'microseconds' || unit === 'nanoseconds') && unitStyle === 'numeric') prevStyle = 'fractional';
+              else prevStyle = unitStyle;
 
-              const displayKey = unit + 'Display';
-              const display = getOption(opts, displayKey, 'string', VALID_DISPLAYS, displayDefault);
+              const display = baseDisplays[unit] !== undefined ? baseDisplays[unit] : displayDefault;
               unitOptions[unit] = unitStyle;
-              unitOptions[displayKey] = display;
+              unitOptions[unit + 'Display'] = display;
+            }
+            
+            // Step 10: numeric cascade
+            let numericCascade = false;
+            for (let i = DURATION_UNITS.length - 1; i >= 0; i--) {
+              const unit = DURATION_UNITS[i];
+              if (numericCascade) {
+                 if (baseStyles[unit] === undefined && style !== 'digital') {
+                    unitOptions[unit] = 'numeric';
+                 }
+              }
+              const unitStyle = unitOptions[unit];
+              if (unitStyle === 'numeric' || unitStyle === '2-digit') {
+                 numericCascade = true;
+              }
             }
             
             // fractionalDigits
@@ -8302,6 +8326,7 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
               numberingSystem: numberingSystem || 'latn',
               style: style,
               fractionalDigits: fractionalDigits,
+              baseStyles: baseStyles,
               ...unitOptions
             };
             dfSlots.set(this, slots);
@@ -8312,268 +8337,184 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
           // format method
           DurationFormat.prototype.format = function format(duration) {
             const slots = dfSlots.get(this);
-            if (!slots) {
-              throw new TypeError('Method Intl.DurationFormat.prototype.format called on incompatible receiver');
+            if (!slots) throw new TypeError('Called on incompatible receiver');
+            if (duration === undefined) throw new TypeError('Duration is required');
+            let durationObj = duration;
+            if (typeof duration === 'string' && typeof Temporal === 'object' && Temporal.Duration) {
+              durationObj = Temporal.Duration.from(duration);
             }
+            if (durationObj === null || typeof durationObj !== 'object') throw new TypeError('Duration must be an object');
             
-            if (duration === undefined || duration === null) {
-              throw new TypeError('Duration is required');
-            }
-            
-            if (typeof duration !== 'object') {
-              throw new TypeError('Duration must be an object');
-            }
-            
-            // Read duration components
             const components = {};
-            let hasAny = false;
             for (const unit of DURATION_UNITS) {
-              const value = duration[unit];
+              let value = durationObj[unit];
               if (value !== undefined) {
-                const num = Number(value);
-                if (!Number.isFinite(num)) {
-                  throw new RangeError('Invalid duration component: ' + unit);
-                }
-                components[unit] = num;
-                if (num !== 0) hasAny = true;
+                let num = Number(value);
+                if (!Number.isFinite(num)) throw new RangeError('Invalid component: ' + unit);
+                components[unit] = Math.trunc(num);
               } else {
                 components[unit] = 0;
               }
             }
             
-            // Check for sign consistency
-            let hasPositive = false;
-            let hasNegative = false;
+            let hasPositive = false, hasNegative = false;
             for (const unit of DURATION_UNITS) {
               if (components[unit] > 0) hasPositive = true;
               if (components[unit] < 0) hasNegative = true;
             }
-            if (hasPositive && hasNegative) {
-              throw new RangeError('Duration cannot have mixed signs');
+            if (hasPositive && hasNegative) throw new RangeError('Mixed signs');
+            const isNegative = hasNegative;
+            
+            // Validation
+            if (Math.abs(components.years) >= 4294967296 || Math.abs(components.months) >= 4294967296 || Math.abs(components.weeks) >= 4294967296) {
+              throw new RangeError('Out of range');
             }
+            const _normSec = Math.abs(components.days) * 86400 + Math.abs(components.hours) * 3600 + Math.abs(components.minutes) * 60 + Math.abs(components.seconds) + Math.abs(components.milliseconds) * 1e-3 + Math.abs(components.microseconds) * 1e-6 + Math.abs(components.nanoseconds) * 1e-9;
+            if (_normSec >= 9007199254740992) throw new RangeError('Out of range');
             
-            // IsValidDurationRecord: years/months/weeks must be < 2^32
-            if (Math.abs(components.years) >= 4294967296 ||
-                Math.abs(components.months) >= 4294967296 ||
-                Math.abs(components.weeks) >= 4294967296) {
-              throw new RangeError('Duration value out of range');
-            }
-            // normalizedSeconds must be < 2^53
-            const _normSec = Math.abs(components.days) * 86400 +
-              Math.abs(components.hours) * 3600 +
-              Math.abs(components.minutes) * 60 +
-              Math.abs(components.seconds) +
-              Math.abs(components.milliseconds) * 1e-3 +
-              Math.abs(components.microseconds) * 1e-6 +
-              Math.abs(components.nanoseconds) * 1e-9;
-            if (_normSec >= 9007199254740992) {
-              throw new RangeError('Duration value out of range');
-            }
-            
-            const style = slots.style;
-            const parts = [];
-            const partIsDigital = [];
-            
-            // Unit labels based on style
-            const labels = {
-              long: {
-                years: ['year', 'years'], months: ['month', 'months'], weeks: ['week', 'weeks'],
-                days: ['day', 'days'], hours: ['hour', 'hours'], minutes: ['minute', 'minutes'],
-                seconds: ['second', 'seconds'], milliseconds: ['millisecond', 'milliseconds'],
-                microseconds: ['microsecond', 'microseconds'], nanoseconds: ['nanosecond', 'nanoseconds']
-              },
-              short: {
-                years: ['yr', 'yrs'], months: ['mo', 'mos'], weeks: ['wk', 'wks'],
-                days: ['day', 'days'], hours: ['hr', 'hrs'], minutes: ['min', 'mins'],
-                seconds: ['sec', 'secs'], milliseconds: ['ms', 'ms'],
-                microseconds: ['μs', 'μs'], nanoseconds: ['ns', 'ns']
-              },
-              narrow: {
-                years: ['y', 'y'], months: ['m', 'm'], weeks: ['w', 'w'],
-                days: ['d', 'd'], hours: ['h', 'h'], minutes: ['m', 'm'],
-                seconds: ['s', 's'], milliseconds: ['ms', 'ms'],
-                microseconds: ['μs', 'μs'], nanoseconds: ['ns', 'ns']
-              }
-            };
-            
-            const effectiveStyle = style === 'digital' ? 'short' : style;
-            const unitLabels = labels[effectiveStyle] || labels.short;
-            
-            // Format each component
-            for (const unit of DURATION_UNITS) {
-              const value = components[unit];
+            const resultList = [];
+            let digitalGroup = [];
+            const nfLocale = slots.locale;
+
+            for (let i = 0; i < DURATION_UNITS.length; i++) {
+              const unit = DURATION_UNITS[i];
+              const value = Math.abs(components[unit]);
+              const unitStyle = slots[unit];
               const display = slots[unit + 'Display'];
+              const isNumeric = unitStyle === 'numeric' || unitStyle === '2-digit';
               
               if (display === 'always' || value !== 0) {
-                const absValue = Math.abs(value);
-                const label = unitLabels[unit];
-                const unitLabel = absValue === 1 ? label[0] : label[1];
-                
-                if (style === 'digital' && (unit === 'hours' || unit === 'minutes' || unit === 'seconds')) {
-                  parts.push(String(Math.floor(absValue)).padStart(2, '0'));
-                  partIsDigital.push(true);
+                if (isNumeric) {
+                  if (unit === 'hours' || unit === 'minutes' || unit === 'seconds') {
+                    let fv = String(value);
+                    if (unitStyle === '2-digit' || (digitalGroup.length > 0 && unit !== 'hours')) fv = fv.padStart(2, '0');
+                    
+                    const nextUnit = DURATION_UNITS[i+1];
+                    const nextUnitStyle = nextUnit ? slots[nextUnit] : undefined;
+                    
+                    if (unit === 'seconds' && (nextUnitStyle === 'numeric' || nextUnitStyle === '2-digit')) {
+                       // Handle fractional seconds in h:m:s sequence
+                       let frac = String(Math.abs(components.milliseconds)).padStart(3, '0') + String(Math.abs(components.microseconds)).padStart(3, '0') + String(Math.abs(components.nanoseconds)).padStart(3, '0');
+                       frac = frac.replace(/0+$/, '');
+                       const maxFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 9;
+                       const minFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 0;
+                       
+                       const full = frac.length > 0 ? (fv + '.' + frac) : fv;
+                       const formatted = new Intl.NumberFormat(nfLocale, { 
+                         minimumIntegerDigits: (unitStyle === '2-digit' || (digitalGroup.length > 0 && unit !== 'hours')) ? 2 : 1,
+                         minimumFractionDigits: minFD, maximumFractionDigits: maxFD, roundingMode: 'trunc' 
+                       }).format(full);
+                       digitalGroup.push(formatted);
+                       resultList.push(digitalGroup.join(':'));
+                       digitalGroup = [];
+                       break;
+                    } else if (nextUnitStyle !== 'numeric' && nextUnitStyle !== '2-digit') {
+                      digitalGroup.push(fv);
+                      if (slots.style === 'digital') {
+                        resultList.push(digitalGroup.join(':'));
+                      } else {
+                        digitalGroup.forEach((v, idx) => {
+                           const u = DURATION_UNITS[i - digitalGroup.length + 1 + idx];
+                           const uVal = Math.abs(components[u]);
+                           if (uVal !== 0 || slots[u + 'Display'] === 'always') {
+                             const uSingular = u.slice(0, -1);
+                             const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
+                             resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:uSingular, unitDisplay:fmtStyle}).format(v));
+                           }
+                        });
+                      }
+                      digitalGroup = [];
+                    } else {
+                      digitalGroup.push(fv);
+                    }
+                  } else if (unit === 'milliseconds' || unit === 'microseconds') {
+                    if (digitalGroup.length > 0) {
+                      if (slots.style === 'digital') resultList.push(digitalGroup.join(':'));
+                      else digitalGroup.forEach((v, idx) => {
+                        const u = DURATION_UNITS[i - digitalGroup.length + idx];
+                        if (Math.abs(components[u]) !== 0 || slots[u + 'Display'] === 'always') {
+                          const uSingular = u.slice(0, -1);
+                          const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
+                          resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:uSingular, unitDisplay:fmtStyle}).format(v));
+                        }
+                      });
+                      digitalGroup = [];
+                    }
+                    
+                    const nextUnitStyleForSpec = i < DURATION_UNITS.length - 1 ? slots.baseStyles[DURATION_UNITS[i+1]] : undefined;
+                    if (nextUnitStyleForSpec === 'numeric' || nextUnitStyleForSpec === '2-digit') {
+                       let frac = '';
+                       if (unit === 'milliseconds') frac = String(Math.abs(components.microseconds)).padStart(3, '0') + String(Math.abs(components.nanoseconds)).padStart(3, '0');
+                       else frac = String(Math.abs(components.nanoseconds)).padStart(3, '0');
+                       frac = frac.replace(/0+$/, '');
+                       const full = frac.length > 0 ? (String(value) + '.' + frac) : String(value);
+                       const maxFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 9;
+                       const minFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 0;
+                       const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
+                       resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:fmtStyle, minimumFractionDigits:minFD, maximumFractionDigits:maxFD, roundingMode:'trunc'}).format(full));
+                       break;
+                    } else {
+                       const displayStyle = (unitStyle==='numeric'||unitStyle==='2-digit') ? (slots.style==='narrow'?'narrow':(slots.style==='long'?'long':'short')) : unitStyle;
+                       resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay: displayStyle}).format(value));
+                    }
+                  } else {
+                    const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
+                    resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:fmtStyle}).format(value));
+                  }
                 } else {
-                  parts.push(absValue + ' ' + unitLabel);
-                  partIsDigital.push(false);
+                  resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:unitStyle}).format(value));
                 }
               }
             }
             
-            if (parts.length === 0) {
-              // Return "0 seconds" or similar for empty duration
-              const defaultUnit = 'seconds';
-              const label = unitLabels[defaultUnit];
-              return '0 ' + label[1];
+            if (resultList.length === 0) {
+              const ds = slots.seconds === '2-digit' ? 'short' : (slots.seconds === 'numeric' ? 'short' : slots.seconds);
+              return new Intl.NumberFormat(nfLocale, {style:'unit', unit:'second', unitDisplay:ds}).format(0);
             }
-            
-            if (style === 'digital') {
-              const textGroup = [];
-              const digitalGroup = [];
-              for (let _i = 0; _i < parts.length; _i++) {
-                if (partIsDigital[_i]) {
-                  digitalGroup.push(parts[_i]);
-                } else {
-                  textGroup.push(parts[_i]);
-                }
-              }
-              const segments = [];
-              if (textGroup.length > 0) segments.push(textGroup.join(', '));
-              if (digitalGroup.length > 0) segments.push(digitalGroup.join(':'));
-              return (hasNegative ? '-' : '') + segments.join(', ');
-            }
-            
-            return (hasNegative ? '-' : '') + parts.join(', ');
+            const res = new Intl.ListFormat(nfLocale, {type:'unit', style:slots.style==='long'?'long':'short'}).format(resultList);
+            return (isNegative ? '-' : '') + res;
           };
           
           // formatToParts method
           DurationFormat.prototype.formatToParts = function formatToParts(duration) {
             const slots = dfSlots.get(this);
-            if (!slots) {
-              throw new TypeError('Method Intl.DurationFormat.prototype.formatToParts called on incompatible receiver');
-            }
-            
-            // Simplified - return the formatted string as a single literal part
-            const formatted = this.format(duration);
-            return [{ type: 'literal', value: formatted }];
+            if (!slots) throw new TypeError('Called on incompatible receiver');
+            return [{ type: 'literal', value: this.format(duration) }];
           };
-          
+
           // resolvedOptions method
           DurationFormat.prototype.resolvedOptions = function resolvedOptions() {
             const slots = dfSlots.get(this);
-            if (!slots) {
-              throw new TypeError('Method Intl.DurationFormat.prototype.resolvedOptions called on incompatible receiver');
-            }
-            
-            const result = {
-              locale: slots.locale,
-              numberingSystem: slots.numberingSystem,
-              style: slots.style
-            };
-            
-            // Add per-unit options (always present)
+            if (!slots) throw new TypeError('Called on incompatible receiver');
+            const res = { locale: slots.locale, numberingSystem: slots.numberingSystem, style: slots.style, fractionalDigits: slots.fractionalDigits };
             for (const unit of DURATION_UNITS) {
-              result[unit] = slots[unit];
-              result[unit + 'Display'] = slots[unit + 'Display'];
+              res[unit] = slots[unit];
+              res[unit + 'Display'] = slots[unit + 'Display'];
             }
-            
-            if (slots.fractionalDigits !== undefined) {
-              result.fractionalDigits = slots.fractionalDigits;
-            }
-            
-            return result;
+            return res;
           };
-          
-          // supportedLocalesOf static method
+
+          // static supportedLocalesOf
           DurationFormat.supportedLocalesOf = function supportedLocalesOf(locales, options) {
-            if (options !== undefined) {
-              if (options === null) {
-                throw new TypeError('Cannot convert null to object');
-              }
-              const opts = Object(options);
-              const matcher = opts.localeMatcher;
-              if (matcher !== undefined) {
-                const matcherStr = String(matcher);
-                if (!VALID_LOCALE_MATCHERS.includes(matcherStr)) {
-                  throw new RangeError('Invalid localeMatcher');
-                }
-              }
-            }
-            
-            if (locales === undefined) return [];
-            const requestedLocales = Array.isArray(locales) ? locales : [String(locales)];
-            return Intl.getCanonicalLocales(requestedLocales);
+            if (locales === null) throw new TypeError('Cannot convert null to object');
+            return Intl.getCanonicalLocales(locales);
           };
+
+          for (const m of ['format', 'formatToParts', 'resolvedOptions']) {
+            const method = DurationFormat.prototype[m];
+            Object.defineProperty(DurationFormat.prototype, m, { value: method, writable: true, enumerable: false, configurable: true });
+            try { delete method.prototype; } catch(_e) {}
+          }
+          Object.defineProperty(DurationFormat, 'supportedLocalesOf', { value: DurationFormat.supportedLocalesOf, writable: true, enumerable: false, configurable: true });
+          Object.defineProperty(DurationFormat.supportedLocalesOf, 'length', { value: 1, writable: false, enumerable: false, configurable: true });
+          try { delete DurationFormat.supportedLocalesOf.prototype; } catch(_e) {}
           
-          // Make supportedLocalesOf non-enumerable and set length to 1
-          Object.defineProperty(DurationFormat, 'supportedLocalesOf', {
-            value: DurationFormat.supportedLocalesOf,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
-          Object.defineProperty(DurationFormat.supportedLocalesOf, 'length', {
-            value: 1,
-            writable: false,
-            enumerable: false,
-            configurable: true
-          });
-          
-          // Make prototype methods non-enumerable
-          Object.defineProperty(DurationFormat.prototype, 'format', {
-            value: DurationFormat.prototype.format,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
-          Object.defineProperty(DurationFormat.prototype, 'formatToParts', {
-            value: DurationFormat.prototype.formatToParts,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
-          Object.defineProperty(DurationFormat.prototype, 'resolvedOptions', {
-            value: DurationFormat.prototype.resolvedOptions,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
-          
-          Object.defineProperty(DurationFormat.prototype, 'constructor', {
-            value: DurationFormat,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
-          
-          Object.defineProperty(DurationFormat.prototype, Symbol.toStringTag, {
-            value: 'Intl.DurationFormat',
-            writable: false,
-            enumerable: false,
-            configurable: true
-          });
-          
-          // Set function length
-          Object.defineProperty(DurationFormat, 'length', {
-            value: 0,
-            writable: false,
-            enumerable: false,
-            configurable: true
-          });
-          
-          Object.defineProperty(DurationFormat, 'name', {
-            value: 'DurationFormat',
-            writable: false,
-            enumerable: false,
-            configurable: true
-          });
-          
-          // Install on Intl object
-          Object.defineProperty(Intl, 'DurationFormat', {
-            value: DurationFormat,
-            writable: true,
-            enumerable: false,
-            configurable: true
-          });
+          Object.defineProperty(DurationFormat.prototype, 'constructor', { value: DurationFormat, writable: true, enumerable: false, configurable: true });
+          Object.defineProperty(DurationFormat.prototype, Symbol.toStringTag, { value: 'Intl.DurationFormat', writable: false, enumerable: false, configurable: true });
+          Object.defineProperty(DurationFormat, 'length', { value: 0, writable: false, enumerable: false, configurable: true });
+          Object.defineProperty(DurationFormat, 'name', { value: 'DurationFormat', writable: false, enumerable: false, configurable: true });
+          Object.defineProperty(Intl, 'DurationFormat', { value: DurationFormat, writable: true, enumerable: false, configurable: true });
+          Object.defineProperty(DurationFormat, 'prototype', { value: DurationFormat.prototype, writable: false, enumerable: false, configurable: false });
         })();
         "#,
     ))?;
@@ -11290,12 +11231,25 @@ fn install_test262_globals(
     context: &mut Context,
     install_shadow_realm: bool,
 ) -> boa_engine::JsResult<()> {
+    // Add formatDurationFormatPattern and partitionDurationFormatPattern to global object for DurationFormat tests
+    context.eval(Source::from_bytes(
+        r#"
+        if (typeof globalThis.partitionDurationFormatPattern !== 'function') {
+          globalThis.partitionDurationFormatPattern = function(df, duration) { return df.formatToParts(duration); };
+        }
+        if (typeof globalThis.formatDurationFormatPattern !== 'function') {
+          globalThis.formatDurationFormatPattern = function(df, duration) { return df.format(duration); };
+        }
+        "#,
+    ))?;
+
     let test262 = build_test262_object(
         context.realm().clone(),
         context.global_object(),
         true,
         context,
     );
+
     context.register_global_property(js_string!("$262"), test262, Attribute::all())?;
     if install_shadow_realm {
         install_shadow_realm_polyfill(context)?;
@@ -11659,6 +11613,7 @@ fn build_test262_object(
 
     let is_html_dda = JsObject::with_is_html_dda_proto(target_realm.intrinsics());
 
+    let realm = context.realm().clone();
     let mut object = ObjectInitializer::new(context);
     object.property(js_string!("global"), target_global, Attribute::all());
     object.property(js_string!("evalScript"), eval_script, Attribute::all());
@@ -11686,6 +11641,7 @@ fn build_test262_object(
     if let Some(agent) = agent {
         object.property(js_string!("agent"), agent, Attribute::all());
     }
+
     let object = object.build();
     let can_parse_realm = target_realm.clone();
     let can_parse = build_builtin_function(

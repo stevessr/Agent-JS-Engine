@@ -232,8 +232,9 @@ impl HarnessCache {
         for entry in WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
         {
+            println!("DEBUG: WalkDir entry: {:?}", entry.path());
+            if !entry.file_type().is_file() { continue; }
             let Ok(contents) = fs::read_to_string(entry.path()) else {
                 continue;
             };
@@ -245,6 +246,7 @@ impl HarnessCache {
                 .map(|path| path.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if !key.is_empty() {
+                eprintln!("DEBUG: Indexed harness file: {}", key);
                 files.insert(key, contents);
             }
         }
@@ -354,6 +356,8 @@ fn build_source(case: &TestCase, case_source: &str, harness: &HarnessCache) -> S
         if let Some(contents) = harness.get(&include) {
             combined.push_str(contents);
             combined.push('\n');
+        } else {
+            eprintln!("DEBUG: Missing harness include: {}", include);
         }
     }
 
