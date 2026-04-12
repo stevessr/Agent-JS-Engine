@@ -231,12 +231,9 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_error_is_error(context)?;
     install_promise_keyed_builtins(context)?;
     install_bigint_to_locale_string(context)?;
-    install_intl_display_names_builtin(context)?;
     install_intl_date_time_format_polyfill(context)?;
     install_temporal_locale_string_polyfill(context)?;
     install_date_locale_methods(context)?;
-    install_intl_supported_values_of(context)?;
-    install_intl_display_names_builtin(context)?;
     Ok(())
 }
 
@@ -274,7 +271,6 @@ fn install_child_realm_host_globals(context: &mut Context) -> boa_engine::JsResu
     install_finalization_registry_builtin(context)?;
     install_reg_exp_escape(context)?;
     install_error_is_error(context)?;
-    install_intl_display_names_builtin(context)?;
     install_iterator_helpers(context)?;
     Ok(())
 }

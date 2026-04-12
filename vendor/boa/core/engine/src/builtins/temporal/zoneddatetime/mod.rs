@@ -1613,25 +1613,33 @@ impl ZonedDateTime {
     ///
     /// [spec]: https://tc39.es/proposal-temporal/#sec-temporal.zoneddatetime.prototype.tolocalestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/ZonedDateTime/toLocaleString
-    fn to_locale_string(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
+    fn to_locale_string(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let object = this.as_object();
-        let zdt = object
+        let _zdt = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("the this object must be a ZonedDateTime object.")
             })?;
 
-        let ixdtf = zdt.inner.to_ixdtf_string_with_provider(
-            DisplayOffset::Auto,
-            DisplayTimeZone::Auto,
-            DisplayCalendar::Auto,
-            ToStringRoundingOptions::default(),
-            context.tz_provider(),
-        )?;
+        let locales = args.get_or_undefined(0);
+        let options = args.get_or_undefined(1);
 
-        Ok(JsString::from(ixdtf).into())
+        let dtf_obj = crate::builtins::intl::date_time_format::DateTimeFormat::constructor(
+            &context
+                .intrinsics()
+                .constructors()
+                .date_time_format()
+                .constructor()
+                .into(),
+            &[locales.clone(), options.clone()],
+            context,
+        )?
+        .as_object()
+        .expect("DateTimeFormat constructor must return an object")
+        .clone();
+
+        crate::builtins::intl::date_time_format::DateTimeFormat::format(&dtf_obj.into(), &[this.clone()], context)
     }
 
     /// 6.3.43 `Temporal.ZonedDateTime.prototype.toJSON ( )`

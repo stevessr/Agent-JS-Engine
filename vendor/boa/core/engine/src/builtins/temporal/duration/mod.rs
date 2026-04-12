@@ -1132,23 +1132,35 @@ impl Duration {
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/Duration/toLocaleString
     pub(crate) fn to_locale_string(
         this: &JsValue,
-        _: &[JsValue],
-        _: &mut Context,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
         let object = this.as_object();
-        let duration = object
+        let _duration = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("this value must be a Duration object.")
             })?;
 
-        let result = duration
-            .inner
-            .as_temporal_string(ToStringRoundingOptions::default())?;
+        let locales = args.get_or_undefined(0);
+        let options = args.get_or_undefined(1);
 
-        Ok(JsString::from(result).into())
+        let df_obj = crate::builtins::intl::duration_format::DurationFormat::constructor(
+            &context
+                .intrinsics()
+                .constructors()
+                .duration_format()
+                .constructor()
+                .into(),
+            &[locales.clone(), options.clone()],
+            context,
+        )?
+        .as_object()
+        .expect("DurationFormat constructor must return an object")
+        .clone();
+
+        crate::builtins::intl::duration_format::DurationFormat::format(&df_obj.into(), &[this.clone()], context)
     }
 
     /// 7.3.25 `Temporal.Duration.prototype.valueOf ( )`

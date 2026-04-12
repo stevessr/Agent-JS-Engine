@@ -664,10 +664,9 @@ impl Instant {
     ///
     /// [spec]: https://tc39.es/proposal-temporal/#sec-temporal.instant.tolocalestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/Instant/toLocaleString
-    fn to_locale_string(this: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
+    fn to_locale_string(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let object = this.as_object();
-        let instant = object
+        let _instant = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
@@ -675,12 +674,24 @@ impl Instant {
                     .with_message("the this object must be a Temporal.Instant object.")
             })?;
 
-        let ixdtf = instant.inner.to_ixdtf_string_with_provider(
-            None,
-            ToStringRoundingOptions::default(),
-            context.tz_provider(),
-        )?;
-        Ok(JsString::from(ixdtf).into())
+        let locales = args.get_or_undefined(0);
+        let options = args.get_or_undefined(1);
+
+        let dtf_obj = crate::builtins::intl::date_time_format::DateTimeFormat::constructor(
+            &context
+                .intrinsics()
+                .constructors()
+                .date_time_format()
+                .constructor()
+                .into(),
+            &[locales.clone(), options.clone()],
+            context,
+        )?
+        .as_object()
+        .expect("DateTimeFormat constructor must return an object")
+        .clone();
+
+        crate::builtins::intl::date_time_format::DateTimeFormat::format(&dtf_obj.into(), &[this.clone()], context)
     }
 
     /// 8.3.13 `Temporal.Instant.prototype.toJSON ( )`

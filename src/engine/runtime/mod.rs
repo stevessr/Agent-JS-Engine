@@ -684,7 +684,6 @@ include!("module.rs");
 include!("agent.rs");
 include!("console.rs");
 include!("builtins.rs");
-include!("intl_display_names.rs");
 include!("intl_date_time.rs");
 include!("intl_misc.rs");
 include!("iterator.rs");

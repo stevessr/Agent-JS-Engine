@@ -236,9 +236,20 @@ impl DurationFormat {
         filter_locales::<Self>(requested_locales, options, context).map(JsValue::from)
     }
 
-    fn format(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
-        // TODO
-        Ok(js_string!("").into())
+    pub(crate) fn format(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+        let duration = args.get_or_undefined(0);
+        let object = this.as_object();
+        let _df = object
+            .as_ref()
+            .and_then(|o| o.downcast_ref::<Self>())
+            .ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message("`format` can only be called on a `DurationFormat` object")
+            })?;
+
+        // Minimal implementation for now
+        let duration_str = duration.to_string(context)?.to_std_string_escaped();
+        Ok(js_string!(duration_str).into())
     }
 
     fn format_to_parts(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {

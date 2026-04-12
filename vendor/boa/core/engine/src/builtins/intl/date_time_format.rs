@@ -116,7 +116,7 @@ impl DateTimeFormat {
         ).into())
     }
 
-    fn format(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn format(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let date = args.get_or_undefined(0);
         let object = this.as_object();
         let _dtf = object

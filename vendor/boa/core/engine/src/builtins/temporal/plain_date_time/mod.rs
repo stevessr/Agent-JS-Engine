@@ -1458,20 +1458,33 @@ impl PlainDateTime {
     ///
     /// [spec]: https://tc39.es/proposal-temporal/#sec-temporal.plaindatetime.prototype.with
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Temporal/PlainDateTime/with
-    fn to_locale_string(this: &JsValue, _args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-        // TODO: Update for ECMA-402 compliance
+    fn to_locale_string(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let object = this.as_object();
-        let dt = object
+        let _dt = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("the this object must be a PlainDateTime object.")
             })?;
 
-        let ixdtf = dt
-            .inner
-            .to_ixdtf_string(ToStringRoundingOptions::default(), DisplayCalendar::Auto)?;
-        Ok(JsString::from(ixdtf).into())
+        let locales = args.get_or_undefined(0);
+        let options = args.get_or_undefined(1);
+
+        let dtf_obj = crate::builtins::intl::date_time_format::DateTimeFormat::constructor(
+            &context
+                .intrinsics()
+                .constructors()
+                .date_time_format()
+                .constructor()
+                .into(),
+            &[locales.clone(), options.clone()],
+            context,
+        )?
+        .as_object()
+        .expect("DateTimeFormat constructor must return an object")
+        .clone();
+
+        crate::builtins::intl::date_time_format::DateTimeFormat::format(&dtf_obj.into(), &[this.clone()], context)
     }
 
     /// 5.3.36 `Temporal.PlainDateTime.prototype.toJSON ( )`

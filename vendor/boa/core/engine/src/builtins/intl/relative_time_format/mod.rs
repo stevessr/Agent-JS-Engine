@@ -148,7 +148,7 @@ impl RelativeTimeFormat {
         filter_locales::<Self>(requested_locales, options, context).map(JsValue::from)
     }
 
-    fn format(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+    pub(crate) fn format(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let value = args.get_or_undefined(0);
         let unit = args.get_or_undefined(1);
 

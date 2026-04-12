@@ -321,6 +321,7 @@ impl Realm {
             intl::ListFormat::init(self);
             intl::Locale::init(self);
             intl::DateTimeFormat::init(self);
+            intl::DisplayNames::init(self);
             intl::RelativeTimeFormat::init(self);
             intl::DurationFormat::init(self);
             intl::Segmenter::init(self);

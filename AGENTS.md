@@ -28,6 +28,12 @@
 - Match existing behavior-first test names such as `parser_parses_*`, `interpreter_*`, and `engine_*`.
 - For `test262` work, run a narrow filtered case first, then the broader `./run_test262.sh` flow before opening a PR.
 
+## Engine Modification Guidelines
+- Directly modify the engine source code in `vendor/boa` for functional compatibility and feature implementation.
+- Avoid using external polyfills (e.g., `context.eval` with JS strings) unless absolutely necessary for quick prototyping.
+- All functional changes should be implemented in Rust within the relevant `boa` modules.
+- We maintain a fork of Boa; changes should be made surgically to minimize merge conflicts with upstream when possible, but prioritized for standard compliance.
+
 ## Commit & Pull Request Guidelines
 - Recent commits use short, imperative subjects like `Add optional chaining support for member access and calls.` Keep the first line focused and scoped to one change.
 - PRs should summarize the affected subsystem, list commands run, and call out any `test262` skips, filters, or behavior changes.

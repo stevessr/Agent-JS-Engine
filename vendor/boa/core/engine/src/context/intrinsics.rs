@@ -181,6 +181,8 @@ pub struct StandardConstructors {
     #[cfg(feature = "intl")]
     plural_rules: StandardConstructor,
     #[cfg(feature = "intl")]
+    display_names: StandardConstructor,
+    #[cfg(feature = "intl")]
     relative_time_format: StandardConstructor,
     #[cfg(feature = "intl")]
     duration_format: StandardConstructor,
@@ -278,6 +280,8 @@ impl Default for StandardConstructors {
             segmenter: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             plural_rules: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            display_names: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             relative_time_format: StandardConstructor::default(),
             #[cfg(feature = "intl")]
@@ -913,6 +917,19 @@ impl StandardConstructors {
     #[cfg(feature = "intl")]
     pub const fn plural_rules(&self) -> &StandardConstructor {
         &self.plural_rules
+    }
+
+    /// Returns the `Intl.DisplayNames` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/ecma402/#sec-intl-displaynames-constructor
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn display_names(&self) -> &StandardConstructor {
+        &self.display_names
     }
 
     /// Returns the `Intl.RelativeTimeFormat` constructor.
