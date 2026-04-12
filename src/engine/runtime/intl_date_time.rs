@@ -738,9 +738,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               _dp(result, 'locale', opts.locale);
               _dp(result, 'calendar', opts.calendar);
               _dp(result, 'numberingSystem', opts.numberingSystem);
-              _dp(result, 'timeZone', opts.timeZone !== undefined ? opts.timeZone : (() => {
-                try { return new DTF().resolvedOptions().timeZone || 'UTC'; } catch (_e) { return 'UTC'; }
-              })());
+              _dp(result, 'timeZone', opts.timeZone !== undefined ? opts.timeZone : defaultTimeZone());
               if (opts.hourCycle !== undefined) _dp(result, 'hourCycle', opts.hourCycle);
               if (opts.hour12 !== undefined) _dp(result, 'hour12', opts.hour12);
               if (opts.weekday !== undefined) _dp(result, 'weekday', opts.weekday);
@@ -772,15 +770,22 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return match ? match[1].toLowerCase() : 'gregory';
           }
 
+          function defaultTimeZone() {
+            try {
+              return new DTF().resolvedOptions().timeZone || 'UTC';
+            } catch (_e) {
+              return 'UTC';
+            }
+          }
+
           function getDateTimeFields(d, opts) {
             const calendar = resolveCalendarId(opts);
             if (typeof Temporal === 'object' &&
                 Temporal !== null &&
-                typeof Temporal.Instant === 'function' &&
-                opts.timeZone !== undefined) {
+                typeof Temporal.Instant === 'function') {
               try {
                 const instant = new Temporal.Instant(BigInt(d.getTime()) * 1000000n);
-                const tz = opts.timeZone;
+                const tz = opts.timeZone !== undefined ? opts.timeZone : defaultTimeZone();
                 const zoned = instant.toZonedDateTimeISO(tz);
                 const weekday = zoned.dayOfWeek % 7;
                 let calendarYear = zoned.year;
@@ -796,6 +801,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                     calendarMonth = calendarZoned.month;
                     calendarDay = calendarZoned.day;
                     calendarMonthCode = calendarZoned.monthCode;
+                    if ((calendar === 'chinese' || calendar === 'dangi') && calendarMonthCode) {
+                      const m = calendarMonthCode.match(/^M(\d+)/);
+                      if (m) {
+                        calendarMonth = parseInt(m[1], 10);
+                      }
+                    }
                     try { calendarEraYear = calendarZoned.eraYear; } catch (_e) {}
                     try { calendarEra = calendarZoned.era; } catch (_e) {}
                   } catch (_calendarError) {
@@ -938,15 +949,17 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               const gregShort = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
               const gregNarrow = ['J', 'F', 'M', 'A', 'M', 'J', 'J', 'A', 'S', 'O', 'N', 'D'];
+              const hebrewLong = ['Tishri', 'Heshvan', 'Kislev', 'Tevet', 'Shevat', 'Adar', 'Nisan', 'Iyar', 'Sivan', 'Tamuz', 'Av', 'Elul'];
               const islamicLong = ['Muharram', 'Safar', 'Rabiʻ I', 'Rabiʻ II', 'Jumada I', 'Jumada II',
                 'Rajab', 'Shaʻban', 'Ramadan', 'Shawwal', 'Dhuʻl-Qiʻdah', 'Dhuʻl-Hijjah'];
               const islamicShort = ['Muh.', 'Saf.', 'Rab. I', 'Rab. II', 'Jum. I', 'Jum. II',
                 'Raj.', 'Sha.', 'Ram.', 'Shaw.', 'Dhuʻl-Q.', 'Dhuʻl-H.'];
               const lowerCalendar = String(calendar || 'gregory').toLowerCase();
               const isIslamic = lowerCalendar === 'islamic' || lowerCalendar.startsWith('islamic-');
-              const longNames = isIslamic ? islamicLong : gregLong;
-              const shortNames = isIslamic ? islamicShort : gregShort;
-              const narrowNames = isIslamic ? islamicLong.map((name) => name[0]) : gregNarrow;
+              const isHebrew = lowerCalendar === 'hebrew';
+              const longNames = isIslamic ? islamicLong : (isHebrew ? hebrewLong : gregLong);
+              const shortNames = isIslamic ? islamicShort : (isHebrew ? hebrewLong : gregShort);
+              const narrowNames = isIslamic ? islamicLong.map((name) => name[0]) : (isHebrew ? hebrewLong.map((name) => name[0]) : gregNarrow);
               if (style === 'long') return longNames[month - 1];
               if (style === 'short') return shortNames[month - 1];
               return narrowNames[month - 1];
@@ -1030,17 +1043,49 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (normalized.month !== undefined) {
                 const cal = String(fields.calendar || 'gregory').toLowerCase();
                 const isLunisolar = cal === 'chinese' || cal === 'dangi';
+                const hebrewMonthNames = {
+                  M01: 'Tishri',
+                  M02: 'Heshvan',
+                  M03: 'Kislev',
+                  M04: 'Tevet',
+                  M05: 'Shevat',
+                  M05L: 'Adar I',
+                  M06: 'Adar',
+                  M07: 'Nisan',
+                  M08: 'Iyar',
+                  M09: 'Sivan',
+                  M10: 'Tamuz',
+                  M11: 'Av',
+                  M12: 'Elul',
+                };
                 let displayMonth = fields.calendarMonth ?? fields.month;
                 let value;
-                if (isLunisolar && fields.calendarMonthCode && fields.calendarMonthCode.endsWith('L')) {
-                  const baseMonth = fields.calendarMonthCode.slice(1, -1);
-                  value = (normalized.month === '2-digit' || normalized.month === 'numeric')
-                    ? String(parseInt(baseMonth, 10))
-                    : ('闰' + String(parseInt(baseMonth, 10)) + '月');
-                } else if (isLunisolar) {
-                  value = (normalized.month === '2-digit' || normalized.month === 'numeric')
-                    ? String(displayMonth)
-                    : (String(displayMonth) + '月');
+                if (cal === 'hebrew' && typeof fields.calendarMonthCode === 'string' &&
+                    hebrewMonthNames[fields.calendarMonthCode]) {
+                  value = hebrewMonthNames[fields.calendarMonthCode];
+                } else if (isLunisolar && typeof fields.calendarMonthCode === 'string' &&
+                    /^M\d{2}L?$/.test(fields.calendarMonthCode)) {
+                  const isLeapMonth = fields.calendarMonthCode.endsWith('L');
+                  const baseMonth = parseInt(
+                    isLeapMonth
+                      ? fields.calendarMonthCode.slice(1, -1)
+                      : fields.calendarMonthCode.slice(1),
+                    10
+                  );
+                  displayMonth = baseMonth;
+                  if (normalized.month === '2-digit') {
+                    value = isLeapMonth
+                      ? (String(baseMonth).padStart(2, '0') + 'bis')
+                      : String(baseMonth).padStart(2, '0');
+                  } else if (normalized.month === 'numeric') {
+                    value = isLeapMonth
+                      ? (String(baseMonth) + 'bis')
+                      : String(baseMonth);
+                  } else {
+                    value = isLeapMonth
+                      ? ('闰' + String(baseMonth) + '月')
+                      : (String(baseMonth) + '月');
+                  }
                 } else {
                   value = normalized.month === '2-digit'
                     ? String(displayMonth).padStart(2, '0')
@@ -1761,6 +1806,10 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
                 slot.resolvedOpts.dayPeriod !== undefined ||
                 slot.resolvedOpts.fractionalSecondDigits !== undefined ||
                 (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
+                (slot.resolvedOpts.era !== undefined &&
+                  slot.resolvedOpts.calendar !== 'gregory' &&
+                  slot.resolvedOpts.calendar !== 'iso8601') ||
+                slot.resolvedOpts.calendar === 'hebrew' ||
                 slot.resolvedOpts.calendar === 'chinese' ||
                 slot.resolvedOpts.calendar === 'dangi' ||
                 slot.resolvedOpts.dateStyle !== undefined ||
@@ -1819,6 +1868,10 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               slot.resolvedOpts.dayPeriod !== undefined ||
               slot.resolvedOpts.fractionalSecondDigits !== undefined ||
               (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
+              (slot.resolvedOpts.era !== undefined &&
+                slot.resolvedOpts.calendar !== 'gregory' &&
+                slot.resolvedOpts.calendar !== 'iso8601') ||
+              slot.resolvedOpts.calendar === 'hebrew' ||
               slot.resolvedOpts.calendar === 'chinese' ||
               slot.resolvedOpts.calendar === 'dangi' ||
               slot.resolvedOpts.dateStyle !== undefined ||
@@ -1861,7 +1914,13 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
             const needsCustom = slot.needsDefault || slot.resolvedOpts.dayPeriod !== undefined ||
               slot.resolvedOpts.fractionalSecondDigits !== undefined ||
-              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn');
+              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
+              (slot.resolvedOpts.era !== undefined &&
+                slot.resolvedOpts.calendar !== 'gregory' &&
+                slot.resolvedOpts.calendar !== 'iso8601') ||
+              slot.resolvedOpts.calendar === 'hebrew' ||
+              slot.resolvedOpts.calendar === 'chinese' ||
+              slot.resolvedOpts.calendar === 'dangi';
             if (!needsCustom && slot.instance && typeof slot.instance.format === 'function') {
               return slot.instance.format(d);
             }
@@ -1880,6 +1939,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
             if (slot.instance && !slot.needsDefault &&
                 slot.resolvedOpts.fractionalSecondDigits === undefined &&
+                (slot.resolvedOpts.era === undefined ||
+                  slot.resolvedOpts.calendar === 'gregory' ||
+                  slot.resolvedOpts.calendar === 'iso8601') &&
+                slot.resolvedOpts.calendar !== 'hebrew' &&
+                slot.resolvedOpts.calendar !== 'chinese' &&
+                slot.resolvedOpts.calendar !== 'dangi' &&
                 typeof slot.instance.formatToParts === 'function') {
               return slot.instance.formatToParts(d);
             }
@@ -2134,4 +2199,3 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
     ))?;
     Ok(())
 }
-

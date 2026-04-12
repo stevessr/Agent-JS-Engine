@@ -260,6 +260,435 @@ fn install_temporal_locale_string_polyfill(context: &mut Context) -> JsResult<()
     Ok(())
 }
 
+fn install_intl_number_format_polyfill(context: &mut Context) -> JsResult<()> {
+    context.eval(Source::from_bytes(
+        r#"
+        (() => {
+          if (typeof Intl !== 'object' || Intl === null) return;
+          if (typeof Intl.NumberFormat !== 'function') return;
+
+          const NF = Intl.NumberFormat;
+          const proto = NF.prototype;
+          const nativeResolvedOptions = proto.resolvedOptions;
+          const formatDesc = Object.getOwnPropertyDescriptor(proto, 'format');
+          const nativeFormatGetter = formatDesc && formatDesc.get;
+          const nativeFormatToParts = proto.formatToParts;
+          const digitInfoCache = new Map();
+          const nativeBoundFormatCache = new WeakMap();
+          const wrappedFormatCache = new WeakMap();
+
+          function makeNonConstructable(impl, name, length) {
+            const arrowWrapper = (...args) => impl.apply(undefined, args);
+            const proxy = new Proxy(arrowWrapper, {
+              apply(_target, thisArg, args) {
+                return impl.apply(thisArg, args);
+              },
+            });
+            Object.defineProperty(proxy, 'name', {
+              value: name,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            Object.defineProperty(proxy, 'length', {
+              value: length,
+              writable: false,
+              enumerable: false,
+              configurable: true,
+            });
+            try { delete proxy.prototype; } catch (_e) {}
+            return proxy;
+          }
+
+          function unwrapNumberFormat(receiver) {
+            try {
+              nativeResolvedOptions.call(receiver);
+              return receiver;
+            } catch (_e) {
+              throw new TypeError('Method called on incompatible receiver');
+            }
+          }
+
+          function getNativeBoundFormat(receiver) {
+            let bound = nativeBoundFormatCache.get(receiver);
+            if (bound !== undefined) {
+              return bound;
+            }
+            if (typeof nativeFormatGetter !== 'function') {
+              throw new TypeError('Intl.NumberFormat.prototype.format is unavailable');
+            }
+            bound = nativeFormatGetter.call(receiver);
+            nativeBoundFormatCache.set(receiver, bound);
+            return bound;
+          }
+
+          function formatSpecialNumber(receiver, numeric) {
+            const opts = nativeResolvedOptions.call(receiver);
+            const signDisplay = opts.signDisplay || 'auto';
+            const negative = numeric < 0 || Object.is(numeric, -0);
+            const isNaNValue = Number.isNaN(numeric);
+
+            let sign = '';
+            if (negative) {
+              if (signDisplay !== 'never') {
+                sign = '-';
+              }
+            } else if (!isNaNValue) {
+              if (signDisplay === 'always') {
+                sign = '+';
+              } else if (signDisplay === 'exceptZero' && numeric !== 0) {
+                sign = '+';
+              }
+            } else if (signDisplay === 'always') {
+              sign = '+';
+            }
+
+            if (isNaNValue) {
+              return sign + 'NaN';
+            }
+            return sign + '∞';
+          }
+
+          const UNIT_DATA = {
+            en: {
+              long: { year: ['year', 'years'], month: ['month', 'months'], week: ['week', 'weeks'], day: ['day', 'days'], hour: ['hour', 'hours'], minute: ['minute', 'minutes'], second: ['second', 'seconds'], millisecond: ['millisecond', 'milliseconds'], microsecond: ['microsecond', 'microseconds'], nanosecond: ['nanosecond', 'nanoseconds'] },
+              short: { year: ['yr', 'yrs'], month: ['mo', 'mos'], week: ['wk', 'wks'], day: ['day', 'days'], hour: ['hr', 'hrs'], minute: ['min', 'mins'], second: ['sec', 'secs'], millisecond: ['ms', 'ms'], microsecond: ['μs', 'μs'], nanosecond: ['ns', 'ns'] },
+              narrow: { year: ['y', 'y'], month: ['m', 'm'], week: ['w', 'w'], day: ['d', 'd'], hour: ['h', 'h'], minute: ['m', 'm'], second: ['s', 's'], millisecond: ['ms', 'ms'], microsecond: ['μs', 'μs'], nanosecond: ['ns', 'ns'] }
+            },
+            es: {
+              long: { year: ['año', 'años'], month: ['mes', 'meses'], week: ['semana', 'semanas'], day: ['día', 'días'], hour: ['hora', 'horas'], minute: ['minuto', 'minutos'], second: ['segundo', 'segundos'], millisecond: ['milisegundo', 'milisegundos'], microsecond: ['microsegundo', 'microsegundos'], nanosecond: ['nanosegundo', 'nanosegundos'] },
+              short: { year: ['a', 'a'], month: ['mes', 'mes'], week: ['sem.', 'sem.'], day: ['día', 'días'], hour: ['h', 'h'], minute: ['min', 'min'], second: ['s', 's'], millisecond: ['ms', 'ms'], microsecond: ['μs', 'μs'], nanosecond: ['ns', 'ns'] },
+              narrow: { year: ['a', 'a'], month: ['m', 'm'], week: ['s', 's'], day: ['d', 'd'], hour: ['h', 'h'], minute: ['min', 'min'], second: ['s', 's'], millisecond: ['ms', 'ms'], microsecond: ['μs', 'μs'], nanosecond: ['ns', 'ns'] }
+            }
+          };
+
+          function formatNumberValue(receiver, nativeBound, value) {
+            const opts = nativeResolvedOptions.call(receiver);
+            let res = (typeof value === 'bigint') ? String(nativeBound(value)) : String(nativeBound(Number(value)));
+
+            if (opts.style === 'unit' && opts.unit) {
+               const lang = String(opts.locale).toLowerCase().split('-')[0];
+               const data = UNIT_DATA[lang] || UNIT_DATA['en'];
+               const style = opts.unitDisplay || 'short';
+               const unitData = data[style] || data['short'];
+               const labels = unitData[opts.unit];
+               if (labels) {
+                  // Check if either singular or plural label is already in res
+                  if (!res.includes(labels[0]) && !res.includes(labels[1])) {
+                    const isPlural = Math.abs(Number(value)) !== 1;
+                    const label = isPlural ? labels[1] : labels[0];
+                    if (style === 'narrow') return res + label;
+                    return res + ' ' + label;
+                  }
+               }
+            }
+            return res;
+          }
+
+          function getDigitInfo(locale, numberingSystem) {
+            const key = locale + '|' + (numberingSystem || '');
+            if (digitInfoCache.has(key)) {
+              return digitInfoCache.get(key);
+            }
+
+            const digitsFormatter = new NF(locale, {
+              numberingSystem,
+              useGrouping: false,
+            });
+            const digitsString = String(nativeFormatGetter.call(digitsFormatter)(9876543210));
+            const digits = [...digitsString];
+            const digitSet = new Set(digits);
+
+            const sampleFormatter = new NF(locale, {
+              numberingSystem,
+              useGrouping: true,
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            });
+            const sample = String(nativeFormatGetter.call(sampleFormatter)(1000.1));
+            const separators = [...sample].filter((ch) => !digitSet.has(ch));
+            const info = {
+              digits,
+              digitSet,
+              group: separators.length > 1 ? separators[0] : undefined,
+              decimal: separators.length > 0 ? separators[separators.length - 1] : undefined,
+            };
+            digitInfoCache.set(key, info);
+            return info;
+          }
+
+          function splitWhitespaceAffix(text) {
+            if (!text) return { leading: '', core: '', trailing: '' };
+            const leading = (text.match(/^\s+/) || [''])[0];
+            const trailing = (text.match(/\s+$/) || [''])[0];
+            return {
+              leading,
+              core: text.slice(leading.length, text.length - trailing.length),
+              trailing,
+            };
+          }
+
+          function pushAffixParts(parts, text, kind) {
+            if (!text) return;
+            const { leading, core, trailing } = splitWhitespaceAffix(text);
+            if (leading) parts.push({ type: 'literal', value: leading });
+            if (core) {
+              if (kind === 'percentSign' && core.includes('%')) {
+                parts.push({ type: 'percentSign', value: core });
+              } else {
+                parts.push({ type: kind, value: core });
+              }
+            }
+            if (trailing) parts.push({ type: 'literal', value: trailing });
+          }
+
+          function numericPartsFromString(body, info) {
+            if (body === 'NaN') {
+              return [{ type: 'nan', value: body }];
+            }
+            if (body === '∞') {
+              return [{ type: 'infinity', value: body }];
+            }
+
+            const parts = [];
+            let integer = '';
+            let fraction = '';
+            let seenDecimal = false;
+            for (const ch of [...body]) {
+              if (info.group !== undefined && ch === info.group && !seenDecimal) {
+                if (integer) {
+                  parts.push({ type: 'integer', value: integer });
+                  integer = '';
+                }
+                parts.push({ type: 'group', value: ch });
+              } else if (info.decimal !== undefined && ch === info.decimal) {
+                if (integer) {
+                  parts.push({ type: 'integer', value: integer });
+                  integer = '';
+                }
+                parts.push({ type: 'decimal', value: ch });
+                seenDecimal = true;
+              } else if (info.digitSet.has(ch)) {
+                if (seenDecimal) {
+                  fraction += ch;
+                } else {
+                  integer += ch;
+                }
+              } else {
+                if (!seenDecimal) {
+                  integer += ch;
+                } else {
+                  fraction += ch;
+                }
+              }
+            }
+            if (integer) parts.push({ type: 'integer', value: integer });
+            if (fraction) parts.push({ type: 'fraction', value: fraction });
+            return parts.length > 0 ? parts : [{ type: 'literal', value: body }];
+          }
+
+          function partitionFormattedNumber(receiver, formatted) {
+            const opts = nativeResolvedOptions.call(receiver);
+            const info = getDigitInfo(opts.locale, opts.numberingSystem);
+            const parts = [];
+            let rest = formatted;
+
+            if (rest.startsWith('~')) {
+              parts.push({ type: 'approximatelySign', value: '~' });
+              rest = rest.slice(1);
+            }
+
+            if (rest.startsWith('+')) {
+              parts.push({ type: 'plusSign', value: '+' });
+              rest = rest.slice(1);
+            } else if (rest.startsWith('-')) {
+              parts.push({ type: 'minusSign', value: '-' });
+              rest = rest.slice(1);
+            }
+
+            let numberStart = -1;
+            for (let i = 0; i < rest.length; i++) {
+              const ch = rest[i];
+              if (info.digitSet.has(ch) || ch === '∞' || ch === 'N') {
+                numberStart = i;
+                break;
+              }
+            }
+
+            if (numberStart === -1) {
+              return parts.concat([{ type: 'literal', value: rest }]);
+            }
+
+            let numberEnd = rest.length - 1;
+            for (let i = rest.length - 1; i >= numberStart; i--) {
+              const ch = rest[i];
+              if (info.digitSet.has(ch) || ch === '∞' || ch === 'N') {
+                numberEnd = i;
+                break;
+              }
+            }
+
+            const prefix = rest.slice(0, numberStart);
+            const body = rest.slice(numberStart, numberEnd + 1);
+            const suffix = rest.slice(numberEnd + 1);
+
+            if (opts.style === 'currency') {
+              pushAffixParts(parts, prefix, 'currency');
+            } else if (opts.style === 'unit') {
+              pushAffixParts(parts, prefix, 'unit');
+            } else if (opts.style === 'percent') {
+              pushAffixParts(parts, prefix, 'percentSign');
+            } else if (prefix) {
+              parts.push({ type: 'literal', value: prefix });
+            }
+
+            parts.push(...numericPartsFromString(body, info));
+
+            if (opts.style === 'currency') {
+              pushAffixParts(parts, suffix, 'currency');
+            } else if (opts.style === 'unit') {
+              pushAffixParts(parts, suffix, 'unit');
+            } else if (opts.style === 'percent') {
+              pushAffixParts(parts, suffix, 'percentSign');
+            } else if (suffix) {
+              parts.push({ type: 'literal', value: suffix });
+            }
+
+            return parts;
+          }
+
+          const formatGetter = makeNonConstructable(function format() {
+            const receiver = unwrapNumberFormat(this);
+            let wrapped = wrappedFormatCache.get(receiver);
+            if (wrapped !== undefined) {
+              return wrapped;
+            }
+
+            const nativeBound = getNativeBoundFormat(receiver);
+            wrapped = makeNonConstructable(function(value) {
+              return formatNumberValue(receiver, nativeBound, value);
+            }, '', 1);
+            wrappedFormatCache.set(receiver, wrapped);
+            return wrapped;
+          }, 'get format', 0);
+
+          Object.defineProperty(proto, 'format', {
+            get: formatGetter,
+            set: undefined,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const formatToPartsImpl = makeNonConstructable(function formatToParts(value) {
+            const receiver = unwrapNumberFormat(this);
+            const nativeBound = getNativeBoundFormat(receiver);
+            const formatted = formatNumberValue(receiver, nativeBound, value);
+            if (typeof nativeFormatToParts === 'function') {
+              try {
+                return nativeFormatToParts.call(receiver, value);
+              } catch (_e) {}
+            }
+            return partitionFormattedNumber(receiver, formatted).map((part) => ({
+              type: part.type,
+              value: part.value,
+            }));
+          }, 'formatToParts', 1);
+          Object.defineProperty(proto, 'formatToParts', {
+            value: formatToPartsImpl,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          function buildRangeParts(receiver, x, y) {
+            const start = Number(x);
+            const end = Number(y);
+            if (Number.isNaN(start) || Number.isNaN(end)) {
+              throw new RangeError('Invalid number range');
+            }
+
+            const nativeBound = getNativeBoundFormat(receiver);
+            const startFormatted = formatNumberValue(receiver, nativeBound, x);
+            const endFormatted = formatNumberValue(receiver, nativeBound, y);
+            const startParts = partitionFormattedNumber(receiver, startFormatted);
+            const endParts = partitionFormattedNumber(receiver, endFormatted);
+
+            if (startFormatted === endFormatted) {
+              return [
+                { type: 'approximatelySign', value: '~', source: 'shared' },
+                ...startParts.map((part) => ({ ...part, source: 'shared' })),
+              ];
+            }
+
+            let prefixLen = 0;
+            while (
+              prefixLen < startParts.length &&
+              prefixLen < endParts.length &&
+              startParts[prefixLen].type === endParts[prefixLen].type &&
+              startParts[prefixLen].value === endParts[prefixLen].value
+            ) {
+              prefixLen++;
+            }
+
+            let suffixLen = 0;
+            while (
+              suffixLen < startParts.length - prefixLen &&
+              suffixLen < endParts.length - prefixLen &&
+              startParts[startParts.length - 1 - suffixLen].type === endParts[endParts.length - 1 - suffixLen].type &&
+              startParts[startParts.length - 1 - suffixLen].value === endParts[endParts.length - 1 - suffixLen].value
+            ) {
+              suffixLen++;
+            }
+
+            const separator = prefixLen > 0 || suffixLen > 0 ? '–' : ' – ';
+            const parts = [];
+            for (let i = 0; i < prefixLen; i++) {
+              parts.push({ ...startParts[i], source: 'shared' });
+            }
+            for (let i = prefixLen; i < startParts.length - suffixLen; i++) {
+              parts.push({ ...startParts[i], source: 'startRange' });
+            }
+            parts.push({ type: 'literal', value: separator, source: 'shared' });
+            for (let i = prefixLen; i < endParts.length - suffixLen; i++) {
+              parts.push({ ...endParts[i], source: 'endRange' });
+            }
+            for (let i = startParts.length - suffixLen; i < startParts.length; i++) {
+              parts.push({ ...startParts[i], source: 'shared' });
+            }
+            return parts;
+          }
+
+          const formatRangeImpl = makeNonConstructable(function formatRange(x, y) {
+            const receiver = unwrapNumberFormat(this);
+            return buildRangeParts(receiver, x, y).map((part) => part.value).join('');
+          }, 'formatRange', 2);
+          Object.defineProperty(proto, 'formatRange', {
+            value: formatRangeImpl,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+
+          const formatRangeToPartsImpl = makeNonConstructable(function formatRangeToParts(x, y) {
+            const receiver = unwrapNumberFormat(this);
+            return buildRangeParts(receiver, x, y).map((part) => ({
+              type: part.type,
+              value: part.value,
+              source: part.source,
+            }));
+          }, 'formatRangeToParts', 2);
+          Object.defineProperty(proto, 'formatRangeToParts', {
+            value: formatRangeToPartsImpl,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+        })();
+        "#,
+    ))?;
+    Ok(())
+}
+
 fn install_intl_relative_time_format_polyfill(context: &mut Context) -> JsResult<()> {
     context.eval(Source::from_bytes(
         r#"
@@ -683,7 +1112,55 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
           
           // WeakMap to store internal slots
           const dfSlots = new WeakMap();
-          
+
+          function makeNonConstructable(impl, name, length) {
+            const arrowWrapper = (...args) => impl.apply(undefined, args);
+            const proxy = new Proxy(arrowWrapper, {
+              apply(_target, thisArg, args) {
+                return impl.apply(thisArg, args);
+              }
+            });
+            Object.defineProperty(proxy, 'name', {
+              value: name,
+              writable: false,
+              enumerable: false,
+              configurable: true
+            });
+            Object.defineProperty(proxy, 'length', {
+              value: length,
+              writable: false,
+              enumerable: false,
+              configurable: true
+            });
+            try { delete proxy.prototype; } catch (_e) {}
+            return proxy;
+          }
+
+          function hasOwnDurationProperty(obj, key) {
+            return Object.prototype.hasOwnProperty.call(obj, key);
+          }
+
+          function validateDurationInputRecord(durationObj) {
+            let hasSupportedField = false;
+            for (const key of Object.keys(durationObj)) {
+              if (!DURATION_UNITS.includes(key)) {
+                throw new TypeError('Invalid property: ' + key);
+              }
+              if (durationObj[key] === undefined) {
+                throw new TypeError('Property cannot be undefined: ' + key);
+              }
+              hasSupportedField = true;
+            }
+            if (!hasSupportedField) {
+              throw new TypeError('Duration must contain at least one supported property');
+            }
+          }
+
+          function formatUnitValue(locale, value, unit, unitDisplay, opts = {}) {
+            const nf = new Intl.NumberFormat(locale, { ...opts, style: 'unit', unit: unit.slice(0, -1), unitDisplay: unitDisplay });
+            return nf.format(value);
+          }
+
           function getOption(options, property, type, values, fallback) {
             let value = options[property];
             if (value === undefined) return fallback;
@@ -775,8 +1252,8 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
               weeks:        { stylesList: ['long','short','narrow'], digitalBase: undefined },
               days:         { stylesList: ['long','short','narrow'], digitalBase: undefined },
               hours:        { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
-              minutes:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
-              seconds:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: 'numeric' },
+              minutes:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: '2-digit' },
+              seconds:      { stylesList: ['long','short','narrow','numeric','2-digit'], digitalBase: '2-digit' },
               milliseconds: { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
               microseconds: { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
               nanoseconds:  { stylesList: ['long','short','narrow','numeric'], digitalBase: 'numeric' },
@@ -833,22 +1310,6 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
               unitOptions[unit] = unitStyle;
               unitOptions[unit + 'Display'] = display;
             }
-            
-            // Step 10: numeric cascade
-            let numericCascade = false;
-            for (let i = DURATION_UNITS.length - 1; i >= 0; i--) {
-              const unit = DURATION_UNITS[i];
-              if (numericCascade) {
-                 if (baseStyles[unit] === undefined && style !== 'digital') {
-                    unitOptions[unit] = 'numeric';
-                 }
-              }
-              const unitStyle = unitOptions[unit];
-              if (unitStyle === 'numeric' || unitStyle === '2-digit') {
-                 numericCascade = true;
-              }
-            }
-            
             // fractionalDigits
             const fractionalDigits = getNumberOption(opts, 'fractionalDigits', 0, 9, undefined);
             
@@ -867,15 +1328,21 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
           }
           
           // format method
-          DurationFormat.prototype.format = function format(duration) {
+          DurationFormat.prototype.format = makeNonConstructable(function format(duration) {
             const slots = dfSlots.get(this);
             if (!slots) throw new TypeError('Called on incompatible receiver');
             if (duration === undefined) throw new TypeError('Duration is required');
             let durationObj = duration;
-            if (typeof duration === 'string' && typeof Temporal === 'object' && Temporal.Duration) {
-              durationObj = Temporal.Duration.from(duration);
+            if (typeof duration === 'string') {
+              if (typeof Temporal === 'object' && Temporal.Duration) {
+                durationObj = Temporal.Duration.from(duration);
+              } else {
+                throw new RangeError('Invalid duration string');
+              }
             }
             if (durationObj === null || typeof durationObj !== 'object') throw new TypeError('Duration must be an object');
+            
+            validateDurationInputRecord(durationObj);
             
             const components = {};
             for (const unit of DURATION_UNITS) {
@@ -901,8 +1368,14 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
             if (Math.abs(components.years) >= 4294967296 || Math.abs(components.months) >= 4294967296 || Math.abs(components.weeks) >= 4294967296) {
               throw new RangeError('Out of range');
             }
-            const _normSec = Math.abs(components.days) * 86400 + Math.abs(components.hours) * 3600 + Math.abs(components.minutes) * 60 + Math.abs(components.seconds) + Math.abs(components.milliseconds) * 1e-3 + Math.abs(components.microseconds) * 1e-6 + Math.abs(components.nanoseconds) * 1e-9;
-            if (_normSec >= 9007199254740992) throw new RangeError('Out of range');
+            const _normNano = BigInt(Math.abs(components.days)) * 86400000000000n +
+                              BigInt(Math.abs(components.hours)) * 3600000000000n +
+                              BigInt(Math.abs(components.minutes)) * 60000000000n +
+                              BigInt(Math.abs(components.seconds)) * 1000000000n +
+                              BigInt(Math.abs(components.milliseconds)) * 1000000n +
+                              BigInt(Math.abs(components.microseconds)) * 1000n +
+                              BigInt(Math.abs(components.nanoseconds));
+            if (_normNano >= 9007199254740992000000000n) throw new RangeError('Out of range');
             
             const resultList = [];
             let digitalGroup = [];
@@ -910,121 +1383,129 @@ fn install_intl_duration_format_polyfill(context: &mut Context) -> JsResult<()> 
 
             for (let i = 0; i < DURATION_UNITS.length; i++) {
               const unit = DURATION_UNITS[i];
-              const value = Math.abs(components[unit]);
+              let value = Math.abs(components[unit]);
               const unitStyle = slots[unit];
               const display = slots[unit + 'Display'];
               const isNumeric = unitStyle === 'numeric' || unitStyle === '2-digit';
               
               if (display === 'always' || value !== 0) {
+                // Step 9.g: Fractional absorption
+                if (unit === 'seconds' || unit === 'milliseconds' || unit === 'microseconds') {
+                  const nextUnit = DURATION_UNITS[i+1];
+                  const nextUnitStyle = nextUnit ? slots[nextUnit] : undefined;
+                  if (nextUnitStyle === 'numeric' || nextUnitStyle === '2-digit') {
+                    let fullVal;
+                    const maxFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 9;
+                    const minFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 0;
+
+                    if (unit === 'seconds') {
+                      let totalNs = BigInt(Math.abs(components.milliseconds)) * 1000000n +
+                                    BigInt(Math.abs(components.microseconds)) * 1000n +
+                                    BigInt(Math.abs(components.nanoseconds));
+                      let finalS = BigInt(value) + (totalNs / 1000000000n);
+                      let remNs = totalNs % 1000000000n;
+                      let fracStr = String(remNs).padStart(9, '0').replace(/0+$/, '');
+                      fullVal = fracStr.length > 0 ? (String(finalS) + '.' + fracStr) : String(finalS);
+                    } else if (unit === 'milliseconds') {
+                      let totalNs = BigInt(Math.abs(components.microseconds)) * 1000n + BigInt(Math.abs(components.nanoseconds));
+                      let finalMs = BigInt(value) + (totalNs / 1000000n);
+                      let remNs = totalNs % 1000000n;
+                      let fracStr = String(remNs).padStart(6, '0').replace(/0+$/, '');
+                      fullVal = fracStr.length > 0 ? (String(finalMs) + '.' + fracStr) : String(finalMs);
+                    } else { // microseconds
+                      let ns = BigInt(Math.abs(components.nanoseconds));
+                      let finalUs = BigInt(value) + (ns / 1000n);
+                      let remNs = ns % 1000n;
+                      let fracStr = String(remNs).padStart(3, '0').replace(/0+$/, '');
+                      fullVal = fracStr.length > 0 ? (String(finalUs) + '.' + fracStr) : String(finalUs);
+                    }
+                    
+                    if (isNumeric && (unit === 'hours' || unit === 'minutes' || unit === 'seconds')) {
+                      // Numeric seconds absorbing milliseconds: part of digital group
+                      let fv = String(value); // This is wrong, should use finalS part of fullVal?
+                      // Actually fv is the integer part of the unit
+                      let integerPart = fullVal.split('.')[0];
+                      const needsPadding = unitStyle === '2-digit' || (digitalGroup.length > 0 && unit !== 'hours');
+                      if (needsPadding) {
+                        integerPart = integerPart.padStart(2, '0');
+                      }
+                      const finalFullVal = fullVal.includes('.') ? (integerPart + '.' + fullVal.split('.')[1]) : integerPart;
+
+                      const formatted = new Intl.NumberFormat(nfLocale, { 
+                        minimumIntegerDigits: needsPadding ? 2 : 1,
+                        minimumFractionDigits: minFD, maximumFractionDigits: maxFD, roundingMode: 'trunc',
+                        useGrouping: false
+                      }).format(finalFullVal);
+                      digitalGroup.push(formatted);
+                      resultList.push(digitalGroup.join(':'));
+                      digitalGroup = [];
+                    } else {
+                      // Non-numeric unit absorbing smaller units
+                      const fmtStyle = isNumeric ? (slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short')) : unitStyle;
+                      resultList.push(formatUnitValue(nfLocale, fullVal, unit, fmtStyle, { useGrouping: false, minimumFractionDigits:minFD, maximumFractionDigits:maxFD, roundingMode:'trunc' }));
+                    }
+                    break; // All remaining units absorbed
+                  }
+                }
+
                 if (isNumeric) {
                   if (unit === 'hours' || unit === 'minutes' || unit === 'seconds') {
                     let fv = String(value);
                     if (unitStyle === '2-digit' || (digitalGroup.length > 0 && unit !== 'hours')) fv = fv.padStart(2, '0');
-                    
                     const nextUnit = DURATION_UNITS[i+1];
                     const nextUnitStyle = nextUnit ? slots[nextUnit] : undefined;
                     
-                    if (unit === 'seconds' && (nextUnitStyle === 'numeric' || nextUnitStyle === '2-digit')) {
-                       // Handle fractional seconds in h:m:s sequence
-                       let frac = String(Math.abs(components.milliseconds)).padStart(3, '0') + String(Math.abs(components.microseconds)).padStart(3, '0') + String(Math.abs(components.nanoseconds)).padStart(3, '0');
-                       frac = frac.replace(/0+$/, '');
-                       const maxFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 9;
-                       const minFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 0;
-                       
-                       const full = frac.length > 0 ? (fv + '.' + frac) : fv;
-                       const formatted = new Intl.NumberFormat(nfLocale, { 
-                         minimumIntegerDigits: (unitStyle === '2-digit' || (digitalGroup.length > 0 && unit !== 'hours')) ? 2 : 1,
-                         minimumFractionDigits: minFD, maximumFractionDigits: maxFD, roundingMode: 'trunc' 
-                       }).format(full);
-                       digitalGroup.push(formatted);
-                       resultList.push(digitalGroup.join(':'));
-                       digitalGroup = [];
-                       break;
-                    } else if (nextUnitStyle !== 'numeric' && nextUnitStyle !== '2-digit') {
+                    if (nextUnitStyle !== 'numeric' && nextUnitStyle !== '2-digit') {
                       digitalGroup.push(fv);
-                      if (slots.style === 'digital') {
-                        resultList.push(digitalGroup.join(':'));
-                      } else {
-                        digitalGroup.forEach((v, idx) => {
-                           const u = DURATION_UNITS[i - digitalGroup.length + 1 + idx];
-                           const uVal = Math.abs(components[u]);
-                           if (uVal !== 0 || slots[u + 'Display'] === 'always') {
-                             const uSingular = u.slice(0, -1);
-                             const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
-                             resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:uSingular, unitDisplay:fmtStyle}).format(v));
-                           }
-                        });
-                      }
+                      resultList.push(digitalGroup.join(':'));
                       digitalGroup = [];
                     } else {
                       digitalGroup.push(fv);
-                    }
-                  } else if (unit === 'milliseconds' || unit === 'microseconds') {
-                    if (digitalGroup.length > 0) {
-                      if (slots.style === 'digital') resultList.push(digitalGroup.join(':'));
-                      else digitalGroup.forEach((v, idx) => {
-                        const u = DURATION_UNITS[i - digitalGroup.length + idx];
-                        if (Math.abs(components[u]) !== 0 || slots[u + 'Display'] === 'always') {
-                          const uSingular = u.slice(0, -1);
-                          const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
-                          resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:uSingular, unitDisplay:fmtStyle}).format(v));
-                        }
-                      });
-                      digitalGroup = [];
-                    }
-                    
-                    const nextUnitStyleForSpec = i < DURATION_UNITS.length - 1 ? slots.baseStyles[DURATION_UNITS[i+1]] : undefined;
-                    if (nextUnitStyleForSpec === 'numeric' || nextUnitStyleForSpec === '2-digit') {
-                       let frac = '';
-                       if (unit === 'milliseconds') frac = String(Math.abs(components.microseconds)).padStart(3, '0') + String(Math.abs(components.nanoseconds)).padStart(3, '0');
-                       else frac = String(Math.abs(components.nanoseconds)).padStart(3, '0');
-                       frac = frac.replace(/0+$/, '');
-                       const full = frac.length > 0 ? (String(value) + '.' + frac) : String(value);
-                       const maxFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 9;
-                       const minFD = slots.fractionalDigits !== undefined ? slots.fractionalDigits : 0;
-                       const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
-                       resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:fmtStyle, minimumFractionDigits:minFD, maximumFractionDigits:maxFD, roundingMode:'trunc'}).format(full));
-                       break;
-                    } else {
-                       const displayStyle = (unitStyle==='numeric'||unitStyle==='2-digit') ? (slots.style==='narrow'?'narrow':(slots.style==='long'?'long':'short')) : unitStyle;
-                       resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay: displayStyle}).format(value));
                     }
                   } else {
                     const fmtStyle = slots.style === 'narrow' ? 'narrow' : (slots.style === 'long' ? 'long' : 'short');
-                    resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:fmtStyle}).format(value));
+                    resultList.push(formatUnitValue(nfLocale, value, unit, fmtStyle, { useGrouping: false }));
                   }
                 } else {
-                  resultList.push(new Intl.NumberFormat(nfLocale, {style:'unit', unit:unit.slice(0,-1), unitDisplay:unitStyle}).format(value));
+                  if (digitalGroup.length > 0) {
+                    resultList.push(digitalGroup.join(':'));
+                    digitalGroup = [];
+                  }
+                  resultList.push(formatUnitValue(nfLocale, value, unit, unitStyle));
                 }
               }
             }
             
-            if (resultList.length === 0) {
-              const ds = slots.seconds === '2-digit' ? 'short' : (slots.seconds === 'numeric' ? 'short' : slots.seconds);
-              return new Intl.NumberFormat(nfLocale, {style:'unit', unit:'second', unitDisplay:ds}).format(0);
-            }
-            const res = new Intl.ListFormat(nfLocale, {type:'unit', style:slots.style==='long'?'long':'short'}).format(resultList);
+            const lfStyle = slots.style === 'digital' ? 'short' : slots.style;
+            const res = new Intl.ListFormat(nfLocale, {type:'unit', style:lfStyle}).format(resultList);
             return (isNegative ? '-' : '') + res;
-          };
+          }, 'format', 1);
           
           // formatToParts method
-          DurationFormat.prototype.formatToParts = function formatToParts(duration) {
+          DurationFormat.prototype.formatToParts = makeNonConstructable(function formatToParts(duration) {
             const slots = dfSlots.get(this);
             if (!slots) throw new TypeError('Called on incompatible receiver');
             return [{ type: 'literal', value: this.format(duration) }];
-          };
+          }, 'formatToParts', 1);
 
           // resolvedOptions method
-          DurationFormat.prototype.resolvedOptions = function resolvedOptions() {
+          DurationFormat.prototype.resolvedOptions = makeNonConstructable(function resolvedOptions() {
             const slots = dfSlots.get(this);
             if (!slots) throw new TypeError('Called on incompatible receiver');
-            const res = { locale: slots.locale, numberingSystem: slots.numberingSystem, style: slots.style, fractionalDigits: slots.fractionalDigits };
+            const res = {
+              locale: slots.locale,
+              numberingSystem: slots.numberingSystem,
+              style: slots.style
+            };
+            if (slots.fractionalDigits !== undefined) {
+              res.fractionalDigits = slots.fractionalDigits;
+            }
             for (const unit of DURATION_UNITS) {
               res[unit] = slots[unit];
               res[unit + 'Display'] = slots[unit + 'Display'];
             }
             return res;
-          };
+          }, 'resolvedOptions', 0);
 
           // static supportedLocalesOf
           DurationFormat.supportedLocalesOf = function supportedLocalesOf(locales, options) {
@@ -1221,4 +1702,3 @@ fn install_intl_supported_values_of(context: &mut Context) -> JsResult<()> {
     ))?;
     Ok(())
 }
-

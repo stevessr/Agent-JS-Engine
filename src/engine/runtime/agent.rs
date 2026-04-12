@@ -232,6 +232,7 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_promise_keyed_builtins(context)?;
     install_bigint_to_locale_string(context)?;
     install_intl_display_names_builtin(context)?;
+    install_intl_number_format_polyfill(context)?;
     install_intl_date_time_format_polyfill(context)?;
     install_temporal_locale_string_polyfill(context)?;
     install_date_locale_methods(context)?;
