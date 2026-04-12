@@ -7,7 +7,7 @@ fn finalize_script_source(
     strict: bool,
     source_path: Option<&Path>,
 ) -> Result<String, EngineError> {
-    let prepared = preprocess_compat_source(source, source_path, false)?;
+    let prepared = preprocess_compat_source(source, source_path, false, strict)?;
     Ok(if strict {
         format!("\"use strict\";\n{prepared}")
     } else {
@@ -19,6 +19,7 @@ fn preprocess_compat_source(
     source: &str,
     source_path: Option<&Path>,
     is_module: bool,
+    is_strict: bool,
 ) -> Result<String, EngineError> {
     validate_import_call_syntax(source)?;
 
@@ -27,7 +28,7 @@ fn preprocess_compat_source(
     } else {
         rewrite_annex_b_html_comments(source)
     };
-    let (source, rewrote_annex_b_call_assignment) = if is_module {
+    let (source, rewrote_annex_b_call_assignment) = if is_module || is_strict {
         (source, false)
     } else {
         rewrite_annex_b_call_assignment_targets(&source)
@@ -1456,4 +1457,3 @@ fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourc
     };
     (JsString::from(path), kind)
 }
-

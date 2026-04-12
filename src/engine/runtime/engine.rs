@@ -132,7 +132,7 @@ impl JsEngine {
 
         let canonical_path = normalize_source_path(path);
         let prepared_source =
-            preprocess_compat_source(source, Some(canonical_path.as_path()), true)?;
+            preprocess_compat_source(source, Some(canonical_path.as_path()), true, true)?;
         let reader = Cursor::new(prepared_source.as_bytes());
         let parsed_source = Source::from_reader(reader, Some(canonical_path.as_path()));
         let module = Module::parse(parsed_source, None, &mut context)
@@ -182,4 +182,3 @@ fn settle_promise_for_eval(
         }),
     }
 }
-

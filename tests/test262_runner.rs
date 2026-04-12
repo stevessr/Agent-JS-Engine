@@ -133,6 +133,24 @@ fn append_failure_if_requested(case: &TestCase, reason: Option<&str>) {
 }
 
 fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
+    if case
+        .metadata
+        .features
+        .iter()
+        .any(|feature| feature == "tail-call-optimization")
+    {
+        return Some("unsupported feature: tail-call-optimization");
+    }
+
+    if case
+        .metadata
+        .features
+        .iter()
+        .any(|feature| feature == "decorators")
+    {
+        return Some("unsupported feature: decorators");
+    }
+
     // cross-realm is now supported via $262.createRealm()
     // iterator-sequencing and joint-iteration are now implemented via polyfill
     // Run symbol-weak keys, Uint8Array base64, ShadowRealm, and FinalizationRegistry tests

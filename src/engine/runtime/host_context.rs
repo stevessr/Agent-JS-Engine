@@ -217,7 +217,7 @@ await using x = {
 };
 "#;
 
-        let rewritten = preprocess_compat_source(source, None, true).unwrap();
+        let rewritten = preprocess_compat_source(source, None, true, true).unwrap();
         assert!(rewritten.contains("/*---\nflags: [module]\n---*/"));
         assert!(rewritten.contains("const __agentjs_using_stack__ = new AsyncDisposableStack();"));
         assert!(rewritten.contains("const x = {\n  [Symbol.asyncDispose]() {}\n};"));
@@ -489,4 +489,3 @@ fn eval_script_in_realm(
     context.run_jobs()?;
     Ok(result)
 }
-

@@ -2107,218 +2107,7 @@ pub(crate) fn to_zoned_date_time_fields(
     zdt_fields_type: ZdtFieldsType,
     context: &mut Context,
 ) -> JsResult<(ZonedDateTimeFields, Option<TimeZone>)> {
-    if zdt_fields_type != ZdtFieldsType::TimeZoneRequired {
-        return to_zoned_date_time_fields_in_order(
-            partial_object,
-            calendar,
-            zdt_fields_type,
-            context,
-        );
-    }
-
-    let raw_day = partial_object.get(js_string!("day"), context)?;
-    let raw_hour = partial_object.get(js_string!("hour"), context)?;
-    // TODO: `temporal_rs` needs a `has_era` method
-    let has_no_era = calendar.kind() == AnyCalendarKind::Iso
-        || calendar.kind() == AnyCalendarKind::Chinese
-        || calendar.kind() == AnyCalendarKind::Dangi;
-
-    let raw_era = if has_no_era {
-        JsValue::undefined()
-    } else {
-        partial_object.get(js_string!("era"), context)?
-    };
-    let raw_era_year = if has_no_era {
-        JsValue::undefined()
-    } else {
-        partial_object.get(js_string!("eraYear"), context)?
-    };
-    let raw_microsecond = partial_object.get(js_string!("microsecond"), context)?;
-    let raw_millisecond = partial_object.get(js_string!("millisecond"), context)?;
-    let raw_minute = partial_object.get(js_string!("minute"), context)?;
-    let raw_month = partial_object.get(js_string!("month"), context)?;
-    let raw_month_code = partial_object.get(js_string!("monthCode"), context)?;
-    let raw_nanosecond = partial_object.get(js_string!("nanosecond"), context)?;
-    let raw_offset = partial_object.get(js_string!("offset"), context)?;
-    let raw_second = partial_object.get(js_string!("second"), context)?;
-    let raw_time_zone = match zdt_fields_type {
-        ZdtFieldsType::NoTimeZone => JsValue::undefined(),
-        ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => {
-            partial_object.get(js_string!("timeZone"), context)?
-        }
-    };
-    let raw_year = partial_object.get(js_string!("year"), context)?;
-
-    if zdt_fields_type == ZdtFieldsType::TimeZoneRequired {
-        let has_year_like = !raw_year.is_undefined()
-            || (!raw_era.is_undefined() && !raw_era_year.is_undefined());
-        if !has_year_like {
-            return Err(JsNativeError::typ()
-                .with_message("year is required to construct ZonedDateTime.")
-                .into());
-        }
-        if raw_month.is_undefined() && raw_month_code.is_undefined() {
-            return Err(JsNativeError::typ()
-                .with_message("month or monthCode is required to construct ZonedDateTime.")
-                .into());
-        }
-        if raw_day.is_undefined() {
-            return Err(JsNativeError::typ()
-                .with_message("day is required to construct ZonedDateTime.")
-                .into());
-        }
-        if raw_time_zone.is_undefined() {
-            return Err(JsNativeError::typ()
-                .with_message("timeZone is required to construct ZonedDateTime.")
-                .into());
-        }
-    }
-
-    let day = raw_day
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            finite
-                .as_positive_integer_with_truncation()
-                .map_err(JsError::from)
-        })
-        .transpose()?;
-    let hour = raw_hour
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-    let (era, era_year) = if has_no_era {
-        (None, None)
-    } else {
-        let era = raw_era
-            .map(|v| {
-                let v = v.to_primitive(context, PreferredType::String)?;
-                let Some(era) = v.as_string() else {
-                    return Err(JsError::from(
-                        JsNativeError::typ()
-                            .with_message("The monthCode field value must be a string."),
-                    ));
-                };
-                // TODO: double check if an invalid monthCode is a range or type error.
-                TinyAsciiStr::<19>::try_from_str(&era.to_std_string_escaped())
-                    .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))
-            })
-            .transpose()?;
-        let era_year = raw_era_year
-            .map(|v| {
-                let finite = v.to_finitef64(context)?;
-                Ok::<i32, JsError>(finite.as_integer_with_truncation::<i32>())
-            })
-            .transpose()?;
-        (era, era_year)
-    };
-    let microsecond = raw_microsecond
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let millisecond = raw_millisecond
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let minute = raw_minute
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-
-    let month = raw_month
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            finite
-                .as_positive_integer_with_truncation()
-                .map_err(JsError::from)
-        })
-        .transpose()?;
-
-    let month_code = raw_month_code
-        .map(|v| {
-            let v = v.to_primitive(context, PreferredType::String)?;
-            let Some(month_code) = v.as_string() else {
-                return Err(JsNativeError::typ()
-                    .with_message("The monthCode field value must be a string.")
-                    .into());
-            };
-            MonthCode::from_str(&month_code.to_std_string_escaped()).map_err(JsError::from)
-        })
-        .transpose()?;
-
-    let nanosecond = raw_nanosecond
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
-        })
-        .transpose()?;
-
-    let offset = raw_offset
-        .map(|v| to_offset_string(v, context))
-        .transpose()?;
-
-    let second = raw_second
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
-        })
-        .transpose()?;
-
-    let time_zone = match zdt_fields_type {
-        ZdtFieldsType::NoTimeZone => None,
-        ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => {
-            let time_zone = raw_time_zone
-                .map(|v| to_temporal_timezone_identifier(v, context))
-                .transpose()?;
-            if zdt_fields_type == ZdtFieldsType::TimeZoneRequired && time_zone.is_none() {
-                return Err(JsNativeError::typ()
-                    .with_message("timeZone is required to construct ZonedDateTime.")
-                    .into());
-            }
-            time_zone
-        }
-    };
-
-    let year = raw_year
-        .map(|v| {
-            let finite = v.to_finitef64(context)?;
-            Ok::<i32, JsError>(finite.as_integer_with_truncation::<i32>())
-        })
-        .transpose()?;
-
-    let calendar_fields = CalendarFields::new()
-        .with_optional_year(year)
-        .with_optional_month(month)
-        .with_optional_month_code(month_code)
-        .with_optional_day(day)
-        .with_era(era)
-        .with_era_year(era_year);
-
-    let time = PartialTime::new()
-        .with_hour(hour)
-        .with_minute(minute)
-        .with_second(second)
-        .with_millisecond(millisecond)
-        .with_microsecond(microsecond)
-        .with_nanosecond(nanosecond);
-
-    Ok((
-        ZonedDateTimeFields {
-            calendar_fields,
-            time,
-            offset,
-        },
-        time_zone,
-    ))
+    to_zoned_date_time_fields_in_order(partial_object, calendar, zdt_fields_type, context)
 }
 
 fn to_zoned_date_time_fields_in_order(
@@ -2433,13 +2222,11 @@ fn to_zoned_date_time_fields_in_order(
             Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
         })
         .transpose()?;
-    let time_zone = match zdt_fields_type {
+    let raw_time_zone = match zdt_fields_type {
         ZdtFieldsType::NoTimeZone => None,
-        ZdtFieldsType::TimeZoneNotRequired => partial_object
-            .get(js_string!("timeZone"), context)?
-            .map(|v| to_temporal_timezone_identifier(v, context))
-            .transpose()?,
-        ZdtFieldsType::TimeZoneRequired => unreachable!(),
+        ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => {
+            Some(partial_object.get(js_string!("timeZone"), context)?)
+        }
     };
     let year = partial_object
         .get(js_string!("year"), context)?
@@ -2448,6 +2235,45 @@ fn to_zoned_date_time_fields_in_order(
             Ok::<i32, JsError>(finite.as_integer_with_truncation::<i32>())
         })
         .transpose()?;
+
+    if zdt_fields_type == ZdtFieldsType::TimeZoneRequired {
+        let has_year_like = year.is_some() || (era.is_some() && era_year.is_some());
+        if !has_year_like {
+            return Err(JsNativeError::typ()
+                .with_message("year is required to construct ZonedDateTime.")
+                .into());
+        }
+        if month.is_none() && month_code.is_none() {
+            return Err(JsNativeError::typ()
+                .with_message("month or monthCode is required to construct ZonedDateTime.")
+                .into());
+        }
+        if day.is_none() {
+            return Err(JsNativeError::typ()
+                .with_message("day is required to construct ZonedDateTime.")
+                .into());
+        }
+        if raw_time_zone.as_ref().is_none_or(JsValue::is_undefined) {
+            return Err(JsNativeError::typ()
+                .with_message("timeZone is required to construct ZonedDateTime.")
+                .into());
+        }
+    }
+
+    let time_zone = match zdt_fields_type {
+        ZdtFieldsType::NoTimeZone => None,
+        ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => raw_time_zone
+            .and_then(|value| {
+                if value.is_undefined() {
+                    None
+                } else {
+                    Some(value)
+                }
+            })
+            .as_ref()
+            .map(|v| to_temporal_timezone_identifier(v, context))
+            .transpose()?,
+    };
 
     let calendar_fields = CalendarFields::new()
         .with_optional_year(year)

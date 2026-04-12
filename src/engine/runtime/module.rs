@@ -13,7 +13,7 @@ fn load_module_from_path(
             if let Some(module) = maybe_build_source_phase_module(path, &source, context)? {
                 return Ok(module);
             }
-            let source = preprocess_compat_source(&source, Some(path), true)
+            let source = preprocess_compat_source(&source, Some(path), true, true)
                 .map_err(|error| JsNativeError::syntax().with_message(error.message))?;
             Module::parse(
                 Source::from_reader(Cursor::new(source.as_bytes()), Some(path)),
@@ -310,4 +310,3 @@ fn maybe_build_source_phase_module(
         context,
     )))
 }
-

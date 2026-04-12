@@ -539,10 +539,14 @@ impl PlainTime {
                 .into());
         };
 
+        // Read the time fields before touching options so observable property access
+        // order matches the spec.
+        let partial = to_partial_time_record_unregulated(&partial_object, context)?;
+
         let options = get_options_object(args.get_or_undefined(1))?;
         let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
         // Steps 5-16 equate to the below
-        let partial = to_partial_time_record(&partial_object, overflow, context)?;
+        let partial = regulate_partial_time_record(partial, overflow)?;
 
         create_temporal_time(time.inner.with(partial, overflow)?, None, context).map(Into::into)
     }
