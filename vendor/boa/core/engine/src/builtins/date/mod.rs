@@ -8,7 +8,7 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date
 
 use crate::{
-    Context, JsArgs, JsData, JsError, JsResult, JsString,
+    Context, JsArgs, JsData, JsResult, JsString,
     builtins::{
         BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
         date::utils::{
@@ -31,6 +31,8 @@ use crate::{
 };
 use boa_gc::{Finalize, Trace};
 use boa_macros::js_str;
+#[cfg(feature = "intl")]
+use crate::builtins::intl::date_time_format::{DateTimeReqs, to_date_time_options};
 
 pub(crate) mod utils;
 
@@ -51,6 +53,57 @@ impl Date {
     /// Creates a new `Date` from the current UTC time of the host.
     pub(crate) fn utc_now(context: &mut Context) -> Self {
         Self(context.clock().now().millis_since_epoch() as f64)
+    }
+
+    #[cfg(feature = "intl")]
+    fn this_time_value(this: &JsValue) -> JsResult<f64> {
+        this.as_object()
+            .and_then(|obj| obj.downcast_ref::<Date>().as_deref().copied())
+            .map(|date| date.0)
+            .ok_or_else(|| JsNativeError::typ().with_message("'this' is not a Date").into())
+    }
+
+    #[cfg(feature = "intl")]
+    fn intrinsic_date_time_format_constructor(context: &mut Context) -> JsResult<JsObject> {
+        let intl = context.intrinsics().objects().intl().upcast();
+        let constructor = intl.get(js_string!("__agentjs_intrinsic_DateTimeFormat__"), context)?;
+
+        if let Some(constructor) = constructor.as_object().filter(|obj| obj.is_constructor()) {
+            return Ok(constructor.clone());
+        }
+
+        Ok(context
+            .intrinsics()
+            .constructors()
+            .date_time_format()
+            .constructor())
+    }
+
+    #[cfg(feature = "intl")]
+    fn to_locale_with_options(
+        this: &JsValue,
+        args: &[JsValue],
+        required: DateTimeReqs,
+        defaults: DateTimeReqs,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let tv = Self::this_time_value(this)?;
+
+        if tv.is_nan() {
+            return Ok(js_string!("Invalid Date").into());
+        }
+
+        let locales = args.get_or_undefined(0).clone();
+        let options = to_date_time_options(
+            args.get_or_undefined(1),
+            &required,
+            &defaults,
+            context,
+        )?;
+        let constructor = Self::intrinsic_date_time_format_constructor(context)?;
+        let formatter = constructor.construct(&[locales, options.into()], None, context)?;
+
+        formatter.invoke(js_string!("format"), &[this.clone()], context)
     }
 }
 
@@ -1619,13 +1672,25 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocaledatestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleDateString
     pub(crate) fn to_locale_date_string(
-        _this: &JsValue,
-        _args: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented"
-        ))))
+        #[cfg(feature = "intl")]
+        {
+            return Self::to_locale_with_options(
+                this,
+                args,
+                DateTimeReqs::Date,
+                DateTimeReqs::Date,
+                context,
+            );
+        }
+
+        #[cfg(not(feature = "intl"))]
+        {
+            Self::to_date_string(this, args, context)
+        }
     }
 
     /// [`Date.prototype.toLocaleString()`][spec].
@@ -1638,13 +1703,25 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocalestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleString
     pub(crate) fn to_locale_string(
-        _this: &JsValue,
-        _: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented]"
-        ))))
+        #[cfg(feature = "intl")]
+        {
+            return Self::to_locale_with_options(
+                this,
+                args,
+                DateTimeReqs::AnyAll,
+                DateTimeReqs::AnyAll,
+                context,
+            );
+        }
+
+        #[cfg(not(feature = "intl"))]
+        {
+            Self::to_string(this, args, context)
+        }
     }
 
     /// [`Date.prototype.toLocaleTimeString()`][spec].
@@ -1658,13 +1735,25 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocaletimestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleTimeString
     pub(crate) fn to_locale_time_string(
-        _this: &JsValue,
-        _args: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented]"
-        ))))
+        #[cfg(feature = "intl")]
+        {
+            return Self::to_locale_with_options(
+                this,
+                args,
+                DateTimeReqs::Time,
+                DateTimeReqs::Time,
+                context,
+            );
+        }
+
+        #[cfg(not(feature = "intl"))]
+        {
+            Self::to_time_string(this, args, context)
+        }
     }
 
     /// [`Date.prototype.toString()`][spec].

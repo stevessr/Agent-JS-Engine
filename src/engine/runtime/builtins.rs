@@ -1559,70 +1559,6 @@ fn install_finalization_registry_builtin(context: &mut Context) -> JsResult<()> 
     Ok(())
 }
 
-fn install_bigint_to_locale_string(context: &mut Context) -> JsResult<()> {
-    context.eval(Source::from_bytes(
-        r#"
-        (() => {
-          const proto = BigInt.prototype;
-          const originalKey = '__agentjs_original_BigInt_toLocaleString__';
-          if (Object.prototype.hasOwnProperty.call(proto, originalKey)) {
-            return;
-          }
-
-          const original = proto.toLocaleString;
-          if (typeof original !== 'function') {
-            return;
-          }
-          if (typeof Intl !== 'object' || Intl === null || typeof Intl.NumberFormat !== 'function') {
-            return;
-          }
-
-          const IntrinsicNumberFormat = Intl.NumberFormat;
-
-          Object.defineProperty(proto, originalKey, {
-            value: original,
-            writable: false,
-            enumerable: false,
-            configurable: false,
-          });
-
-          const toLocaleStringFn = new Proxy(() => {}, {
-            apply(_target, thisArg, args) {
-              let value = thisArg;
-              if (typeof value !== 'bigint') {
-                value = BigInt.prototype.valueOf.call(value);
-              }
-
-              const locales = args.length > 0 ? args[0] : undefined;
-              const options = args.length > 1 ? args[1] : undefined;
-              return new IntrinsicNumberFormat(locales, options).format(value);
-            },
-          });
-
-          Object.defineProperty(toLocaleStringFn, 'name', {
-            value: 'toLocaleString',
-            writable: false,
-            enumerable: false,
-            configurable: true,
-          });
-          Object.defineProperty(toLocaleStringFn, 'length', {
-            value: 0,
-            writable: false,
-            enumerable: false,
-            configurable: true,
-          });
-
-          Object.defineProperty(proto, 'toLocaleString', {
-            value: toLocaleStringFn,
-            writable: true,
-            enumerable: false,
-            configurable: true,
-          });
-        })();
-        "#,
-    ))?;
-    Ok(())
-}
 
 fn normalize_builtin_function_to_string(context: &mut Context) -> JsResult<()> {
     context.eval(Source::from_bytes(
@@ -1747,4 +1683,3 @@ fn normalize_builtin_function_to_string(context: &mut Context) -> JsResult<()> {
     ))?;
     Ok(())
 }
-

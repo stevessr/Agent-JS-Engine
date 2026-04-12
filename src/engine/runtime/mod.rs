@@ -685,7 +685,6 @@ include!("agent.rs");
 include!("console.rs");
 include!("builtins.rs");
 include!("intl_date_time.rs");
-include!("intl_misc.rs");
 include!("iterator.rs");
 include!("string_regexp.rs");
 include!("array_buffer_installs.rs");

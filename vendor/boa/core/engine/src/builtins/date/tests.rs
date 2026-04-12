@@ -108,6 +108,139 @@ fn date_this_time_value() {
 }
 
 #[test]
+fn date_to_locale_string_uses_intrinsic_formatter_and_normalizes_defaults() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const date = new Date(0);
+            const calls = [];
+
+            Object.defineProperty(Intl, "__agentjs_intrinsic_DateTimeFormat__", {
+                value: function(locales, options) {
+                    calls.push(locales);
+                    calls.push(String(options.hour12));
+                    calls.push(options.year);
+                    calls.push(options.month);
+                    calls.push(options.day);
+                    calls.push(options.hour);
+                    calls.push(options.minute);
+                    calls.push(options.second);
+                    return {
+                        format(value) {
+                            calls.push(String(value === date));
+                            return "ok";
+                        }
+                    };
+                },
+                configurable: true,
+            });
+
+            Object.defineProperty(Intl, "DateTimeFormat", {
+                value: function() {
+                    throw new Error("tainted");
+                },
+                configurable: true,
+            });
+
+            calls.push(date.toLocaleString("en", { hour12: false }));
+            calls.join(",");
+        "#},
+        js_str!("en,false,numeric,numeric,numeric,numeric,numeric,numeric,true,ok"),
+    )]);
+}
+
+#[test]
+fn date_to_locale_date_string_only_defaults_date_fields() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const date = new Date(0);
+            const calls = [];
+
+            Object.defineProperty(Intl, "__agentjs_intrinsic_DateTimeFormat__", {
+                value: function(locales, options) {
+                    calls.push(locales);
+                    calls.push(String(options.hour12));
+                    calls.push(options.year);
+                    calls.push(options.month);
+                    calls.push(options.day);
+                    calls.push(String(options.hour === undefined));
+                    calls.push(String(options.minute === undefined));
+                    calls.push(String(options.second === undefined));
+                    return {
+                        format(value) {
+                            calls.push(String(value === date));
+                            return "date";
+                        }
+                    };
+                },
+                configurable: true,
+            });
+
+            calls.push(date.toLocaleDateString("en", { hour12: false }));
+            calls.join(",");
+        "#},
+        js_str!("en,false,numeric,numeric,numeric,true,true,true,true,date"),
+    )]);
+}
+
+#[test]
+fn date_to_locale_time_string_only_defaults_time_fields() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            const date = new Date(0);
+            const calls = [];
+
+            Object.defineProperty(Intl, "__agentjs_intrinsic_DateTimeFormat__", {
+                value: function(locales, options) {
+                    calls.push(locales);
+                    calls.push(String(options.hour12));
+                    calls.push(String(options.year === undefined));
+                    calls.push(String(options.month === undefined));
+                    calls.push(String(options.day === undefined));
+                    calls.push(options.hour);
+                    calls.push(options.minute);
+                    calls.push(options.second);
+                    return {
+                        format(value) {
+                            calls.push(String(value === date));
+                            return "time";
+                        }
+                    };
+                },
+                configurable: true,
+            });
+
+            calls.push(date.toLocaleTimeString("en", { hour12: false }));
+            calls.join(",");
+        "#},
+        js_str!("en,false,true,true,true,numeric,numeric,numeric,true,time"),
+    )]);
+}
+
+#[test]
+fn date_to_locale_string_returns_invalid_date_without_constructing_formatter() {
+    run_test_actions([TestAction::assert_eq(
+        indoc! {r#"
+            let called = false;
+
+            Object.defineProperty(Intl, "__agentjs_intrinsic_DateTimeFormat__", {
+                value: function() {
+                    called = true;
+                    return {
+                        format() {
+                            return "bad";
+                        }
+                    };
+                },
+                configurable: true,
+            });
+
+            JSON.stringify([new Date(NaN).toLocaleString(), called]);
+        "#},
+        js_str!(r#"["Invalid Date",false]"#),
+    )]);
+}
+
+#[test]
 fn date_ctor_call() {
     run_test_actions([
         TestAction::run("let a = new Date()"),

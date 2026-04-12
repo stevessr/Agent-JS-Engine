@@ -26,6 +26,111 @@ fn engine_executes_basic_javascript() {
 }
 
 #[test]
+fn engine_date_locale_methods_match_intl_datetimeformat_defaults() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const date = new Date('2020-01-02T03:04:05Z');
+            print(String(
+              date.toLocaleString('en', { timeZone: 'UTC', hour12: false }) ===
+              new Intl.DateTimeFormat('en', {
+                timeZone: 'UTC',
+                hour12: false,
+                year: 'numeric',
+                month: 'numeric',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: 'numeric',
+                second: 'numeric'
+              }).format(date)
+            ));
+            print(String(
+              date.toLocaleDateString('en', { timeZone: 'UTC' }) ===
+              new Intl.DateTimeFormat('en', {
+                timeZone: 'UTC',
+                year: 'numeric',
+                month: 'numeric',
+                day: 'numeric'
+              }).format(date)
+            ));
+            print(String(
+              date.toLocaleTimeString('en', { timeZone: 'UTC', hour12: false }) ===
+              new Intl.DateTimeFormat('en', {
+                timeZone: 'UTC',
+                hour12: false,
+                hour: 'numeric',
+                minute: 'numeric',
+                second: 'numeric'
+              }).format(date)
+            ));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["true".to_string(), "true".to_string(), "true".to_string()]
+    );
+}
+
+#[test]
+fn engine_date_locale_methods_ignore_tainted_global_datetimeformat() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const original = Intl.DateTimeFormat;
+            Object.defineProperty(Intl, 'DateTimeFormat', {
+              value: function() {
+                throw new Error('tainted');
+              },
+              configurable: true
+            });
+
+            try {
+              const value = new Date(0).toLocaleString('en', { timeZone: 'UTC', hour12: false });
+              print(typeof value === 'string' && value.length > 0 ? 'ok' : 'bad');
+            } catch (error) {
+              print(error.message);
+            } finally {
+              Object.defineProperty(Intl, 'DateTimeFormat', {
+                value: original,
+                configurable: true,
+                writable: true
+              });
+            }
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["ok".to_string()]);
+}
+
+#[test]
+fn engine_bigint_to_locale_string_uses_engine_builtin() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const value = 123456789n;
+            const options = { useGrouping: false };
+            print(String(
+              value.toLocaleString('en', options) ===
+              new Intl.NumberFormat('en', options).format(value)
+            ));
+            print(value.toLocaleString('en', options));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["true".to_string(), "123456789".to_string()]
+    );
+}
+
+#[test]
 fn engine_exposes_array_from_async() {
     let engine = JsEngine::new();
     let output = engine

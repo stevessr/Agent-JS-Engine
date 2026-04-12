@@ -2194,6 +2194,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             enumerable: false,
             configurable: true
           });
+          Object.defineProperty(Intl, '__agentjs_intrinsic_DateTimeFormat__', {
+            value: WrappedDTF,
+            writable: false,
+            enumerable: false,
+            configurable: false
+          });
         })();
         "#,
     ))?;

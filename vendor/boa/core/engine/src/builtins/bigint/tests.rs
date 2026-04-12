@@ -178,6 +178,19 @@ fn to_string_invalid_radix() {
 }
 
 #[test]
+fn to_locale_string_matches_intl_number_format() {
+    run_test_actions([
+        TestAction::assert_eq(
+            "123456789n.toLocaleString('en', { useGrouping: false })",
+            js_str!("123456789"),
+        ),
+        TestAction::assert(
+            "123456789n.toLocaleString('en', { useGrouping: false }) === new Intl.NumberFormat('en', { useGrouping: false }).format(123456789n)",
+        ),
+    ]);
+}
+
+#[test]
 fn as_int_n() {
     run_test_actions([
         TestAction::assert_eq("BigInt.asIntN(0, 1n)", JsBigInt::from(0)),
