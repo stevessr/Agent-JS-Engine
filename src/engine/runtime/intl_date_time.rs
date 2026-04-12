@@ -421,10 +421,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const localeMatcher = getOption(opts, 'localeMatcher', 'string', VALID_LOCALE_MATCHERS, 'best fit');
             
             // Calendar validation - must be valid Unicode locale identifier type
-            // Valid calendars are 3-8 alphanum chars, possibly with subtags separated by hyphens
-            let calendar = opts.calendar;
+            let calendar = getOption(opts, 'calendar', 'string', undefined, undefined);
             if (calendar !== undefined) {
-              calendar = String(calendar);
               // Calendar must be 3-8 alphanum chars per Unicode locale identifier type
               // With possible subtag of 3-8 alphanum chars separated by hyphen
               if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(calendar)) {
@@ -434,23 +432,20 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             }
             
             // numberingSystem validation - must be valid Unicode locale identifier type
-            let numberingSystem = opts.numberingSystem;
+            let numberingSystem = getOption(opts, 'numberingSystem', 'string', undefined, undefined);
             if (numberingSystem !== undefined) {
-              const ns = String(numberingSystem);
               // numberingSystem must be 3-8 alphanum chars
-              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(ns)) {
+              if (!/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(numberingSystem)) {
                 throw new RangeError('Invalid numberingSystem');
               }
-              numberingSystem = ns;
             }
             
-            // hour12 special handling - read once, convert to boolean if defined
-            const hour12Raw = opts.hour12;
-            const hour12 = hour12Raw !== undefined ? Boolean(hour12Raw) : undefined;
+            const hour12 = getOption(opts, 'hour12', 'boolean', undefined, undefined);
             const hourCycle = getOption(opts, 'hourCycle', 'string', VALID_HOUR_CYCLES, undefined);
-            let timeZone = opts.timeZone;
+            
+            let timeZone = getOption(opts, 'timeZone', 'string', undefined, undefined);
             if (timeZone !== undefined) {
-              timeZone = canonicalizeTimeZone(String(timeZone));
+              timeZone = canonicalizeTimeZone(timeZone);
             }
             
             const weekday = getOption(opts, 'weekday', 'string', VALID_WEEKDAYS, undefined);
@@ -483,10 +478,20 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               throw new TypeError('Cannot convert null to object');
             }
 
-            // Create the underlying DTF instance
+            // Create the underlying DTF instance with a plain object to avoid double-access to proxy options
+            const dtfOptions = Object.assign(Object.create(null), {
+              localeMatcher, calendar, numberingSystem, hour12, hourCycle, timeZone,
+              weekday, era, year, month, day, dayPeriod, hour, minute, second,
+              fractionalSecondDigits, timeZoneName, formatMatcher, dateStyle, timeStyle
+            });
+            // Clean up undefineds
+            for (const key in dtfOptions) {
+              if (dtfOptions[key] === undefined) delete dtfOptions[key];
+            }
+
             let instance;
             try {
-              instance = new DTF(locales, options);
+              instance = new DTF(locales, dtfOptions);
             } catch (e) {
               throw e;
             }
@@ -812,6 +817,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           function defaultTimeZone() {
             try {
+              // Try to get system time zone via Temporal.Now if available,
+              // as Boa's Intl.DateTimeFormat().resolvedOptions().timeZone might return 'UTC'
+              if (typeof Temporal === 'object' && Temporal !== null && Temporal.Now) {
+                return Temporal.Now.timeZoneId();
+              }
+              // Fallback to original DTF
               return new DTF().resolvedOptions().timeZone || 'UTC';
             } catch (_e) {
               return 'UTC';
@@ -1447,6 +1458,12 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               Object.prototype.toString.call(value) === '[object Temporal.PlainYearMonth]';
           }
 
+          function isTemporalZonedDateTimeValue(value) {
+            return typeof value === 'object' &&
+              value !== null &&
+              Object.prototype.toString.call(value) === '[object Temporal.ZonedDateTime]';
+          }
+
           function temporalCalendarId(value) {
             try {
               if (typeof value.calendarId === 'string') {
@@ -1538,6 +1555,23 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             }
             const opts = temporalInstantFormattingOptions(slot);
             opts.locale = slot.resolvedOpts.locale;
+            return toParts
+              ? formatDateWithOptionsToParts(d, opts)
+              : formatDateWithOptions(d, opts);
+          }
+
+          function formatTemporalZonedDateTime(slot, zdt, toParts) {
+            if (slot.resolvedOpts.timeZone !== undefined) {
+              throw new TypeError('ZonedDateTime cannot be formatted when timeZone is already set on DateTimeFormat');
+            }
+            const d = new Date(Number(zdt.epochMilliseconds));
+            if (isNaN(d.getTime())) {
+              throw new RangeError('Invalid time value');
+            }
+            const opts = temporalInstantFormattingOptions(slot);
+            opts.locale = slot.resolvedOpts.locale;
+            // Use ZonedDateTime's time zone
+            opts.timeZone = zdt.timeZoneId || String(zdt.timeZone);
             return toParts
               ? formatDateWithOptionsToParts(d, opts)
               : formatDateWithOptions(d, opts);
@@ -1817,6 +1851,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               throw new TypeError('Method get Intl.DateTimeFormat.prototype.format called on incompatible receiver');
             }
             const boundFormat = (date) => {
+              if (isTemporalZonedDateTimeValue(date)) {
+                return formatTemporalZonedDateTime(slot, date, false);
+              }
               if (isTemporalInstantValue(date)) {
                 return formatTemporalInstant(slot, date, false);
               }
@@ -1839,28 +1876,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (isNaN(d.getTime())) {
                 throw new RangeError('Invalid time value');
               }
-              // Use our custom formatter when dayPeriod, fractionalSecondDigits, non-Latin numbering system,
-              // or needsDefault is set (needsDefault: underlying DTF was created without explicit fields,
-              // so it may add time components when hour12/hourCycle is set)
-              const needsCustomFormat = slot.needsDefault ||
-                slot.resolvedOpts.dayPeriod !== undefined ||
-                slot.resolvedOpts.fractionalSecondDigits !== undefined ||
-                (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
-                (slot.resolvedOpts.era !== undefined &&
-                  slot.resolvedOpts.calendar !== 'gregory' &&
-                  slot.resolvedOpts.calendar !== 'iso8601') ||
-                slot.resolvedOpts.calendar === 'hebrew' ||
-                slot.resolvedOpts.calendar === 'chinese' ||
-                slot.resolvedOpts.calendar === 'dangi' ||
-                slot.resolvedOpts.dateStyle !== undefined ||
-                slot.resolvedOpts.timeStyle !== undefined ||
-                slot.resolvedOpts.timeZoneName !== undefined;
-              if (needsCustomFormat) {
-                return formatDateWithOptions(d, slot.resolvedOpts);
-              }
-              if (slot.instance && typeof slot.instance.format === 'function') {
-                return slot.instance.format(d);
-              }
+              // Always use custom formatter since underlying Boa DTF's format just calls to_string()
               return formatDateWithOptions(d, slot.resolvedOpts);
             };
             Object.defineProperty(boundFormat, 'name', { value: '', configurable: true });
@@ -1881,6 +1897,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const slot = dtfSlots.get(this);
             if (!slot) {
               throw new TypeError('Method Intl.DateTimeFormat.prototype.formatToParts called on incompatible receiver');
+            }
+            if (isTemporalZonedDateTimeValue(date)) {
+              return formatTemporalZonedDateTime(slot, date, true);
             }
             if (isTemporalInstantValue(date)) {
               return formatTemporalInstant(slot, date, true);
@@ -1904,22 +1923,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isNaN(d.getTime())) {
               throw new RangeError('Invalid time value');
             }
-            const needsCustom = slot.needsDefault ||
-              slot.resolvedOpts.dayPeriod !== undefined ||
-              slot.resolvedOpts.fractionalSecondDigits !== undefined ||
-              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
-              (slot.resolvedOpts.era !== undefined &&
-                slot.resolvedOpts.calendar !== 'gregory' &&
-                slot.resolvedOpts.calendar !== 'iso8601') ||
-              slot.resolvedOpts.calendar === 'hebrew' ||
-              slot.resolvedOpts.calendar === 'chinese' ||
-              slot.resolvedOpts.calendar === 'dangi' ||
-              slot.resolvedOpts.dateStyle !== undefined ||
-              slot.resolvedOpts.timeStyle !== undefined ||
-              slot.resolvedOpts.timeZoneName !== undefined;
-            if (!needsCustom && slot.instance && typeof slot.instance.formatToParts === 'function') {
-              return slot.instance.formatToParts(d);
-            }
+            // Always use custom formatter since underlying Boa DTF's formatToParts may be minimal
             const rawParts = formatDateWithOptionsToParts(d, slot.resolvedOpts);
             const ns = slot.resolvedOpts.numberingSystem;
             if (ns && ns !== 'latn') {
