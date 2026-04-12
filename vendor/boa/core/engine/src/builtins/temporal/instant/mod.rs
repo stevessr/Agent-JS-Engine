@@ -677,21 +677,12 @@ impl Instant {
         let locales = args.get_or_undefined(0);
         let options = args.get_or_undefined(1);
 
-        let dtf_obj = crate::builtins::intl::date_time_format::DateTimeFormat::constructor(
-            &context
-                .intrinsics()
-                .constructors()
-                .date_time_format()
-                .constructor()
-                .into(),
-            &[locales.clone(), options.clone()],
+        crate::builtins::intl::date_time_format::DateTimeFormat::format_with_locales_and_options(
+            locales.clone(),
+            options.clone(),
+            this.clone(),
             context,
-        )?
-        .as_object()
-        .expect("DateTimeFormat constructor must return an object")
-        .clone();
-
-        crate::builtins::intl::date_time_format::DateTimeFormat::format(&dtf_obj.into(), &[this.clone()], context)
+        )
     }
 
     /// 8.3.13 `Temporal.Instant.prototype.toJSON ( )`

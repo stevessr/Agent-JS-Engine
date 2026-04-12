@@ -227,8 +227,6 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_array_from_async_builtin(context)?;
     install_array_flat_undefined_fix(context)?;
     install_uint8array_base_encoding_builtins(context)?;
-    install_atomics_pause(context)?;
-    install_error_is_error(context)?;
     install_promise_keyed_builtins(context)?;
     install_intl_date_time_format_polyfill(context)?;
     Ok(())
@@ -267,7 +265,6 @@ fn install_child_realm_host_globals(context: &mut Context) -> boa_engine::JsResu
     install_disposable_stack_builtins(context)?;
     install_finalization_registry_builtin(context)?;
     install_reg_exp_escape(context)?;
-    install_error_is_error(context)?;
     install_iterator_helpers(context)?;
     Ok(())
 }

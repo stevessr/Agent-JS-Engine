@@ -791,55 +791,6 @@ fn install_array_flat_undefined_fix(context: &mut Context) -> JsResult<()> {
     Ok(())
 }
 
-fn install_atomics_pause(context: &mut Context) -> JsResult<()> {
-    let atomics = context.global_object().get(js_string!("Atomics"), context)?;
-    if let Some(atomics_obj) = atomics.as_object() {
-        if !atomics_obj.has_own_property(js_string!("pause"), context)? {
-            let pause_fn = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(host_atomics_pause))
-                .name(js_string!("pause"))
-                .length(0)
-                .constructor(false)
-                .build();
-            atomics_obj.define_property_or_throw(
-                js_string!("pause"),
-                PropertyDescriptor::builder()
-                    .value(pause_fn)
-                    .writable(true)
-                    .enumerable(false)
-                    .configurable(true),
-                context,
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn install_error_is_error(context: &mut Context) -> JsResult<()> {
-    let error_ctor = context.intrinsics().constructors().error().constructor();
-    if error_ctor.has_own_property(js_string!("isError"), context)? {
-        return Ok(());
-    }
-
-    let is_error = build_builtin_function(
-        context,
-        js_string!("isError"),
-        1,
-        NativeFunction::from_fn_ptr(host_error_is_error),
-    );
-
-    error_ctor.define_property_or_throw(
-        js_string!("isError"),
-        PropertyDescriptor::builder()
-            .value(is_error)
-            .writable(true)
-            .enumerable(false)
-            .configurable(true),
-        context,
-    )?;
-
-    Ok(())
-}
-
 fn install_promise_keyed_builtins(context: &mut Context) -> JsResult<()> {
     let promise = context
         .global_object()

@@ -673,28 +673,6 @@ fn host_disposable_stack_disposed_getter(
     Ok((data.status.get() == DisposableStackStatus::Disposed).into())
 }
 
-fn host_atomics_pause(
-    _: &BoaValue,
-    args: &[BoaValue],
-    _context: &mut Context,
-) -> JsResult<BoaValue> {
-    let iteration_number = args.get_or_undefined(0);
-    if !iteration_number.is_undefined() {
-        if !iteration_number.is_number() {
-            return Err(JsNativeError::typ()
-                .with_message("iterationNumber must be a non-negative integer")
-                .into());
-        }
-        let num = iteration_number.as_number().unwrap();
-        if num < 0.0 || num.is_nan() || num.is_infinite() || num.fract() != 0.0 {
-            return Err(JsNativeError::typ()
-                .with_message("iterationNumber must be a non-negative integer")
-                .into());
-        }
-    }
-    Ok(BoaValue::undefined())
-}
-
 fn host_async_iterator_dispose(
     this: &BoaValue,
     _args: &[BoaValue],
@@ -974,4 +952,3 @@ fn host_promise_all_settled_keyed(
         )
         .into())
 }
-

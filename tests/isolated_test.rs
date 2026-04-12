@@ -131,6 +131,52 @@ fn engine_bigint_to_locale_string_uses_engine_builtin() {
 }
 
 #[test]
+fn engine_temporal_locale_string_matches_wrapped_datetimeformat() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const value = new Temporal.PlainDateTime(2020, 1, 2, 3, 4, 5);
+            const options = { dateStyle: 'short', timeStyle: 'short' };
+            print(String(
+              value.toLocaleString('en', options) ===
+              new Intl.DateTimeFormat('en', options).format(value)
+            ));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["true".to_string()]);
+}
+
+#[test]
+fn engine_exposes_builtin_error_is_error_and_atomics_pause() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            print(String(typeof Error.isError));
+            print(String(Error.isError(new Error('x'))));
+            print(String(Error.isError({})));
+            print(String(typeof Atomics.pause));
+            print(String(Atomics.pause.length));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "function".to_string(),
+            "true".to_string(),
+            "false".to_string(),
+            "function".to_string(),
+            "0".to_string()
+        ]
+    );
+}
+
+#[test]
 fn engine_exposes_array_from_async() {
     let engine = JsEngine::new();
     let output = engine

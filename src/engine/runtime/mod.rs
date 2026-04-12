@@ -2,10 +2,7 @@ use boa_engine::module::SyntheticModuleInitializer;
 use boa_engine::{
     Context, Finalize, JsArgs, JsData, JsError, JsNativeError, JsResult, JsString, JsSymbol,
     JsValue as BoaValue, Module, NativeFunction, Script, Source, Trace,
-    builtins::{
-        array_buffer::SharedArrayBuffer, error::Error as BoaBuiltinError, object::OrdinaryObject,
-        promise::PromiseState,
-    },
+    builtins::{array_buffer::SharedArrayBuffer, object::OrdinaryObject, promise::PromiseState},
     gc::Tracer,
     js_string,
     module::{ModuleLoader, Referrer, resolve_module_specifier},

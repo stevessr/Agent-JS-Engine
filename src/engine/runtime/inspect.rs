@@ -145,18 +145,6 @@ fn host_print(
     Ok(BoaValue::undefined())
 }
 
-fn host_error_is_error(
-    _: &BoaValue,
-    args: &[BoaValue],
-    _: &mut Context,
-) -> boa_engine::JsResult<BoaValue> {
-    Ok(args
-        .get_or_undefined(0)
-        .as_object()
-        .is_some_and(|value| value.is::<BoaBuiltinError>())
-        .into())
-}
-
 fn display_value(value: &BoaValue, context: &mut Context) -> Option<String> {
     if value.is_undefined() {
         None

@@ -138,6 +138,41 @@ impl DateTimeFormat {
         Ok(d.to_string(context)?.into())
     }
 
+    pub(crate) fn format_with_locales_and_options(
+        locales: JsValue,
+        options: JsValue,
+        value: JsValue,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        let intl = context.intrinsics().objects().intl().upcast();
+        let wrapper_constructor =
+            intl.get(js_string!("__agentjs_intrinsic_DateTimeFormat__"), context)?;
+
+        if let Some(wrapper_constructor) = wrapper_constructor
+            .as_object()
+            .filter(|constructor| constructor.is_constructor())
+        {
+            let formatter = wrapper_constructor.construct(&[locales, options], None, context)?;
+            return formatter.invoke(js_string!("format"), &[value], context);
+        }
+
+        let dtf_obj = Self::constructor(
+            &context
+                .intrinsics()
+                .constructors()
+                .date_time_format()
+                .constructor()
+                .into(),
+            &[locales, options],
+            context,
+        )?
+        .as_object()
+        .expect("DateTimeFormat constructor must return an object")
+        .clone();
+
+        Self::format(&dtf_obj.into(), &[value], context)
+    }
+
     fn format_to_parts(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
         let date = args.get_or_undefined(0);
         let object = this.as_object();
