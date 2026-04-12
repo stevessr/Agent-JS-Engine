@@ -1948,6 +1948,7 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
           // Format a single value (Date or Temporal) using this slot
           function formatSingleValue(slot, value) {
+            if (isTemporalZonedDateTimeValue(value)) return formatTemporalZonedDateTime(slot, value, false);
             if (isTemporalInstantValue(value)) return formatTemporalInstant(slot, value, false);
             if (isTemporalPlainTimeValue(value)) return formatTemporalPlainTime(slot, value, false);
             if (isTemporalPlainDateTimeValue(value)) return formatTemporalPlainDateTime(slot, value, false);
@@ -1956,23 +1957,13 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isTemporalPlainMonthDayValue(value)) return formatTemporalPlainMonthDay(slot, value, false);
             const d = normalizeDateTimeFormatInput(value);
             if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
-            const needsCustom = slot.needsDefault || slot.resolvedOpts.dayPeriod !== undefined ||
-              slot.resolvedOpts.fractionalSecondDigits !== undefined ||
-              (slot.resolvedOpts.numberingSystem && slot.resolvedOpts.numberingSystem !== 'latn') ||
-              (slot.resolvedOpts.era !== undefined &&
-                slot.resolvedOpts.calendar !== 'gregory' &&
-                slot.resolvedOpts.calendar !== 'iso8601') ||
-              slot.resolvedOpts.calendar === 'hebrew' ||
-              slot.resolvedOpts.calendar === 'chinese' ||
-              slot.resolvedOpts.calendar === 'dangi';
-            if (!needsCustom && slot.instance && typeof slot.instance.format === 'function') {
-              return slot.instance.format(d);
-            }
+            // Always use custom formatter since underlying Boa DTF's format just calls to_string()
             return formatDateWithOptions(d, slot.resolvedOpts);
           }
 
           // Format a single value to parts
           function formatSingleValueToParts(slot, value) {
+            if (isTemporalZonedDateTimeValue(value)) return formatTemporalZonedDateTime(slot, value, true);
             if (isTemporalInstantValue(value)) return formatTemporalInstant(slot, value, true);
             if (isTemporalPlainTimeValue(value)) return formatTemporalPlainTime(slot, value, true);
             if (isTemporalPlainDateTimeValue(value)) return formatTemporalPlainDateTime(slot, value, true);
@@ -1981,18 +1972,13 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             if (isTemporalPlainMonthDayValue(value)) return formatTemporalPlainMonthDay(slot, value, true);
             const d = normalizeDateTimeFormatInput(value);
             if (isNaN(d.getTime())) throw new RangeError('Invalid time value');
-            if (slot.instance && !slot.needsDefault &&
-                slot.resolvedOpts.fractionalSecondDigits === undefined &&
-                (slot.resolvedOpts.era === undefined ||
-                  slot.resolvedOpts.calendar === 'gregory' ||
-                  slot.resolvedOpts.calendar === 'iso8601') &&
-                slot.resolvedOpts.calendar !== 'hebrew' &&
-                slot.resolvedOpts.calendar !== 'chinese' &&
-                slot.resolvedOpts.calendar !== 'dangi' &&
-                typeof slot.instance.formatToParts === 'function') {
-              return slot.instance.formatToParts(d);
+            // Always use custom formatter since underlying Boa DTF's formatToParts may be minimal
+            const rawParts = formatDateWithOptionsToParts(d, slot.resolvedOpts);
+            const ns = slot.resolvedOpts.numberingSystem;
+            if (ns && ns !== 'latn') {
+              return rawParts.map((p) => ({ ...p, value: applyNumberingSystem(p.value, ns) }));
             }
-            return formatDateWithOptionsToParts(d, slot.resolvedOpts);
+            return rawParts;
           }
 
           // Core formatRange logic: returns {startStr, endStr, separator}
