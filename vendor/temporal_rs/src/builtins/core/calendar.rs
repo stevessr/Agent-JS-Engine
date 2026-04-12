@@ -8,7 +8,7 @@ use crate::{
         duration::DateDuration, Duration, PlainDate, PlainDateTime, PlainMonthDay, PlainYearMonth,
     },
     error::ErrorMessage,
-    iso::IsoDate,
+    iso::{IsoDate, constrain_iso_day, is_valid_iso_day},
     options::{Overflow, Unit},
     parsers::parse_allowed_calendar_formats,
     TemporalError, TemporalResult,
@@ -371,6 +371,35 @@ impl Calendar {
         let had_explicit_year =
             fields.year.is_some() || (fields.era.is_some() && fields.era_year.is_some());
         if had_explicit_year {
+            if self.is_iso() {
+                let year = fields.year.ok_or_else(|| {
+                    TemporalError::r#type()
+                        .with_message("Required fields missing to determine an era and year.")
+                })?;
+                let month_code = types::resolve_iso_month(self, &fields, overflow)?;
+                let day = fields.day.ok_or_else(|| {
+                    TemporalError::r#type().with_message("MonthDay must specify day")
+                })?;
+                let day = if overflow == Overflow::Constrain {
+                    constrain_iso_day(year, month_code.to_month_integer(), day)
+                } else {
+                    if !is_valid_iso_day(year, month_code.to_month_integer(), day) {
+                        return Err(
+                            TemporalError::range()
+                                .with_message("day value is not in a valid range."),
+                        );
+                    }
+                    day
+                };
+
+                return PlainMonthDay::new_with_overflow(
+                    month_code.to_month_integer(),
+                    day,
+                    self.clone(),
+                    Overflow::Reject,
+                    None,
+                );
+            }
             let date = self.date_from_fields(fields, overflow)?;
             fields = CalendarFields::from_date(&date);
         }

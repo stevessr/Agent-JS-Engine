@@ -359,12 +359,49 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             return false;
           }
 
+          function getFunctionRealmGlobal(func) {
+            if (typeof func !== 'function') return undefined;
+            try {
+              const ctor = Object.getPrototypeOf(func)?.constructor;
+              if (typeof ctor !== 'function') return undefined;
+              return ctor('return this')();
+            } catch (_e) {
+              return undefined;
+            }
+          }
+
+          function getIntrinsicDateTimeFormatPrototype(newTarget) {
+            const candidate = newTarget?.prototype;
+            if (typeof candidate === 'object' && candidate !== null) {
+              return candidate;
+            }
+            const realmGlobal = getFunctionRealmGlobal(newTarget);
+            const realmProto = realmGlobal?.Intl?.DateTimeFormat?.prototype;
+            if (typeof realmProto === 'object' && realmProto !== null) {
+              return realmProto;
+            }
+            return newProto;
+          }
+
+          function applyCalendarFallback(cal) {
+            if (cal === 'islamic' || cal === 'islamic-rgsa') {
+              return 'islamic-civil';
+            }
+            return cal;
+          }
+
           // Wrap the constructor to capture options
           const WrappedDTF = function DateTimeFormat(locales, options) {
+            const isConstructCall = new.target !== undefined;
+
             // Use OrdinaryHasInstance instead of instanceof to avoid Symbol.hasInstance lookup
-            if (!ordinaryHasInstance(WrappedDTF, this) && new.target === undefined) {
+            if (!isConstructCall && !ordinaryHasInstance(WrappedDTF, this)) {
               return new WrappedDTF(locales, options);
             }
+
+            const receiver = isConstructCall
+              ? Object.create(getIntrinsicDateTimeFormatPrototype(new.target))
+              : this;
 
             // Convert options to object (ToObject) - primitives like numbers should work
             // null must throw TypeError
@@ -497,8 +534,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
             const localeCalendarMatch = typeof locale === 'string'
               ? locale.match(/-u(?:-[a-z0-9]{2,8})*-ca-([a-z0-9-]+)/i)
               : null;
-            const resolvedCalendar = calendar ||
-              (localeCalendarMatch ? canonicalizeCalendar(localeCalendarMatch[1]) : 'gregory');
+            const resolvedCalendar = applyCalendarFallback(
+              calendar || (localeCalendarMatch ? canonicalizeCalendar(localeCalendarMatch[1]) : 'gregory')
+            );
 
             // Detect locale's default numbering system if not explicitly specified
             function detectLocaleNumberingSystem(loc) {
@@ -631,6 +669,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
               if (localeCa && canonicalizeCalendar(localeCa) !== resolvedCalendar) {
                 normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'ca'));
               }
+            } else if (calendar === undefined && localeCa && canonicalizeCalendar(localeCa) !== resolvedCalendar) {
+              normalizedLocale = cleanLocale(stripLocaleExtKey(normalizedLocale, 'ca'));
             }
 
             // hc: strip if hour12 option set, or if hourCycle option differs from extension
@@ -657,9 +697,9 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
             resolvedOpts.locale = normalizedLocale;
 
-            dtfSlots.set(this, { instance, resolvedOpts, needsDefault });
+            dtfSlots.set(receiver, { instance, resolvedOpts, needsDefault });
 
-            return this;
+            return receiver;
           };
 
           // Copy static properties

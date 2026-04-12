@@ -1980,8 +1980,12 @@ pub(crate) fn to_temporal_zoneddatetime(
             // j. If calendar is empty, set calendar to "iso8601".
             // k. Set calendar to ? CanonicalizeCalendar(calendar).
             // l. Set matchBehaviour to match-minutes.
-            // m. Let resolvedOptions be ? GetOptionsObject(options).
-            let options = get_options_object(&options.unwrap_or_default())?;
+            let parsed = temporal_rs::parsed_intermediates::ParsedZonedDateTime::from_utf8_with_provider(
+                zdt_source.to_std_string_escaped().as_bytes(),
+                context.tz_provider(),
+            )?;
+            let options_value = options.unwrap_or_default();
+            let options = get_options_object(&options_value)?;
             // n. Let disambiguation be ? GetTemporalDisambiguationOption(resolvedOptions).
             let disambiguation =
                 get_option::<Disambiguation>(&options, js_string!("disambiguation"), context)?
@@ -1990,20 +1994,21 @@ pub(crate) fn to_temporal_zoneddatetime(
             let offset_option =
                 get_option::<OffsetDisambiguation>(&options, js_string!("offset"), context)?
                     .unwrap_or(OffsetDisambiguation::Reject);
-            // p. Perform ? GetTemporalOverflowOption(resolvedOptions).
-            let _overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
             // q. Let isoDate be CreateISODateRecord(result.[[Year]], result.[[Month]], result.[[Day]]).
             // r. Let time be result.[[Time]].
             // 6. Let offsetNanoseconds be 0.
             // 7. If offsetBehaviour is option, then
             //        a. Set offsetNanoseconds to ! ParseDateTimeUTCOffset(offsetString).
             // 8. Let epochNanoseconds be ? InterpretISODateTimeOffset(isoDate, time, offsetBehaviour, offsetNanoseconds, timeZone, disambiguation, offsetOption, matchBehaviour).
-            Ok(ZonedDateTimeInner::from_utf8_with_provider(
-                zdt_source.to_std_string_escaped().as_bytes(),
+            let parsed = ZonedDateTimeInner::from_parsed_with_provider(
+                parsed,
                 disambiguation,
                 offset_option,
                 context.tz_provider(),
-            )?)
+            )?;
+            // p. Perform ? GetTemporalOverflowOption(resolvedOptions).
+            let _overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
+            Ok(parsed)
         }
         // 5. Else,
         // a. If item is not a String, throw a TypeError exception.
@@ -2102,8 +2107,66 @@ pub(crate) fn to_zoned_date_time_fields(
     zdt_fields_type: ZdtFieldsType,
     context: &mut Context,
 ) -> JsResult<(ZonedDateTimeFields, Option<TimeZone>)> {
-    let day = partial_object
-        .get(js_string!("day"), context)?
+    let raw_year = partial_object.get(js_string!("year"), context)?;
+    let raw_month = partial_object.get(js_string!("month"), context)?;
+    let raw_month_code = partial_object.get(js_string!("monthCode"), context)?;
+    let raw_day = partial_object.get(js_string!("day"), context)?;
+    let raw_hour = partial_object.get(js_string!("hour"), context)?;
+    let raw_minute = partial_object.get(js_string!("minute"), context)?;
+    let raw_second = partial_object.get(js_string!("second"), context)?;
+    let raw_millisecond = partial_object.get(js_string!("millisecond"), context)?;
+    let raw_microsecond = partial_object.get(js_string!("microsecond"), context)?;
+    let raw_nanosecond = partial_object.get(js_string!("nanosecond"), context)?;
+    let raw_offset = partial_object.get(js_string!("offset"), context)?;
+    let raw_time_zone = match zdt_fields_type {
+        ZdtFieldsType::NoTimeZone => JsValue::undefined(),
+        ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => {
+            partial_object.get(js_string!("timeZone"), context)?
+        }
+    };
+
+    // TODO: `temporal_rs` needs a `has_era` method
+    let has_no_era = calendar.kind() == AnyCalendarKind::Iso
+        || calendar.kind() == AnyCalendarKind::Chinese
+        || calendar.kind() == AnyCalendarKind::Dangi;
+
+    let raw_era = if has_no_era {
+        JsValue::undefined()
+    } else {
+        partial_object.get(js_string!("era"), context)?
+    };
+    let raw_era_year = if has_no_era {
+        JsValue::undefined()
+    } else {
+        partial_object.get(js_string!("eraYear"), context)?
+    };
+
+    if zdt_fields_type == ZdtFieldsType::TimeZoneRequired {
+        let has_year_like = !raw_year.is_undefined()
+            || (!raw_era.is_undefined() && !raw_era_year.is_undefined());
+        if !has_year_like {
+            return Err(JsNativeError::typ()
+                .with_message("year is required to construct ZonedDateTime.")
+                .into());
+        }
+        if raw_month.is_undefined() && raw_month_code.is_undefined() {
+            return Err(JsNativeError::typ()
+                .with_message("month or monthCode is required to construct ZonedDateTime.")
+                .into());
+        }
+        if raw_day.is_undefined() {
+            return Err(JsNativeError::typ()
+                .with_message("day is required to construct ZonedDateTime.")
+                .into());
+        }
+        if raw_time_zone.is_undefined() {
+            return Err(JsNativeError::typ()
+                .with_message("timeZone is required to construct ZonedDateTime.")
+                .into());
+        }
+    }
+
+    let day = raw_day
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             finite
@@ -2111,22 +2174,16 @@ pub(crate) fn to_zoned_date_time_fields(
                 .map_err(JsError::from)
         })
         .transpose()?;
-    let hour = partial_object
-        .get(js_string!("hour"), context)?
+    let hour = raw_hour
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
         })
         .transpose()?;
-    // TODO: `temporal_rs` needs a `has_era` method
-    let has_no_era = calendar.kind() == AnyCalendarKind::Iso
-        || calendar.kind() == AnyCalendarKind::Chinese
-        || calendar.kind() == AnyCalendarKind::Dangi;
     let (era, era_year) = if has_no_era {
         (None, None)
     } else {
-        let era = partial_object
-            .get(js_string!("era"), context)?
+        let era = raw_era
             .map(|v| {
                 let v = v.to_primitive(context, PreferredType::String)?;
                 let Some(era) = v.as_string() else {
@@ -2140,8 +2197,7 @@ pub(crate) fn to_zoned_date_time_fields(
                     .map_err(|e| JsError::from(JsNativeError::range().with_message(e.to_string())))
             })
             .transpose()?;
-        let era_year = partial_object
-            .get(js_string!("eraYear"), context)?
+        let era_year = raw_era_year
             .map(|v| {
                 let finite = v.to_finitef64(context)?;
                 Ok::<i32, JsError>(finite.as_integer_with_truncation::<i32>())
@@ -2149,32 +2205,28 @@ pub(crate) fn to_zoned_date_time_fields(
             .transpose()?;
         (era, era_year)
     };
-    let microsecond = partial_object
-        .get(js_string!("microsecond"), context)?
+    let microsecond = raw_microsecond
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
         })
         .transpose()?;
 
-    let millisecond = partial_object
-        .get(js_string!("millisecond"), context)?
+    let millisecond = raw_millisecond
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
         })
         .transpose()?;
 
-    let minute = partial_object
-        .get(js_string!("minute"), context)?
+    let minute = raw_minute
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
         })
         .transpose()?;
 
-    let month = partial_object
-        .get(js_string!("month"), context)?
+    let month = raw_month
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             finite
@@ -2183,8 +2235,7 @@ pub(crate) fn to_zoned_date_time_fields(
         })
         .transpose()?;
 
-    let month_code = partial_object
-        .get(js_string!("monthCode"), context)?
+    let month_code = raw_month_code
         .map(|v| {
             let v = v.to_primitive(context, PreferredType::String)?;
             let Some(month_code) = v.as_string() else {
@@ -2196,21 +2247,18 @@ pub(crate) fn to_zoned_date_time_fields(
         })
         .transpose()?;
 
-    let nanosecond = partial_object
-        .get(js_string!("nanosecond"), context)?
+    let nanosecond = raw_nanosecond
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u16, JsError>(finite.as_integer_with_truncation::<u16>())
         })
         .transpose()?;
 
-    let offset = partial_object
-        .get(js_string!("offset"), context)?
+    let offset = raw_offset
         .map(|v| to_offset_string(v, context))
         .transpose()?;
 
-    let second = partial_object
-        .get(js_string!("second"), context)?
+    let second = raw_second
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<u8, JsError>(finite.as_integer_with_truncation::<u8>())
@@ -2220,8 +2268,7 @@ pub(crate) fn to_zoned_date_time_fields(
     let time_zone = match zdt_fields_type {
         ZdtFieldsType::NoTimeZone => None,
         ZdtFieldsType::TimeZoneNotRequired | ZdtFieldsType::TimeZoneRequired => {
-            let time_zone = partial_object
-                .get(js_string!("timeZone"), context)?
+            let time_zone = raw_time_zone
                 .map(|v| to_temporal_timezone_identifier(v, context))
                 .transpose()?;
             if zdt_fields_type == ZdtFieldsType::TimeZoneRequired && time_zone.is_none() {
@@ -2233,8 +2280,7 @@ pub(crate) fn to_zoned_date_time_fields(
         }
     };
 
-    let year = partial_object
-        .get(js_string!("year"), context)?
+    let year = raw_year
         .map(|v| {
             let finite = v.to_finitef64(context)?;
             Ok::<i32, JsError>(finite.as_integer_with_truncation::<i32>())
