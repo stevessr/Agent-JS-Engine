@@ -4,7 +4,7 @@ struct DateTimeFormatOptions {
     locale: String,
     calendar: String,
     numbering_system: String,
-    time_zone: Option<String>,
+    time_zone: String,
     hour_cycle: Option<String>,
     hour12: Option<bool>,
     weekday: Option<String>,
@@ -31,13 +31,16 @@ unsafe impl Trace for DateTimeFormatOptions {
 struct DateTimeFormatSlot {
     instance: JsObject,
     options: DateTimeFormatOptions,
-    needs_default: bool,
+    format_fn: std::cell::RefCell<Option<JsObject>>,
 }
 
 impl Finalize for DateTimeFormatSlot {}
 unsafe impl Trace for DateTimeFormatSlot {
     unsafe fn trace(&self, tracer: &mut boa_engine::gc::Tracer) {
-        unsafe { self.instance.trace(tracer); }
+        unsafe { 
+            self.instance.trace(tracer);
+            if let Some(ref f) = *self.format_fn.borrow() { f.trace(tracer); }
+        }
     }
     unsafe fn trace_non_roots(&self) {}
     fn run_finalizer(&self) { self.finalize(); }
@@ -65,7 +68,7 @@ const VALID_CALENDARS: &[&str] = &[
     "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic",
     "gregory", "hebrew", "indian", "islamic", "islamic-umalqura",
     "islamic-tbla", "islamic-civil", "islamic-rgsa", "iso8601",
-    "japanese", "persian", "roc", "islamicc"
+    "japanese", "persian", "roc"
 ];
 const VALID_NUMBERING_SYSTEMS: &[&str] = &[
     "arab", "arabext", "bali", "beng", "deva", "fullwide", "gujr",
@@ -125,6 +128,34 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
         context,
     )?;
 
+    // formatRange and formatRangeToParts
+    dtf_proto.define_property_or_throw(
+        js_string!("formatRange"),
+        PropertyDescriptor::builder()
+            .value(FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(dtf_format_range))
+                .name(js_string!("formatRange"))
+                .length(2)
+                .build())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true)
+            .build(),
+        context,
+    )?;
+    dtf_proto.define_property_or_throw(
+        js_string!("formatRangeToParts"),
+        PropertyDescriptor::builder()
+            .value(FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(dtf_format_range_to_parts))
+                .name(js_string!("formatRangeToParts"))
+                .length(2)
+                .build())
+            .writable(true)
+            .enumerable(false)
+            .configurable(true)
+            .build(),
+        context,
+    )?;
+
     intl.set(js_string!("DateTimeFormat"), dtf_constructor, true, context)?;
 
     if let Some(original_dn) = intl.get(js_string!("DisplayNames"), context)?.as_object().map(|o| o.clone()) {
@@ -137,21 +168,42 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
         intl.set(js_string!("DisplayNames"), dn_constructor, true, context)?;
     }
 
-    context.eval(Source::from_bytes(r#"
-        globalThis.__agentjs_intl_helper = {
-            formatDate(date, slotOptions) {
-                const d = new Date(date);
-                if (slotOptions.era) {
-                    const year = d.getFullYear();
-                    const era = year >= 0 ? "AD" : "BC";
-                    return d.toLocaleDateString(slotOptions.locale, slotOptions) + "/" + era;
-                }
-                return d.toLocaleString(slotOptions.locale, slotOptions);
-            }
-        };
-    "#))?;
+    // Polyfill Date.prototype.toLocaleString and friends
+    let date_proto = context.intrinsics().constructors().date().prototype();
+    let to_locale_string_polyfill = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(date_to_locale_string)).name(js_string!("toLocaleString")).length(0).build();
+    let to_locale_date_string_polyfill = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(date_to_locale_date_string)).name(js_string!("toLocaleDateString")).length(0).build();
+    let to_locale_time_string_polyfill = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(date_to_locale_time_string)).name(js_string!("toLocaleTimeString")).length(0).build();
+    
+    date_proto.define_property_or_throw(js_string!("toLocaleString"), PropertyDescriptor::builder().value(to_locale_string_polyfill).writable(true).enumerable(false).configurable(true).build(), context)?;
+    date_proto.define_property_or_throw(js_string!("toLocaleDateString"), PropertyDescriptor::builder().value(to_locale_date_string_polyfill).writable(true).enumerable(false).configurable(true).build(), context)?;
+    date_proto.define_property_or_throw(js_string!("toLocaleTimeString"), PropertyDescriptor::builder().value(to_locale_time_string_polyfill).writable(true).enumerable(false).configurable(true).build(), context)?;
 
     Ok(())
+}
+
+fn date_to_locale_string(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
+    let is_date = if let Some(o) = this.as_object() {
+        o.get(js_string!("getTime"), context).ok().map(|v| v.is_callable()).unwrap_or(false)
+    } else { false };
+    if !is_date {
+        return Err(JsNativeError::typ().with_message("Date.prototype.toLocaleString called on non-Date object").into());
+    }
+    let locales = args.get_or_undefined(0);
+    let options = args.get_or_undefined(1);
+    let intl = context.global_object().get(js_string!("Intl"), context)?.to_object(context)?;
+    let dtf_ctor = intl.get(js_string!("DateTimeFormat"), context)?.to_object(context)?;
+    let dtf_instance = dtf_ctor.construct(&[locales.clone(), options.clone()], None, context)?;
+    let format_getter = dtf_instance.get(js_string!("format"), context)?;
+    let format_fn = format_getter.as_object().ok_or_else(|| JsNativeError::typ().with_message("format is not a function"))?;
+    format_fn.call(&dtf_instance.into(), &[this.clone()], context)
+}
+
+fn date_to_locale_date_string(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
+    date_to_locale_string(this, args, context)
+}
+
+fn date_to_locale_time_string(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
+    date_to_locale_string(this, args, context)
 }
 
 fn get_option_string(options: &JsObject, key: &str, valid: &[&str], context: &mut Context) -> JsResult<Option<String>> {
@@ -172,19 +224,82 @@ fn extract_unicode_extension(locale: &str, key: &str) -> Option<String> {
     None
 }
 
+fn validate_time_zone(tz: &str) -> JsResult<()> {
+    if tz.to_uppercase() == "UTC" { return Ok(()); }
+    if tz.starts_with('+') || tz.starts_with('-') {
+        let re = Regex::new(r"^[+-]([0-9]{2}):([0-9]{2})(:([0-9]{2}))?$").unwrap();
+        if let Some(caps) = re.captures(tz) {
+            if caps.get(0).unwrap().as_str().len() == tz.len() {
+                let h: i32 = caps.get(1).unwrap().as_str().parse().unwrap_or(99);
+                let m: i32 = caps.get(2).unwrap().as_str().parse().unwrap_or(99);
+                let s: i32 = caps.get(4).map(|x| x.as_str().parse().unwrap_or(99)).unwrap_or(0);
+                if h < 24 && m < 60 && s < 60 {
+                    let total_seconds = h * 3600 + m * 60 + s;
+                    if total_seconds <= 14 * 3600 {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        return Err(JsNativeError::range().with_message(format!("Invalid time zone offset: {}", tz)).into());
+    }
+    if tz.chars().any(|c| !c.is_ascii()) {
+        return Err(JsNativeError::range().with_message(format!("Invalid time zone: {}", tz)).into());
+    }
+    Ok(())
+}
+
+fn validate_bcp47_identifier(v: &str) -> bool {
+    if v.is_empty() { return false; }
+    let segments: Vec<&str> = v.split('-').collect();
+    for seg in segments { if seg.len() < 3 || seg.len() > 8 || !seg.chars().all(|c| c.is_ascii_alphanumeric()) { return false; } }
+    true
+}
+
+fn get_prototype_from_constructor(new_target: &BoaValue, default_proto: JsObject, context: &mut Context) -> JsResult<JsObject> {
+    if let Some(o) = new_target.as_object() {
+        let p = o.get(js_string!("prototype"), context)?;
+        if let Some(proto_obj) = p.as_object() {
+            Ok(proto_obj.clone())
+        } else {
+            Ok(default_proto)
+        }
+    } else {
+        Ok(default_proto)
+    }
+}
+
 fn datetime_format_constructor(new_target: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
-    if new_target.is_undefined() { return Err(JsNativeError::typ().with_message("Constructor Intl.DateTimeFormat requires \"new\"").into()); }
-    let proto = new_target.as_object().unwrap().get(js_string!("prototype"), context)?.to_object(context)?;
+    let original_dtf: JsObject = context.global_object().get(js_string!("__original_DateTimeFormat"), context)?.as_object().unwrap().clone();
+    
+    if new_target.is_undefined() {
+        return Ok(original_dtf.construct(args, None, context)?.into());
+    }
+
+    let proto = get_prototype_from_constructor(new_target, context.intrinsics().constructors().date_time_format().prototype(), context)?;
+
     let locales = args.get_or_undefined(0);
     let options_val = args.get_or_undefined(1);
     let options = if options_val.is_undefined() { JsObject::with_object_proto(context.intrinsics()) } else if options_val.is_null() { return Err(JsNativeError::typ().with_message("Cannot convert null to object").into()); } else { options_val.to_object(context)? };
 
+    // Strictly follow property access order from ECMA-402
     let _locale_matcher = get_option_string(&options, "localeMatcher", VALID_LOCALE_MATCHERS, context)?;
-    let calendar = get_option_string(&options, "calendar", &[], context)?;
-    let numbering_system = get_option_string(&options, "numberingSystem", &[], context)?;
-    let hour12 = if options.get(js_string!("hour12"), context)?.is_undefined() { None } else { Some(options.get(js_string!("hour12"), context)?.to_boolean()) };
+    let mut calendar_opt = get_option_string(&options, "calendar", &[], context)?.map(|s| s.to_lowercase());
+    if let Some(ref cal) = calendar_opt {
+        if cal == "islamicc" { calendar_opt = Some("islamic-civil".to_string()); }
+        if !validate_bcp47_identifier(calendar_opt.as_ref().unwrap()) { return Err(JsNativeError::range().with_message("Invalid calendar").into()); }
+    }
+    let numbering_system_opt = get_option_string(&options, "numberingSystem", &[], context)?.map(|s| s.to_lowercase());
+    if let Some(ref ns) = numbering_system_opt {
+        if !validate_bcp47_identifier(ns) { return Err(JsNativeError::range().with_message("Invalid numberingSystem").into()); }
+    }
+    
+    let hour12_v = options.get(js_string!("hour12"), context)?;
+    let hour12 = if hour12_v.is_undefined() { None } else { Some(hour12_v.to_boolean()) };
     let hour_cycle = get_option_string(&options, "hourCycle", VALID_HOUR_CYCLES, context)?;
     let time_zone = get_option_string(&options, "timeZone", &[], context)?;
+    if let Some(ref tz) = time_zone { validate_time_zone(tz)?; }
+
     let weekday = get_option_string(&options, "weekday", VALID_WEEKDAYS, context)?;
     let era = get_option_string(&options, "era", VALID_ERAS, context)?;
     let year = get_option_string(&options, "year", VALID_YEARS, context)?;
@@ -204,21 +319,16 @@ fn datetime_format_constructor(new_target: &BoaValue, args: &[BoaValue], context
         return Err(JsNativeError::typ().with_message("dateStyle and timeStyle cannot be combined with other date/time options").into());
     }
 
-    let needs_default = date_style.is_none() && time_style.is_none() && year.is_none() && month.is_none() && day.is_none();
-    let original_dtf: JsObject = context.global_object().get(js_string!("__original_DateTimeFormat"), context)?.as_object().unwrap().clone();
-    let mut filtered_options = ObjectInitializer::new(context);
+    let needs_default = date_style.is_none() && time_style.is_none() && weekday.is_none() && year.is_none() && month.is_none() && day.is_none() && hour.is_none() && minute.is_none() && second.is_none() && fractional_second_digits.is_none() && day_period.is_none() && time_zone_name.is_none();
     
-    if let Some(ref cal) = calendar {
-        let segments: Vec<&str> = cal.split('-').collect();
-        let mut valid = !segments.is_empty();
-        for seg in segments { if seg.len() < 3 || seg.len() > 8 || !seg.chars().all(|c| c.is_ascii_alphanumeric()) { valid = false; break; } }
-        if !valid { return Err(JsNativeError::range().with_message("Invalid calendar").into()); }
-        if VALID_CALENDARS.contains(&cal.as_str()) { filtered_options.property(js_string!("calendar"), js_string!(cal.as_str()), Attribute::all()); }
+    let mut filtered_options = ObjectInitializer::new(context);
+    if needs_default {
+        filtered_options.property(js_string!("year"), js_string!("numeric"), Attribute::all());
+        filtered_options.property(js_string!("month"), js_string!("numeric"), Attribute::all());
+        filtered_options.property(js_string!("day"), js_string!("numeric"), Attribute::all());
     }
-    if let Some(ref ns) = numbering_system {
-        if ns.len() < 3 || ns.len() > 8 || !ns.chars().all(|c| c.is_ascii_alphanumeric()) { return Err(JsNativeError::range().with_message("Invalid numberingSystem").into()); }
-        if VALID_NUMBERING_SYSTEMS.contains(&ns.as_str()) { filtered_options.property(js_string!("numberingSystem"), js_string!(ns.as_str()), Attribute::all()); }
-    }
+    if let Some(ref v) = calendar_opt { if VALID_CALENDARS.contains(&v.as_str()) { filtered_options.property(js_string!("calendar"), js_string!(v.as_str()), Attribute::all()); } }
+    if let Some(ref v) = numbering_system_opt { if VALID_NUMBERING_SYSTEMS.contains(&v.as_str()) { filtered_options.property(js_string!("numberingSystem"), js_string!(v.as_str()), Attribute::all()); } }
     if let Some(v) = hour12 { filtered_options.property(js_string!("hour12"), v, Attribute::all()); }
     if let Some(ref v) = hour_cycle { filtered_options.property(js_string!("hourCycle"), js_string!(v.as_str()), Attribute::all()); }
     if let Some(ref v) = time_zone { filtered_options.property(js_string!("timeZone"), js_string!(v.as_str()), Attribute::all()); }
@@ -236,55 +346,123 @@ fn datetime_format_constructor(new_target: &BoaValue, args: &[BoaValue], context
     if let Some(ref v) = date_style { filtered_options.property(js_string!("dateStyle"), js_string!(v.as_str()), Attribute::all()); }
     if let Some(ref v) = time_style { filtered_options.property(js_string!("timeStyle"), js_string!(v.as_str()), Attribute::all()); }
 
-    let dtf_instance_val: BoaValue = original_dtf.construct(&[locales.clone(), filtered_options.build().into()], None, context)?.into();
+    let dtf_instance_val: BoaValue = match original_dtf.construct(&[locales.clone(), filtered_options.build().into()], None, context) {
+        Ok(v) => v.into(),
+        Err(e) => {
+            if e.to_string().contains("timeZone") { return Err(JsNativeError::range().with_message("Invalid time zone").into()); }
+            return Err(e);
+        }
+    };
     let dtf_instance: JsObject = dtf_instance_val.to_object(context)?;
     
-    let resolved_fn = dtf_instance.get(js_string!("resolvedOptions"), context)?.as_object().map(|o| o.clone()).unwrap();
-    let resolved_val = resolved_fn.call(&dtf_instance.clone().into(), &[], context)?;
+    let resolved_val = match dtf_instance.get(js_string!("resolvedOptions"), context) {
+        Ok(v) => if let Some(o) = v.as_object() { 
+            match o.call(&dtf_instance.clone().into(), &[], context) {
+                Ok(rv) => rv,
+                Err(_) => BoaValue::undefined(),
+            }
+        } else { BoaValue::undefined() },
+        Err(_) => BoaValue::undefined(),
+    };
     let resolved = resolved_val.to_object(context)?;
     
-    let resolved_locale = resolved.get(js_string!("locale"), context)?.to_string(context)?.to_std_string_escaped();
-    let resolved_calendar = resolved.get(js_string!("calendar"), context)?.to_string(context)?.to_std_string_escaped();
-    let resolved_numbering_system = resolved.get(js_string!("numberingSystem"), context)?.to_string(context)?.to_std_string_escaped();
+    fn get_resolved_string(obj: &JsObject, key: &str, context: &mut Context) -> String {
+        obj.get(js_string!(key), context).unwrap_or(BoaValue::undefined()).to_string(context).unwrap_or(js_string!("")).to_std_string_escaped()
+    }
+    fn get_resolved_opt_string(obj: &JsObject, key: &str, context: &mut Context) -> Option<String> {
+        let val = obj.get(js_string!(key), context).unwrap_or(BoaValue::undefined());
+        if val.is_undefined() { None } else { Some(val.to_string(context).unwrap_or(js_string!("")).to_std_string_escaped()) }
+    }
 
+    let resolved_locale = get_resolved_string(&resolved, "locale", context);
+    let resolved_calendar = get_resolved_string(&resolved, "calendar", context);
+    let resolved_numbering_system = get_resolved_string(&resolved, "numberingSystem", context);
+    let resolved_time_zone = get_resolved_string(&resolved, "timeZone", context);
+
+    let loc_input = locales.to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped();
     let mut final_locale = resolved_locale;
-    let mut final_calendar = if let Some(ref cal) = calendar { if VALID_CALENDARS.contains(&cal.as_str()) { cal.clone() } else { resolved_calendar } } else { resolved_calendar };
-    let mut final_numbering_system = if let Some(ref ns) = numbering_system { if VALID_NUMBERING_SYSTEMS.contains(&ns.as_str()) { ns.clone() } else { resolved_numbering_system } } else { resolved_numbering_system };
+    let mut final_calendar = calendar_opt.clone().unwrap_or_else(|| resolved_calendar.clone());
+    if !VALID_CALENDARS.contains(&final_calendar.as_str()) { final_calendar = resolved_calendar.clone(); }
+    let mut final_numbering_system = numbering_system_opt.clone().unwrap_or_else(|| resolved_numbering_system.clone());
+    if !VALID_NUMBERING_SYSTEMS.contains(&final_numbering_system.as_str()) { final_numbering_system = resolved_numbering_system.clone(); }
 
-    let loc_str = locales.to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped();
-    if loc_str.contains("-u-") {
-        if let Some(ext_cal) = extract_unicode_extension(&loc_str, "ca") {
-            if VALID_CALENDARS.contains(&ext_cal.as_str()) {
-                let mut override_ext = true;
-                if let Some(ref cal) = calendar { if VALID_CALENDARS.contains(&cal.as_str()) { override_ext = false; } }
-                if override_ext {
-                    final_calendar = ext_cal.clone();
-                    if !final_locale.contains("-u-ca-") { final_locale = format!("{}-u-ca-{}", final_locale, ext_cal); }
+    if loc_input.contains("-u-") {
+        if let Some(ext_ca) = extract_unicode_extension(&loc_input, "ca") {
+            let mut restore = false;
+            if VALID_CALENDARS.contains(&ext_ca.as_str()) {
+                if final_calendar == ext_ca { restore = true; }
+                if !restore && calendar_opt.is_none() { restore = true; } 
+            }
+            if restore {
+                final_calendar = ext_ca.clone();
+                if !final_locale.contains("-u-ca-") {
+                    if final_locale.contains("-u-") { final_locale = final_locale.replace("-u-", &format!("-u-ca-{}-", ext_ca)); }
+                    else { final_locale = format!("{}-u-ca-{}", final_locale, ext_ca); }
                 }
+            } else if final_locale.contains("-u-ca-") {
+                let re = Regex::new(r"-u-ca-[a-z0-9]+").unwrap();
+                final_locale = re.replace(&final_locale, "").to_string().replace("-u-u-", "-u-");
+                if final_locale.ends_with("-u") { final_locale.truncate(final_locale.len() - 2); }
             }
         }
-        if let Some(ext_nu) = extract_unicode_extension(&loc_str, "nu") {
+        if let Some(ext_nu) = extract_unicode_extension(&loc_input, "nu") {
+            let mut restore = false;
             if VALID_NUMBERING_SYSTEMS.contains(&ext_nu.as_str()) {
-                let mut override_ext = true;
-                if let Some(ref ns) = numbering_system { if VALID_NUMBERING_SYSTEMS.contains(&ns.as_str()) { override_ext = false; } }
-                if override_ext {
-                    final_numbering_system = ext_nu.clone();
-                    if !final_locale.contains("-u-nu-") {
-                        if final_locale.contains("-u-") { final_locale = format!("{}-nu-{}", final_locale, ext_nu); }
-                        else { final_locale = format!("{}-u-nu-{}", final_locale, ext_nu); }
-                    }
+                if final_numbering_system == ext_nu { restore = true; }
+                if !restore && numbering_system_opt.is_none() { restore = true; }
+            }
+            if restore {
+                final_numbering_system = ext_nu.clone();
+                if !final_locale.contains("-u-nu-") {
+                    if final_locale.contains("-u-") { final_locale = final_locale.replace("-u-", &format!("-u-nu-{}-", ext_nu)); }
+                    else { final_locale = format!("{}-u-nu-{}", final_locale, ext_nu); }
                 }
+            } else if final_locale.contains("-u-nu-") {
+                let re = Regex::new(r"-u-nu-[a-z0-9]+").unwrap();
+                final_locale = re.replace(&final_locale, "").to_string().replace("-u-u-", "-u-");
+                if final_locale.ends_with("-u") { final_locale.truncate(final_locale.len() - 2); }
             }
         }
     }
 
-    let obj = JsObject::from_proto_and_data(proto, DateTimeFormatSlot { instance: dtf_instance, options: DateTimeFormatOptions { locale: final_locale, calendar: final_calendar, numbering_system: final_numbering_system, time_zone, hour_cycle, hour12, weekday, era, year, month, day, day_period, hour, minute, second, fractional_second_digits, time_zone_name, date_style, time_style }, needs_default });
+    let resolved_hour12 = {
+        let val = resolved.get(js_string!("hour12"), context).unwrap_or(BoaValue::undefined());
+        if val.is_undefined() { hour12 } else { Some(val.to_boolean()) }
+    };
+    let resolved_fsd = {
+        let val = resolved.get(js_string!("fractionalSecondDigits"), context).unwrap_or(BoaValue::undefined());
+        if val.is_undefined() { fractional_second_digits } else { Some(val.to_number(context).unwrap_or(0.0) as u8) }
+    };
+
+    let slot_options = DateTimeFormatOptions {
+        locale: final_locale,
+        calendar: final_calendar,
+        numbering_system: final_numbering_system,
+        time_zone: resolved_time_zone,
+        hour_cycle: get_resolved_opt_string(&resolved, "hourCycle", context).or(hour_cycle),
+        hour12: resolved_hour12,
+        weekday: get_resolved_opt_string(&resolved, "weekday", context).or(weekday),
+        era: get_resolved_opt_string(&resolved, "era", context).or(era),
+        year: get_resolved_opt_string(&resolved, "year", context).or(year).or(if needs_default { Some("numeric".to_string()) } else { None }),
+        month: get_resolved_opt_string(&resolved, "month", context).or(month).or(if needs_default { Some("numeric".to_string()) } else { None }),
+        day: get_resolved_opt_string(&resolved, "day", context).or(day).or(if needs_default { Some("numeric".to_string()) } else { None }),
+        day_period: get_resolved_opt_string(&resolved, "dayPeriod", context).or(day_period),
+        hour: get_resolved_opt_string(&resolved, "hour", context).or(hour),
+        minute: get_resolved_opt_string(&resolved, "minute", context).or(minute),
+        second: get_resolved_opt_string(&resolved, "second", context).or(second),
+        fractional_second_digits: resolved_fsd,
+        time_zone_name: get_resolved_opt_string(&resolved, "timeZoneName", context).or(time_zone_name),
+        date_style: get_resolved_opt_string(&resolved, "dateStyle", context).or(date_style),
+        time_style: get_resolved_opt_string(&resolved, "timeStyle", context).or(time_style),
+    };
+
+    let obj = JsObject::from_proto_and_data(proto, DateTimeFormatSlot { instance: dtf_instance, options: slot_options, format_fn: std::cell::RefCell::new(None) });
     Ok(obj.into())
 }
 
 fn dtf_supported_locales_of(_: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let original_dtf = context.global_object().get(js_string!("__original_DateTimeFormat"), context)?.as_object().unwrap().clone();
-    let supported_locales_of = original_dtf.get(js_string!("supportedLocalesOf"), context)?.as_object().unwrap().clone();
+    let supported_locales_of = original_dtf.get(js_string!("supportedLocalesOf"), context)?.to_object(context)?;
     supported_locales_of.call(&original_dtf.into(), args, context)
 }
 
@@ -295,7 +473,7 @@ fn dtf_resolved_options(this: &BoaValue, _: &[BoaValue], context: &mut Context) 
     res.property(js_string!("locale"), js_string!(slot.options.locale.as_str()), Attribute::all());
     res.property(js_string!("calendar"), js_string!(slot.options.calendar.as_str()), Attribute::all());
     res.property(js_string!("numberingSystem"), js_string!(slot.options.numbering_system.as_str()), Attribute::all());
-    res.property(js_string!("timeZone"), js_string!(slot.options.time_zone.as_deref().unwrap_or("UTC")), Attribute::all());
+    res.property(js_string!("timeZone"), js_string!(slot.options.time_zone.as_str()), Attribute::all());
     if let Some(v) = &slot.options.hour_cycle { res.property(js_string!("hourCycle"), js_string!(v.as_str()), Attribute::all()); }
     if let Some(v) = slot.options.hour12 { res.property(js_string!("hour12"), v, Attribute::all()); }
     if let Some(v) = &slot.options.weekday { res.property(js_string!("weekday"), js_string!(v.as_str()), Attribute::all()); }
@@ -307,16 +485,31 @@ fn dtf_resolved_options(this: &BoaValue, _: &[BoaValue], context: &mut Context) 
     if let Some(v) = &slot.options.minute { res.property(js_string!("minute"), js_string!(v.as_str()), Attribute::all()); }
     if let Some(v) = &slot.options.second { res.property(js_string!("second"), js_string!(v.as_str()), Attribute::all()); }
     if let Some(v) = slot.options.fractional_second_digits { res.property(js_string!("fractionalSecondDigits"), v, Attribute::all()); }
+    if let Some(v) = &slot.options.day_period { res.property(js_string!("dayPeriod"), js_string!(v.as_str()), Attribute::all()); }
+    if let Some(v) = &slot.options.time_zone_name { res.property(js_string!("timeZoneName"), js_string!(v.as_str()), Attribute::all()); }
+    if let Some(v) = &slot.options.date_style { res.property(js_string!("dateStyle"), js_string!(v.as_str()), Attribute::all()); }
+    if let Some(v) = &slot.options.time_style { res.property(js_string!("timeStyle"), js_string!(v.as_str()), Attribute::all()); }
     Ok(res.build().into())
 }
 
 fn dtf_format_getter(this: &BoaValue, _: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let obj = this.to_object(context)?;
-    let _slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Method called on incompatible receiver"))?;
+    let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Method called on incompatible receiver"))?;
+    
+    if let Some(ref f) = *slot.format_fn.borrow() {
+        return Ok(f.clone().into());
+    }
+    
     let format_fn = NativeFunction::from_fn_ptr(dtf_format_function);
-    let format_obj = FunctionObjectBuilder::new(context.realm(), format_fn).name(js_string!("")).build();
-    let bind = format_obj.get(js_string!("bind"), context)?.as_object().unwrap().clone();
-    bind.call(&format_obj.into(), &[this.clone()], context)
+    let format_obj = FunctionObjectBuilder::new(context.realm(), format_fn).name(js_string!("")).length(1).build();
+    let bind = format_obj.get(js_string!("bind"), context)?.to_object(context)?;
+    let bound_fn = bind.call(&format_obj.into(), &[this.clone()], context)?.to_object(context)?;
+    
+    bound_fn.define_property_or_throw(js_string!("name"), PropertyDescriptor::builder().value(js_string!("")).writable(false).enumerable(false).configurable(true).build(), context)?;
+    bound_fn.define_property_or_throw(js_string!("length"), PropertyDescriptor::builder().value(1).writable(false).enumerable(false).configurable(true).build(), context)?;
+    
+    *slot.format_fn.borrow_mut() = Some(bound_fn.clone());
+    Ok(bound_fn.into())
 }
 
 fn dtf_format_function(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
@@ -326,15 +519,8 @@ fn dtf_format_function(this: &BoaValue, args: &[BoaValue], context: &mut Context
     let is_zdt = date.as_object().map(|o| { let tag = BoaValue::from(o.clone()).to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped(); tag == "[object Temporal.ZonedDateTime]" }).unwrap_or(false);
     if is_zdt { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.format() does not support Temporal.ZonedDateTime").into()); }
     
-    let helper = context.global_object().get(js_string!("__agentjs_intl_helper"), context)?.as_object().unwrap().clone();
-    let format_fn = helper.get(js_string!("formatDate"), context)?.as_object().unwrap().clone();
-    
-    let mut opt_obj = ObjectInitializer::new(context);
-    opt_obj.property(js_string!("locale"), js_string!(slot.options.locale.as_str()), Attribute::all());
-    if let Some(ref v) = slot.options.era { opt_obj.property(js_string!("era"), js_string!(v.as_str()), Attribute::all()); }
-    
-    let options_val = opt_obj.build();
-    format_fn.call(&helper.into(), &[date.clone(), options_val.into()], context)
+    let format_fn = slot.instance.get(js_string!("format"), context)?.to_object(context)?;
+    format_fn.call(&slot.instance.clone().into(), args, context)
 }
 
 fn dtf_format_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
@@ -343,13 +529,27 @@ fn dtf_format_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context
     let date = args.get_or_undefined(0);
     let is_zdt = date.as_object().map(|o| { let tag = BoaValue::from(o.clone()).to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped(); tag == "[object Temporal.ZonedDateTime]" }).unwrap_or(false);
     if is_zdt { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.formatToParts() does not support Temporal.ZonedDateTime").into()); }
-    let format_to_parts = slot.instance.get(js_string!("formatToParts"), context)?.as_object().unwrap().clone();
+    let format_to_parts = slot.instance.get(js_string!("formatToParts"), context)?.to_object(context)?;
     format_to_parts.call(&slot.instance.clone().into(), args, context)
+}
+
+fn dtf_format_range(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
+    let obj = this.to_object(context)?;
+    let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
+    let format_range = slot.instance.get(js_string!("formatRange"), context)?.to_object(context)?;
+    format_range.call(&slot.instance.clone().into(), args, context)
+}
+
+fn dtf_format_range_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
+    let obj = this.to_object(context)?;
+    let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
+    let format_range_to_parts = slot.instance.get(js_string!("formatRangeToParts"), context)?.to_object(context)?;
+    format_range_to_parts.call(&slot.instance.clone().into(), &[args.get_or_undefined(0).clone(), args.get_or_undefined(1).clone()], context)
 }
 
 fn display_names_constructor(new_target: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     if new_target.is_undefined() { return Err(JsNativeError::typ().with_message("Constructor Intl.DisplayNames requires \"new\"").into()); }
-    let proto = new_target.as_object().unwrap().get(js_string!("prototype"), context)?.to_object(context)?;
+    let proto = get_prototype_from_constructor(new_target, context.intrinsics().constructors().display_names().prototype(), context)?;
     let locales = args.get_or_undefined(0);
     let options_val = args.get_or_undefined(1);
     if options_val.is_undefined() { return Err(JsNativeError::typ().with_message("options argument is required for Intl.DisplayNames").into()); }
@@ -374,6 +574,6 @@ fn display_names_of(this: &BoaValue, args: &[BoaValue], context: &mut Context) -
         for seg in segments { if seg.len() < 3 || seg.len() > 8 || !seg.chars().all(|c| c.is_ascii_alphanumeric()) { valid = false; break; } }
         if !valid { return Err(JsNativeError::range().with_message("Invalid calendar code").into()); }
     }
-    let of_fn: JsObject = slot.instance.get(js_string!("of"), context)?.as_object().unwrap().clone();
+    let of_fn: JsObject = slot.instance.get(js_string!("of"), context)?.to_object(context)?;
     of_fn.call(&slot.instance.clone().into(), args, context)
 }
