@@ -34,12 +34,15 @@ pub(crate) mod date_time_format;
 pub(crate) mod list_format;
 pub(crate) mod locale;
 pub(crate) mod number_format;
+pub(crate) mod relative_time_format;
+pub(crate) mod duration_format;
 pub(crate) mod plural_rules;
 pub(crate) mod segmenter;
 
 pub(crate) use self::{
     collator::Collator, date_time_format::DateTimeFormat, list_format::ListFormat, locale::Locale,
-    number_format::NumberFormat, plural_rules::PluralRules, segmenter::Segmenter,
+    number_format::NumberFormat, relative_time_format::RelativeTimeFormat,
+    duration_format::DurationFormat, plural_rules::PluralRules, segmenter::Segmenter,
 };
 
 mod options;
@@ -50,6 +53,8 @@ mod options;
 const_assert! {!<Collator as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<ListFormat as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<NumberFormat as Service>::LangMarker::INFO.is_singleton}
+const_assert! {!<RelativeTimeFormat as Service>::LangMarker::INFO.is_singleton}
+const_assert! {!<DurationFormat as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<PluralRules as Service>::LangMarker::INFO.is_singleton}
 const_assert! {!<Segmenter as Service>::LangMarker::INFO.is_singleton}
 
@@ -113,6 +118,24 @@ impl IntrinsicObject for Intl {
                     .plural_rules()
                     .constructor(),
                 PluralRules::ATTRIBUTE,
+            )
+            .static_property(
+                RelativeTimeFormat::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .relative_time_format()
+                    .constructor(),
+                RelativeTimeFormat::ATTRIBUTE,
+            )
+            .static_property(
+                DurationFormat::NAME,
+                realm
+                    .intrinsics()
+                    .constructors()
+                    .duration_format()
+                    .constructor(),
+                DurationFormat::ATTRIBUTE,
             )
             .static_property(
                 DateTimeFormat::NAME,

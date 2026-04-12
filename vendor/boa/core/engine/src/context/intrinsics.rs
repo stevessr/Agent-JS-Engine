@@ -181,6 +181,10 @@ pub struct StandardConstructors {
     #[cfg(feature = "intl")]
     plural_rules: StandardConstructor,
     #[cfg(feature = "intl")]
+    relative_time_format: StandardConstructor,
+    #[cfg(feature = "intl")]
+    duration_format: StandardConstructor,
+    #[cfg(feature = "intl")]
     number_format: StandardConstructor,
     #[cfg(feature = "temporal")]
     instant: StandardConstructor,
@@ -274,6 +278,10 @@ impl Default for StandardConstructors {
             segmenter: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             plural_rules: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            relative_time_format: StandardConstructor::default(),
+            #[cfg(feature = "intl")]
+            duration_format: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             number_format: StandardConstructor::default(),
             #[cfg(feature = "temporal")]
@@ -905,6 +913,32 @@ impl StandardConstructors {
     #[cfg(feature = "intl")]
     pub const fn plural_rules(&self) -> &StandardConstructor {
         &self.plural_rules
+    }
+
+    /// Returns the `Intl.RelativeTimeFormat` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/ecma402/#sec-intl-relativetimeformat-constructor
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn relative_time_format(&self) -> &StandardConstructor {
+        &self.relative_time_format
+    }
+
+    /// Returns the `Intl.DurationFormat` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/ecma402/#sec-intl-durationformat-constructor
+    #[inline]
+    #[must_use]
+    #[cfg(feature = "intl")]
+    pub const fn duration_format(&self) -> &StandardConstructor {
+        &self.duration_format
     }
 
     /// Returns the `Intl.NumberFormat` constructor.

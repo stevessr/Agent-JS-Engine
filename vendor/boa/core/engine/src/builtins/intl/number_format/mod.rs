@@ -89,13 +89,96 @@ impl NumberFormat {
             return format!("{formatted}{percent_suffix}");
         }
 
+        if let UnitFormatOptions::Unit { unit, display } = &self.unit_options {
+            let lang = self.locale.id.language.as_str();
+            let is_plural = value.to_string().parse::<f64>().is_ok_and(|v| v.abs() != 1.0);
+            let unit_str = unit.to_js_string().to_std_string_escaped();
+            
+            // Basic manual implementation for en/es common units
+            let label = match (lang, unit_str.as_str(), display) {
+                ("en", "year", UnitDisplay::Long) => if is_plural { "years" } else { "year" },
+                ("en", "year", UnitDisplay::Short) => if is_plural { "yrs" } else { "yr" },
+                ("en", "year", UnitDisplay::Narrow) => "y",
+                ("en", "month", UnitDisplay::Long) => if is_plural { "months" } else { "month" },
+                ("en", "month", UnitDisplay::Short) => if is_plural { "mos" } else { "mo" },
+                ("en", "month", UnitDisplay::Narrow) => "m",
+                ("en", "week", UnitDisplay::Long) => if is_plural { "weeks" } else { "week" },
+                ("en", "week", UnitDisplay::Short) => if is_plural { "wks" } else { "wk" },
+                ("en", "week", UnitDisplay::Narrow) => "w",
+                ("en", "day", UnitDisplay::Long) => if is_plural { "days" } else { "day" },
+                ("en", "day", UnitDisplay::Short) => "day",
+                ("en", "day", UnitDisplay::Narrow) => "d",
+                ("en", "hour", UnitDisplay::Long) => if is_plural { "hours" } else { "hour" },
+                ("en", "hour", UnitDisplay::Short) => if is_plural { "hrs" } else { "hr" },
+                ("en", "hour", UnitDisplay::Narrow) => "h",
+                ("en", "minute", UnitDisplay::Long) => if is_plural { "minutes" } else { "minute" },
+                ("en", "minute", UnitDisplay::Short) => if is_plural { "min" } else { "min" },
+                ("en", "minute", UnitDisplay::Narrow) => "m",
+                ("en", "second", UnitDisplay::Long) => if is_plural { "seconds" } else { "second" },
+                ("en", "second", UnitDisplay::Short) => if is_plural { "sec" } else { "sec" },
+                ("en", "second", UnitDisplay::Narrow) => "s",
+                ("en", "millisecond", UnitDisplay::Long) => if is_plural { "milliseconds" } else { "millisecond" },
+                ("en", "millisecond", UnitDisplay::Short) | ("en", "millisecond", UnitDisplay::Narrow) => "ms",
+                ("en", "microsecond", UnitDisplay::Long) => if is_plural { "microseconds" } else { "microsecond" },
+                ("en", "microsecond", UnitDisplay::Short) | ("en", "microsecond", UnitDisplay::Narrow) => "\u{03BC}s",
+                ("en", "nanosecond", UnitDisplay::Long) => if is_plural { "nanoseconds" } else { "nanosecond" },
+                ("en", "nanosecond", UnitDisplay::Short) | ("en", "nanosecond", UnitDisplay::Narrow) => "ns",
+
+                ("es", "year", UnitDisplay::Long) => if is_plural { "a\u{00F1}os" } else { "a\u{00F1}o" },
+                ("es", "year", UnitDisplay::Short) | ("es", "year", UnitDisplay::Narrow) => "a",
+                ("es", "month", UnitDisplay::Long) => if is_plural { "meses" } else { "mes" },
+                ("es", "month", UnitDisplay::Short) => "mes",
+                ("es", "month", UnitDisplay::Narrow) => "m",
+                ("es", "week", UnitDisplay::Long) => if is_plural { "semanas" } else { "semana" },
+                ("es", "week", UnitDisplay::Short) => "sem.",
+                ("es", "week", UnitDisplay::Narrow) => "s",
+                ("es", "day", UnitDisplay::Long) => if is_plural { "d\u{00ED}as" } else { "d\u{00ED}a" },
+                ("es", "day", UnitDisplay::Short) => if is_plural { "d\u{00ED}as" } else { "d\u{00ED}a" },
+                ("es", "day", UnitDisplay::Narrow) => "d",
+                ("es", "hour", UnitDisplay::Long) => if is_plural { "horas" } else { "hora" },
+                ("es", "hour", UnitDisplay::Short) | ("es", "hour", UnitDisplay::Narrow) => "h",
+                ("es", "minute", UnitDisplay::Long) => if is_plural { "minutos" } else { "minuto" },
+                ("es", "minute", UnitDisplay::Short) => "min",
+                ("es", "minute", UnitDisplay::Narrow) => "min",
+                ("es", "second", UnitDisplay::Long) => if is_plural { "segundos" } else { "segundo" },
+                ("es", "second", UnitDisplay::Short) | ("es", "second", UnitDisplay::Narrow) => "s",
+                ("es", "millisecond", UnitDisplay::Long) => if is_plural { "milisegundos" } else { "milisegundo" },
+                ("es", "millisecond", UnitDisplay::Short) | ("es", "millisecond", UnitDisplay::Narrow) => "ms",
+                ("es", "microsecond", UnitDisplay::Long) => if is_plural { "microsegundos" } else { "microsegundo" },
+                ("es", "microsecond", UnitDisplay::Short) | ("es", "microsecond", UnitDisplay::Narrow) => "\u{03BC}s",
+                ("es", "nanosecond", UnitDisplay::Long) => if is_plural { "nanosegundos" } else { "nanosegundo" },
+                ("es", "nanosecond", UnitDisplay::Short) | ("es", "nanosecond", UnitDisplay::Narrow) => "ns",
+
+                (_, _, _) => {
+                    let mut parts = unit_str.split("-per-");
+                    let numerator = parts.next().unwrap_or(&unit_str);
+                    let denominator = parts.next();
+                    
+                    let mut u = numerator.to_string();
+                    if is_plural && !u.ends_with('s') { u.push('s'); }
+                    
+                    let mut res = format!("{formatted} {u}");
+                    if let Some(den) = denominator {
+                        res.push_str("/");
+                        res.push_str(den);
+                    }
+                    return res;
+                },
+            };
+
+            if matches!(display, UnitDisplay::Narrow) {
+                return format!("{formatted}{label}");
+            }
+            return format!("{formatted} {label}");
+        }
+
         formatted
     }
 }
 
 #[derive(Debug, Clone)]
 pub(super) struct NumberFormatLocaleOptions {
-    numbering_system: Option<Value>,
+    pub(super) numbering_system: Option<Value>,
 }
 
 impl Service for NumberFormat {
