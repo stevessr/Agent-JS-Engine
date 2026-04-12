@@ -214,11 +214,6 @@ fn unsupported_feature(case: &TestCase) -> Option<&'static str> {
         return Some("boa intl: islamic calendar fallback not implemented");
     }
 
-    // Boa Intl bug: Intl.DateTimeFormat doesn't throw for invalid timeZone option
-    if path.contains("intl402/Date/prototype/throws-same-exceptions-as-DateTimeFormat") {
-        return Some("boa intl: DateTimeFormat invalid timeZone option not rejected");
-    }
-
     // Boa TypedArray bug: sort is not stable for Float64Array
     if path.contains("TypedArray/prototype/sort/stability") {
         return Some("boa typedarray: sort stability not guaranteed");

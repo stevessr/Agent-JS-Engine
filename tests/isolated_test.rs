@@ -177,6 +177,42 @@ fn engine_exposes_builtin_error_is_error_and_atomics_pause() {
 }
 
 #[test]
+fn engine_date_locale_methods_throw_same_invalid_timezone_error_as_datetimeformat() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            let ok = true;
+            for (const name of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
+              const fn = Date.prototype[name];
+              let dtfError;
+              let dateError;
+
+              try {
+                new Intl.DateTimeFormat([], { timeZone: 'invalid' });
+              } catch (error) {
+                dtfError = error;
+              }
+
+              try {
+                fn.call(new Date(), [], { timeZone: 'invalid' });
+              } catch (error) {
+                dateError = error;
+              }
+
+              if (!(dtfError instanceof RangeError && dateError instanceof dtfError.constructor)) {
+                ok = false;
+              }
+            }
+            print(String(ok));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["true".to_string()]);
+}
+
+#[test]
 fn engine_exposes_array_from_async() {
     let engine = JsEngine::new();
     let output = engine

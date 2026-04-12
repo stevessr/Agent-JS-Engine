@@ -224,7 +224,6 @@ fn install_host_globals(context: &mut Context) -> boa_engine::JsResult<()> {
     install_reg_exp_legacy_accessors(context)?;
     install_reg_exp_compile_guard(context)?;
     install_reg_exp_escape(context)?;
-    install_array_from_async_builtin(context)?;
     install_array_flat_undefined_fix(context)?;
     install_uint8array_base_encoding_builtins(context)?;
     install_promise_keyed_builtins(context)?;
