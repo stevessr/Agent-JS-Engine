@@ -766,7 +766,7 @@ const fn ascii_digit_to_int(ascii_digit: u8) -> u8 {
     ascii_digit - 48
 }
 
-fn resolve_iso_month(
+pub(crate) fn resolve_iso_month(
     calendar: &Calendar,
     fields: &CalendarFields,
     overflow: Overflow,

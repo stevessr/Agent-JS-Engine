@@ -2516,6 +2516,361 @@ fn engine_supports_top_level_await_in_modules() {
     assert_eq!(output.printed, vec!["42".to_string()]);
 }
 
+#[test]
+fn engine_datetimeformat_falls_back_from_deprecated_islamic_calendars() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const available = new Set([
+              'buddhist', 'chinese', 'coptic', 'dangi', 'ethioaa', 'ethiopic',
+              'gregory', 'hebrew', 'indian', 'islamic-civil', 'islamic-tbla',
+              'islamic-umalqura', 'iso8601', 'japanese', 'persian', 'roc'
+            ]);
+            const values = [
+              new Intl.DateTimeFormat('en', { calendar: 'islamic' }).resolvedOptions().calendar,
+              new Intl.DateTimeFormat('en', { calendar: 'islamic-rgsa' }).resolvedOptions().calendar,
+              new Intl.DateTimeFormat('en-u-ca-islamic').resolvedOptions().calendar,
+              new Intl.DateTimeFormat('en-u-ca-islamic-rgsa').resolvedOptions().calendar,
+            ];
+            print(String(values.every(value => available.has(value))));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["true".to_string()]);
+}
+
+#[test]
+fn engine_plainmonthday_uses_iso_year_only_for_overflow() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const fromValue = Temporal.PlainMonthDay.from({
+              year: -999999,
+              monthCode: 'M02',
+              day: 29,
+            });
+            const withValue = new Temporal.PlainMonthDay(2, 29).with(
+              { year: -999999 },
+              { overflow: 'constrain' }
+            );
+            print(fromValue.toString());
+            print(withValue.toString());
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["02-28".to_string(), "02-28".to_string()]
+    );
+}
+
+#[test]
+fn engine_plaintime_with_reject_throws_on_negative_values() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const values = [
+              { hour: -1 },
+              { minute: -1 },
+              { second: -1 },
+              { millisecond: -1 },
+              { microsecond: -1 },
+              { nanosecond: -1 },
+            ];
+            for (const value of values) {
+              try {
+                new Temporal.PlainTime().with(value, { overflow: 'reject' });
+                print('no');
+              } catch (error) {
+                print(error.name);
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["RangeError".to_string(); 6]);
+}
+
+#[test]
+fn engine_zoneddatetime_invalid_string_beats_bad_options_type() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const badOptions = [null, true, 'some string', Symbol(), 1, 2n];
+            for (const value of badOptions) {
+              try {
+                Temporal.ZonedDateTime.from('1976-11-18Z', value);
+                print('no');
+              } catch (error) {
+                print(error.name);
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["RangeError".to_string(); 6]);
+}
+
+#[test]
+fn engine_zoneddatetime_with_requires_supported_properties() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const value = new Temporal.ZonedDateTime(0n, 'UTC');
+            for (const update of [{}, { months: 12 }]) {
+              try {
+                value.with(update);
+                print('no');
+              } catch (error) {
+                print(error.name);
+              }
+            }
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["TypeError".to_string(), "TypeError".to_string()]
+    );
+}
+
+#[test]
+fn engine_zoneddatetime_differences_handle_epoch_limits() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const max = new Temporal.ZonedDateTime(86400_0000_0000_000_000_000n, 'UTC');
+            const base = new Temporal.PlainDateTime(1970, 1, 1, 1, 1, 1, 1, 1, 1)
+              .toZonedDateTime('UTC');
+            print(Object.prototype.toString.call(base.until(max, { largestUnit: 'years' })));
+            print(Object.prototype.toString.call(base.since(max, { largestUnit: 'years' })));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "[object Temporal.Duration]".to_string(),
+            "[object Temporal.Duration]".to_string()
+        ]
+    );
+}
+
+#[test]
+fn engine_typedarray_sort_with_compare_zero_is_stable() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const compare = (a, b) => (a / 4 | 0) - (b / 4 | 0);
+            const input = Array.from({ length: 16 }, (_, i) => i).reverse();
+            print(JSON.stringify(Array.from(new Float64Array(input).sort(compare))));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["[3,2,1,0,7,6,5,4,11,10,9,8,15,14,13,12]".to_string()]
+    );
+}
+
+#[test]
+fn engine_regexp_named_groups_accept_astral_identifiers_without_unicode_flag() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const match = /(?<𝓓𝓸𝓰>dog)/.exec('dog');
+            print(match.groups['𝓓𝓸𝓰']);
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["dog".to_string()]);
+}
+
+#[test]
+fn engine_installs_iterator_helpers_in_main_realm() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            print(typeof Iterator);
+            print(typeof Iterator.prototype.map);
+            const iter = [].values();
+            const proto = Object.getPrototypeOf(iter);
+            delete proto[Symbol.toStringTag];
+            print(Object.prototype.toString.call(iter));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "function".to_string(),
+            "function".to_string(),
+            "[object Iterator]".to_string()
+        ]
+    );
+}
+
+#[test]
+fn engine_js_defined_builtins_stringify_like_native_functions() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const source = String(FinalizationRegistry);
+            print(String(source.includes('[native code]')));
+            print(String(source.startsWith('function FinalizationRegistry(')));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["true".to_string(), "true".to_string()]
+    );
+}
+
+#[test]
+fn engine_temporal_plain_relative_to_coerces_in_spec_order() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const actual = [];
+            const numberField = (name, value) => ({
+              get() {
+                actual.push(`get ${name}`);
+                return {
+                  valueOf() {
+                    actual.push(`call ${name}.valueOf`);
+                    return value;
+                  }
+                };
+              }
+            });
+            const stringField = (name, value) => ({
+              get() {
+                actual.push(`get ${name}`);
+                return {
+                  toString() {
+                    actual.push(`call ${name}.toString`);
+                    return value;
+                  }
+                };
+              }
+            });
+            const undefinedField = (name) => ({
+              get() {
+                actual.push(`get ${name}`);
+                return undefined;
+              }
+            });
+
+            const relativeTo = {};
+            Object.defineProperties(relativeTo, {
+              calendar: { get() { actual.push('get calendar'); return 'iso8601'; } },
+              day: numberField('day', 2),
+              hour: undefinedField('hour'),
+              microsecond: undefinedField('microsecond'),
+              millisecond: undefinedField('millisecond'),
+              minute: undefinedField('minute'),
+              month: numberField('month', 5),
+              monthCode: stringField('monthCode', 'M05'),
+              nanosecond: undefinedField('nanosecond'),
+              offset: undefinedField('offset'),
+              second: undefinedField('second'),
+              timeZone: undefinedField('timeZone'),
+              year: numberField('year', 2001),
+            });
+
+            new Temporal.Duration(0, 0, 0, 0, 2400).total({
+              relativeTo,
+              unit: 'nanoseconds',
+            });
+
+            print(JSON.stringify(actual));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "[\"get calendar\",\"get day\",\"call day.valueOf\",\"get hour\",\"get microsecond\",\"get millisecond\",\"get minute\",\"get month\",\"call month.valueOf\",\"get monthCode\",\"call monthCode.toString\",\"get nanosecond\",\"get offset\",\"get second\",\"get timeZone\",\"get year\",\"call year.valueOf\"]".to_string()
+        ]
+    );
+}
+
+#[test]
+fn engine_temporal_plaintime_from_reads_fields_before_overflow_option() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const actual = [];
+            const numberField = (name, value) => ({
+              get() {
+                actual.push(`get ${name}`);
+                return {
+                  valueOf() {
+                    actual.push(`call ${name}.valueOf`);
+                    return value;
+                  }
+                };
+              }
+            });
+            const fields = {};
+            Object.defineProperties(fields, {
+              hour: numberField('hour', 1),
+              microsecond: numberField('microsecond', 2),
+              millisecond: numberField('millisecond', 3),
+              minute: numberField('minute', 4),
+              nanosecond: numberField('nanosecond', 5),
+              second: numberField('second', 6),
+            });
+            const options = {};
+            Object.defineProperty(options, 'overflow', {
+              get() {
+                actual.push('get overflow');
+                return {
+                  toString() {
+                    actual.push('call overflow.toString');
+                    return 'constrain';
+                  }
+                };
+              }
+            });
+            Temporal.PlainTime.from(fields, options);
+            print(JSON.stringify(actual));
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "[\"get hour\",\"call hour.valueOf\",\"get microsecond\",\"call microsecond.valueOf\",\"get millisecond\",\"call millisecond.valueOf\",\"get minute\",\"call minute.valueOf\",\"get nanosecond\",\"call nanosecond.valueOf\",\"get second\",\"call second.valueOf\",\"get overflow\",\"call overflow.toString\"]".to_string()
+        ]
+    );
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

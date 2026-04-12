@@ -1837,16 +1837,7 @@ where
         let orig_input = self.input.clone();
         let mut group_name = String::new();
 
-        if let Some(mut c) = self.next().and_then(char::from_u32) {
-            if c == '\\' && self.try_consume('u') {
-                if let Some(escaped) = self.try_escape_unicode_sequence().and_then(char::from_u32) {
-                    c = escaped;
-                } else {
-                    self.input = orig_input;
-                    return None;
-                }
-            }
-
+        if let Some(c) = self.try_consume_named_capture_group_char() {
             if interval_contains(id_start_ranges(), c.into()) || c == '$' || c == '_' {
                 group_name.push(c);
             } else {
@@ -1859,18 +1850,7 @@ where
         }
 
         loop {
-            if let Some(mut c) = self.next().and_then(char::from_u32) {
-                if c == '\\' && self.try_consume('u') {
-                    if let Some(escaped) =
-                        self.try_escape_unicode_sequence().and_then(char::from_u32)
-                    {
-                        c = escaped;
-                    } else {
-                        self.input = orig_input;
-                        return None;
-                    }
-                }
-
+            if let Some(c) = self.try_consume_named_capture_group_char() {
                 if c == '>' {
                     break;
                 }
@@ -1890,6 +1870,36 @@ where
         }
 
         Some(group_name)
+    }
+
+    fn try_consume_named_capture_group_char(&mut self) -> Option<char> {
+        let mut value = self.next()?;
+        if value == u32::from('\\') && self.try_consume('u') {
+            value = self.try_escape_unicode_sequence()?;
+        }
+
+        if (0xD800..=0xDBFF).contains(&value) {
+            let next = self.next()?;
+            let low = if next == u32::from('\\') && self.try_consume('u') {
+                self.try_escape_unicode_sequence()?
+            } else {
+                next
+            };
+
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return None;
+            }
+
+            return char::decode_utf16([value as u16, low as u16])
+                .next()
+                .and_then(Result::ok);
+        }
+
+        if (0xDC00..=0xDFFF).contains(&value) {
+            return None;
+        }
+
+        char::from_u32(value)
     }
 
     // Quickly parse all capture groups.

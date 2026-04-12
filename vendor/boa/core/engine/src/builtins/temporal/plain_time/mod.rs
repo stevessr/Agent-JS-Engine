@@ -909,9 +909,10 @@ pub(crate) fn to_temporal_time(
             // e. Set result to ? RegulateTime(result.[[Hour]], result.[[Minute]],
             // result.[[Second]], result.[[Millisecond]], result.[[Microsecond]],
             // result.[[Nanosecond]], overflow).
+            let partial = to_partial_time_record_unregulated(&object, context)?;
             let options = get_options_object(options)?;
             let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
-            let partial = to_partial_time_record(&object, overflow, context)?;
+            let partial = regulate_partial_time_record(partial, overflow)?;
 
             PlainTimeInner::from_partial(partial, overflow).map_err(Into::into)
         }
@@ -933,6 +934,101 @@ pub(crate) fn to_temporal_time(
     }
 
     // 4. Return ! CreateTemporalTime(result.[[Hour]], result.[[Minute]], result.[[Second]], result.[[Millisecond]], result.[[Microsecond]], result.[[Nanosecond]]).
+}
+
+#[derive(Debug, Default)]
+struct RawPartialTime {
+    hour: Option<i64>,
+    minute: Option<i64>,
+    second: Option<i64>,
+    millisecond: Option<i64>,
+    microsecond: Option<i64>,
+    nanosecond: Option<i64>,
+}
+
+fn get_raw_time_field(
+    partial_object: &JsObject,
+    key: JsString,
+    context: &mut Context,
+) -> JsResult<Option<i64>> {
+    partial_object
+        .get(key, context)?
+        .map(|v| {
+            let finite = v.to_finitef64(context)?;
+            Ok::<i64, JsError>(finite.as_integer_with_truncation::<i64>())
+        })
+        .transpose()
+}
+
+fn regulate_time_field_u8(value: Option<i64>, max: i64, overflow: Option<Overflow>) -> JsResult<Option<u8>> {
+    value
+        .map(|int| match overflow.unwrap_or(Overflow::Constrain) {
+            Overflow::Constrain => Ok::<u8, JsError>(int.clamp(0, max) as u8),
+            Overflow::Reject => {
+                if !(0..=max).contains(&int) {
+                    return Err(JsNativeError::range()
+                        .with_message("invalid time field")
+                        .into());
+                }
+                Ok(int as u8)
+            }
+        })
+        .transpose()
+}
+
+fn regulate_time_field_u16(
+    value: Option<i64>,
+    max: i64,
+    overflow: Option<Overflow>,
+) -> JsResult<Option<u16>> {
+    value
+        .map(|int| match overflow.unwrap_or(Overflow::Constrain) {
+            Overflow::Constrain => Ok::<u16, JsError>(int.clamp(0, max) as u16),
+            Overflow::Reject => {
+                if !(0..=max).contains(&int) {
+                    return Err(JsNativeError::range()
+                        .with_message("invalid time field")
+                        .into());
+                }
+                Ok(int as u16)
+            }
+        })
+        .transpose()
+}
+
+fn to_partial_time_record_unregulated(
+    partial_object: &JsObject,
+    context: &mut Context,
+) -> JsResult<RawPartialTime> {
+    let hour = get_raw_time_field(partial_object, js_string!("hour"), context)?;
+    let microsecond = get_raw_time_field(partial_object, js_string!("microsecond"), context)?;
+    let millisecond = get_raw_time_field(partial_object, js_string!("millisecond"), context)?;
+    let minute = get_raw_time_field(partial_object, js_string!("minute"), context)?;
+    let nanosecond = get_raw_time_field(partial_object, js_string!("nanosecond"), context)?;
+    let second = get_raw_time_field(partial_object, js_string!("second"), context)?;
+
+    Ok(RawPartialTime {
+        hour,
+        minute,
+        second,
+        millisecond,
+        microsecond,
+        nanosecond,
+    })
+}
+
+fn regulate_partial_time_record(
+    partial: RawPartialTime,
+    overflow: Option<Overflow>,
+) -> JsResult<PartialTime> {
+    Ok(PartialTime {
+        hour: regulate_time_field_u8(partial.hour, 23, overflow)?,
+        minute: regulate_time_field_u8(partial.minute, 59, overflow)?,
+        second: regulate_time_field_u8(partial.second, 59, overflow)?,
+        millisecond: regulate_time_field_u16(partial.millisecond, 999, overflow)?,
+        microsecond: regulate_time_field_u16(partial.microsecond, 999, overflow)?,
+        nanosecond: regulate_time_field_u16(partial.nanosecond, 999, overflow)?,
+    })
 }
 
 fn get_time_field_u8(

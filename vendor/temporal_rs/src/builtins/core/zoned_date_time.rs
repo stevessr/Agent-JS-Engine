@@ -16,7 +16,7 @@ use crate::{
             Duration, Instant, PlainDate, PlainDateTime, PlainTime,
         },
     },
-    error::ErrorMessage,
+    error::{ErrorKind, ErrorMessage},
     iso::{IsoDate, IsoDateTime, IsoTime},
     options::{
         DifferenceOperation, DifferenceSettings, Disambiguation, DisplayCalendar, DisplayOffset,
@@ -731,6 +731,12 @@ impl ZonedDateTime {
         overflow: Option<Overflow>,
         provider: &impl TimeZoneProvider,
     ) -> TemporalResult<Self> {
+        if fields.is_empty() {
+            return Err(
+                TemporalError::r#type()
+                    .with_message("ZonedDateTime.with requires at least one supported property."),
+            );
+        }
         let overflow = overflow.unwrap_or_default();
         let disambiguation = disambiguation.unwrap_or_default();
         let offset_option = offset_option.unwrap_or(OffsetDisambiguation::Reject);
@@ -1171,7 +1177,19 @@ impl ZonedDateTime {
         options: DifferenceSettings,
         provider: &impl TimeZoneProvider,
     ) -> TemporalResult<Duration> {
-        self.diff_internal_with_provider(DifferenceOperation::Since, other, options, provider)
+        match self.diff_internal_with_provider(DifferenceOperation::Since, other, options, provider)
+        {
+            Ok(result) => Ok(result),
+            Err(err)
+                if err.kind() == ErrorKind::Range
+                    && err.into_message() == ErrorMessage::DateOutOfRange.to_string() =>
+            {
+                other
+                    .diff_internal_with_provider(DifferenceOperation::Until, self, options, provider)
+                    .map(|duration| duration.negated())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Returns a [`Duration`] representing the period of time from this `ZonedDateTime` since the other `ZonedDateTime`.
@@ -1181,7 +1199,19 @@ impl ZonedDateTime {
         options: DifferenceSettings,
         provider: &impl TimeZoneProvider,
     ) -> TemporalResult<Duration> {
-        self.diff_internal_with_provider(DifferenceOperation::Until, other, options, provider)
+        match self.diff_internal_with_provider(DifferenceOperation::Until, other, options, provider)
+        {
+            Ok(result) => Ok(result),
+            Err(err)
+                if err.kind() == ErrorKind::Range
+                    && err.into_message() == ErrorMessage::DateOutOfRange.to_string() =>
+            {
+                other
+                    .diff_internal_with_provider(DifferenceOperation::Since, self, options, provider)
+                    .map(|duration| duration.negated())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Return a `ZonedDateTime` representing the start of the day

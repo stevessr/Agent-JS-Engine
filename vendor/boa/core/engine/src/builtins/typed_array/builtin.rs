@@ -3164,6 +3164,9 @@ fn compare_typed_array_elements(
         }
 
         // c. Return v.
+        if v == 0.0 {
+            return Ok(cmp::Ordering::Equal);
+        }
         if v.is_sign_positive() {
             return Ok(cmp::Ordering::Greater);
         }
