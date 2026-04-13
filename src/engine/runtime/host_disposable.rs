@@ -55,28 +55,19 @@ fn host_async_disposable_stack_use(
             .with_message("AsyncDisposableStack.prototype.use requires an object value")
     })?;
 
-    let symbol_ctor = context.intrinsics().constructors().symbol().constructor();
-    let for_method = symbol_ctor.get(js_string!("for"), context)?;
-    let async_dispose_symbol = for_method
-        .as_callable()
-        .unwrap()
-        .call(
-            &symbol_ctor.clone().into(),
-            &[js_string!("Symbol.asyncDispose").into()],
-            context,
-        )?;
+    let symbol_obj = context
+        .global_object()
+        .get(js_string!("Symbol"), context)?
+        .as_object()
+        .expect("Global Symbol object is missing")
+        .clone();
+
+    let async_dispose_symbol = symbol_obj.get(js_string!("asyncDispose"), context)?;
     let mut method = value_obj.get(async_dispose_symbol.to_property_key(context)?, context)?;
     let mut needs_await = true;
 
     if method.is_undefined() {
-        let dispose_symbol = for_method
-            .as_callable()
-            .unwrap()
-            .call(
-                &symbol_ctor.into(),
-                &[js_string!("Symbol.dispose").into()],
-                context,
-            )?;
+        let dispose_symbol = symbol_obj.get(js_string!("dispose"), context)?;
         method = value_obj.get(dispose_symbol.to_property_key(context)?, context)?;
         needs_await = false;
     }
@@ -467,16 +458,14 @@ fn host_disposable_stack_use(
             .with_message("DisposableStack.prototype.use requires an object value")
     })?;
 
-    let symbol_ctor = context.intrinsics().constructors().symbol().constructor();
-    let for_method = symbol_ctor.get(js_string!("for"), context)?;
-    let dispose_symbol = for_method
-        .as_callable()
-        .unwrap()
-        .call(
-            &symbol_ctor.into(),
-            &[js_string!("Symbol.dispose").into()],
-            context,
-        )?;
+    let symbol_obj = context
+        .global_object()
+        .get(js_string!("Symbol"), context)?
+        .as_object()
+        .expect("Global Symbol object is missing")
+        .clone();
+
+    let dispose_symbol = symbol_obj.get(js_string!("dispose"), context)?;
     let method = value_obj.get(dispose_symbol.to_property_key(context)?, context)?;
     if !method.is_callable() {
         return Err(JsNativeError::typ()
@@ -793,32 +782,32 @@ fn host_promise_all_keyed(
     };
 
     let items = args.get_or_undefined(0);
-    if items.is_null() || items.is_undefined() {
+    if !items.is_object() {
+        let reject_val = promise_constructor.get(js_string!("reject"), context)?;
+        if let Some(reject_fn) = reject_val.as_object() {
+            let error = JsNativeError::typ()
+                .with_message("Promise keyed methods require an object argument")
+                .to_opaque(context);
+            return reject_fn.call(&promise_constructor.into(), &[error.into()], context);
+        }
         return Err(JsNativeError::typ()
             .with_message("Promise keyed methods require an object argument")
             .into());
     }
-    let dictionary = items.to_object(context)?;
-    let object_ctor = context.intrinsics().constructors().object().constructor();
-    let keys_method = object_ctor.get(js_string!("keys"), context)?;
-    let keys_val = if let Some(callable) = keys_method.as_object() {
-        callable.call(&object_ctor.into(), &[items.clone()], context)?
-    } else {
-        return Err(JsNativeError::typ().with_message("Object.keys is not callable").into());
-    };
-    let keys_obj = keys_val.as_object().ok_or_else(|| {
-        JsNativeError::typ().with_message("Object.keys must return an object")
-    })?;
-    let keys_array = JsArray::from_object(keys_obj.clone())?;
-    let keys_len = keys_array.length(context)?;
 
-    let mut values = Vec::with_capacity(keys_len as usize);
-    let mut keys_values = Vec::with_capacity(keys_len as usize);
-    for i in 0..keys_len {
-        let key_val = keys_array.at(i as i64, context)?;
-        let key = key_val.to_property_key(context)?;
-        keys_values.push(key_val.clone());
-        values.push(dictionary.get(key, context)?);
+    let dictionary = items.as_object().expect("already checked");
+    let all_keys = dictionary.own_property_keys(context)?;
+    let mut keys_values = Vec::new();
+    let mut values = Vec::new();
+
+    for key in all_keys {
+        let desc = dictionary.borrow().properties().get(&key);
+        if let Some(desc) = desc {
+            if desc.enumerable().unwrap_or(false) {
+                keys_values.push(key.clone().into());
+                values.push(dictionary.get(key, context)?);
+            }
+        }
     }
 
     let values_array = JsArray::from_iter(values, context);
@@ -839,7 +828,7 @@ fn host_promise_all_keyed(
     let promise = JsPromise::from_object(promise_obj.clone())?;
 
     let on_fulfilled = NativeFunction::from_copy_closure_with_captures(
-        move |_this, args, captures, context| {
+        move |_this, args: &[BoaValue], captures: &Vec<BoaValue>, context| {
             let results = args.get_or_undefined(0);
             let results_obj = results.as_object().ok_or_else(|| {
                 JsNativeError::typ().with_message("Promise.all result must be an object")
@@ -881,32 +870,32 @@ fn host_promise_all_settled_keyed(
     };
 
     let items = args.get_or_undefined(0);
-    if items.is_null() || items.is_undefined() {
+    if !items.is_object() {
+        let reject_val = promise_constructor.get(js_string!("reject"), context)?;
+        if let Some(reject_fn) = reject_val.as_object() {
+            let error = JsNativeError::typ()
+                .with_message("Promise keyed methods require an object argument")
+                .to_opaque(context);
+            return reject_fn.call(&promise_constructor.into(), &[error.into()], context);
+        }
         return Err(JsNativeError::typ()
             .with_message("Promise keyed methods require an object argument")
             .into());
     }
-    let dictionary = items.to_object(context)?;
-    let object_ctor = context.intrinsics().constructors().object().constructor();
-    let keys_method = object_ctor.get(js_string!("keys"), context)?;
-    let keys_val = if let Some(callable) = keys_method.as_object() {
-        callable.call(&object_ctor.into(), &[items.clone()], context)?
-    } else {
-        return Err(JsNativeError::typ().with_message("Object.keys is not callable").into());
-    };
-    let keys_obj = keys_val.as_object().ok_or_else(|| {
-        JsNativeError::typ().with_message("Object.keys must return an object")
-    })?;
-    let keys_array = JsArray::from_object(keys_obj.clone())?;
-    let keys_len = keys_array.length(context)?;
 
-    let mut values = Vec::with_capacity(keys_len as usize);
-    let mut keys_values = Vec::with_capacity(keys_len as usize);
-    for i in 0..keys_len {
-        let key_val = keys_array.at(i as i64, context)?;
-        let key = key_val.to_property_key(context)?;
-        keys_values.push(key_val.clone());
-        values.push(dictionary.get(key, context)?);
+    let dictionary = items.as_object().expect("already checked");
+    let all_keys = dictionary.own_property_keys(context)?;
+    let mut keys_values = Vec::new();
+    let mut values = Vec::new();
+
+    for key in all_keys {
+        let desc = dictionary.borrow().properties().get(&key);
+        if let Some(desc) = desc {
+            if desc.enumerable().unwrap_or(false) {
+                keys_values.push(key.clone().into());
+                values.push(dictionary.get(key, context)?);
+            }
+        }
     }
 
     let values_array = JsArray::from_iter(values, context);
@@ -927,7 +916,7 @@ fn host_promise_all_settled_keyed(
     let promise = JsPromise::from_object(promise_obj.clone())?;
 
     let on_fulfilled = NativeFunction::from_copy_closure_with_captures(
-        move |_this, args, captures, context| {
+        move |_this, args: &[BoaValue], captures: &Vec<BoaValue>, context| {
             let results = args.get_or_undefined(0);
             let results_obj = results.as_object().ok_or_else(|| {
                 JsNativeError::typ().with_message("Promise.allSettled result must be an object")

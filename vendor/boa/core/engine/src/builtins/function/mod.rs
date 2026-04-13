@@ -992,6 +992,32 @@ pub(crate) fn set_function_name(
     context: &mut Context,
 ) {
     // 1. Assert: F is an extensible object that does not have a "name" own property.
+    //
+    // Some call sites (for example anonymous default-exported class expressions)
+    // can conservatively route through this helper even when the function/class
+    // already created its own `"name"` property, such as via a static `name`
+    // class element. In that case we must preserve the existing property.
+    //
+    // However, anonymous function/class creation in Boa may materialize a
+    // placeholder empty-string own `"name"` property before the final
+    // SetFunctionName step. That placeholder must still be overwritten by the
+    // requested spec name (for example `"default"` for anonymous default
+    // exports).
+    if function
+        .has_own_property(js_string!("name"), context)
+        .expect("checking the `name` property must not fail per the spec")
+    {
+        let existing_name = function
+            .get(js_string!("name"), context)
+            .expect("reading the `name` property must not fail per the spec");
+        let has_placeholder_name = existing_name
+            .as_string()
+            .is_some_and(|s| s.is_empty());
+        if !has_placeholder_name {
+            return;
+        }
+    }
+
     // 2. If Type(name) is Symbol, then
     let mut name = match name {
         PropertyKey::Symbol(sym) => {
