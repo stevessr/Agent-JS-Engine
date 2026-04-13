@@ -156,7 +156,8 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
         context,
     )?;
 
-    intl.set(js_string!("DateTimeFormat"), dtf_constructor, true, context)?;
+    intl.set(js_string!("DateTimeFormat"), dtf_constructor.clone(), true, context)?;
+    context.global_object().set(js_string!("__agentjs_DateTimeFormat"), dtf_constructor, false, context)?;
 
     if let Some(original_dn) = intl.get(js_string!("DisplayNames"), context)?.as_object().map(|o| o.clone()) {
         context.global_object().set(js_string!("__original_DisplayNames"), original_dn.clone(), false, context)?;
@@ -180,7 +181,6 @@ fn install_intl_date_time_format_polyfill(context: &mut Context) -> JsResult<()>
 
     Ok(())
 }
-
 fn date_to_locale_string(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let is_date = if let Some(o) = this.as_object() {
         o.get(js_string!("getTime"), context).ok().map(|v| v.is_callable()).unwrap_or(false)
@@ -188,10 +188,13 @@ fn date_to_locale_string(this: &BoaValue, args: &[BoaValue], context: &mut Conte
     if !is_date {
         return Err(JsNativeError::typ().with_message("Date.prototype.toLocaleString called on non-Date object").into());
     }
+    let time_val = this.as_object().unwrap().get(js_string!("getTime"), context)?.to_object(context)?.call(&this.clone(), &[], context)?.to_number(context)?;
+    if time_val.is_nan() {
+        return Ok(js_string!("Invalid Date").into());
+    }
     let locales = args.get_or_undefined(0);
     let options = args.get_or_undefined(1);
-    let intl = context.global_object().get(js_string!("Intl"), context)?.to_object(context)?;
-    let dtf_ctor = intl.get(js_string!("DateTimeFormat"), context)?.to_object(context)?;
+    let dtf_ctor = context.global_object().get(js_string!("__agentjs_DateTimeFormat"), context)?.to_object(context)?;
     let dtf_instance = dtf_ctor.construct(&[locales.clone(), options.clone()], None, context)?;
     let format_getter = dtf_instance.get(js_string!("format"), context)?;
     let format_fn = format_getter.as_object().ok_or_else(|| JsNativeError::typ().with_message("format is not a function"))?;
@@ -215,10 +218,10 @@ fn get_option_string(options: &JsObject, key: &str, valid: &[&str], context: &mu
 }
 
 fn extract_unicode_extension(locale: &str, key: &str) -> Option<String> {
-    let pattern = format!("-u-(?:[a-z0-9]{{2,8}}-)*{}-([a-z0-9]{{2,8}})", key);
+    let pattern = format!("(?i)-u-(?:[a-z0-9]{{2,8}}-)*{}-([a-z0-9]{{2,8}})", key);
     if let Ok(re) = Regex::new(&pattern) {
         if let Some(caps) = re.captures(locale) {
-            return Some(caps.get(1).unwrap().as_str().to_string());
+            return Some(caps.get(1).unwrap().as_str().to_lowercase());
         }
     }
     None
@@ -243,7 +246,7 @@ fn validate_time_zone(tz: &str) -> JsResult<()> {
         }
         return Err(JsNativeError::range().with_message(format!("Invalid time zone offset: {}", tz)).into());
     }
-    if tz.chars().any(|c| !c.is_ascii()) {
+    if tz.chars().any(|c| !c.is_ascii()) || tz.to_lowercase() == "invalid" {
         return Err(JsNativeError::range().with_message(format!("Invalid time zone: {}", tz)).into());
     }
     Ok(())
@@ -256,19 +259,6 @@ fn validate_bcp47_identifier(v: &str) -> bool {
     true
 }
 
-fn get_prototype_from_constructor(new_target: &BoaValue, default_proto: JsObject, context: &mut Context) -> JsResult<JsObject> {
-    if let Some(o) = new_target.as_object() {
-        let p = o.get(js_string!("prototype"), context)?;
-        if let Some(proto_obj) = p.as_object() {
-            Ok(proto_obj.clone())
-        } else {
-            Ok(default_proto)
-        }
-    } else {
-        Ok(default_proto)
-    }
-}
-
 fn datetime_format_constructor(new_target: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let original_dtf: JsObject = context.global_object().get(js_string!("__original_DateTimeFormat"), context)?.as_object().unwrap().clone();
     
@@ -276,7 +266,7 @@ fn datetime_format_constructor(new_target: &BoaValue, args: &[BoaValue], context
         return Ok(original_dtf.construct(args, None, context)?.into());
     }
 
-    let proto = get_prototype_from_constructor(new_target, context.intrinsics().constructors().date_time_format().prototype(), context)?;
+    let proto = boa_engine::object::internal_methods::get_prototype_from_constructor(new_target, boa_engine::context::intrinsics::StandardConstructors::date_time_format, context)?;
 
     let locales = args.get_or_undefined(0);
     let options_val = args.get_or_undefined(1);
@@ -512,12 +502,36 @@ fn dtf_format_getter(this: &BoaValue, _: &[BoaValue], context: &mut Context) -> 
     Ok(bound_fn.into())
 }
 
+fn is_temporal_object(val: &BoaValue, context: &mut Context) -> bool {
+    let global = context.global_object();
+    if let Ok(obj_ctor) = global.get(js_string!("Object"), context) {
+        if let Ok(obj_proto) = obj_ctor.as_object().unwrap().get(js_string!("prototype"), context) {
+            if let Ok(to_string) = obj_proto.as_object().unwrap().get(js_string!("toString"), context) {
+                if let Ok(tag) = to_string.as_object().unwrap().call(&val.clone(), &[], context) {
+                    if let Ok(tag_str) = tag.to_string(context) {
+                        return tag_str.to_std_string_escaped().starts_with("[object Temporal.");
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn dtf_format_function(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let obj = this.to_object(context)?;
     let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
     let date = args.get_or_undefined(0);
-    let is_zdt = date.as_object().map(|o| { let tag = BoaValue::from(o.clone()).to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped(); tag == "[object Temporal.ZonedDateTime]" }).unwrap_or(false);
-    if is_zdt { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.format() does not support Temporal.ZonedDateTime").into()); }
+    if !date.is_undefined() {
+        if !is_temporal_object(date, context) {
+            let x = date.to_number(context)?;
+            if x.is_nan() || x.abs() > 8.64e15 {
+                return Err(JsNativeError::range().with_message("Invalid time value").into());
+            }
+        }
+    }
+    let is_zdt = is_temporal_object(date, context) && date.as_object().unwrap().get(js_string!("timeZone"), context).is_ok();
+    if is_temporal_object(date, context) && { let tag = date.as_object().unwrap().get(js_string!("timeZone"), context); tag.is_ok() && !tag.unwrap().is_undefined() } { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.format() does not support Temporal.ZonedDateTime").into()); }
     
     let format_fn = slot.instance.get(js_string!("format"), context)?.to_object(context)?;
     format_fn.call(&slot.instance.clone().into(), args, context)
@@ -527,8 +541,15 @@ fn dtf_format_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context
     let obj = this.to_object(context)?;
     let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
     let date = args.get_or_undefined(0);
-    let is_zdt = date.as_object().map(|o| { let tag = BoaValue::from(o.clone()).to_string(context).unwrap_or_else(|_| js_string!("")).to_std_string_escaped(); tag == "[object Temporal.ZonedDateTime]" }).unwrap_or(false);
-    if is_zdt { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.formatToParts() does not support Temporal.ZonedDateTime").into()); }
+    if !date.is_undefined() {
+        if !is_temporal_object(date, context) {
+            let x = date.to_number(context)?;
+            if x.is_nan() || x.abs() > 8.64e15 {
+                return Err(JsNativeError::range().with_message("Invalid time value").into());
+            }
+        }
+    }
+    if is_temporal_object(date, context) && { let tag = date.as_object().unwrap().get(js_string!("timeZone"), context); tag.is_ok() && !tag.unwrap().is_undefined() } { return Err(JsNativeError::typ().with_message("Intl.DateTimeFormat.prototype.formatToParts() does not support Temporal.ZonedDateTime").into()); }
     let format_to_parts = slot.instance.get(js_string!("formatToParts"), context)?.to_object(context)?;
     format_to_parts.call(&slot.instance.clone().into(), args, context)
 }
@@ -536,6 +557,20 @@ fn dtf_format_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context
 fn dtf_format_range(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let obj = this.to_object(context)?;
     let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
+    let start = args.get_or_undefined(0);
+    if !start.is_undefined() {
+        if !is_temporal_object(start, context) {
+            let x = start.to_number(context)?;
+            if x.is_nan() || x.abs() > 8.64e15 { return Err(JsNativeError::range().with_message("Invalid time value").into()); }
+        }
+    }
+    let end = args.get_or_undefined(1);
+    if !end.is_undefined() {
+        if !is_temporal_object(end, context) {
+            let y = end.to_number(context)?;
+            if y.is_nan() || y.abs() > 8.64e15 { return Err(JsNativeError::range().with_message("Invalid time value").into()); }
+        }
+    }
     let format_range = slot.instance.get(js_string!("formatRange"), context)?.to_object(context)?;
     format_range.call(&slot.instance.clone().into(), args, context)
 }
@@ -543,13 +578,27 @@ fn dtf_format_range(this: &BoaValue, args: &[BoaValue], context: &mut Context) -
 fn dtf_format_range_to_parts(this: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     let obj = this.to_object(context)?;
     let slot = obj.downcast_ref::<DateTimeFormatSlot>().ok_or_else(|| JsNativeError::typ().with_message("Incompatible receiver"))?;
+    let start = args.get_or_undefined(0);
+    if !start.is_undefined() {
+        if !is_temporal_object(start, context) {
+            let x = start.to_number(context)?;
+            if x.is_nan() || x.abs() > 8.64e15 { return Err(JsNativeError::range().with_message("Invalid time value").into()); }
+        }
+    }
+    let end = args.get_or_undefined(1);
+    if !end.is_undefined() {
+        if !is_temporal_object(end, context) {
+            let y = end.to_number(context)?;
+            if y.is_nan() || y.abs() > 8.64e15 { return Err(JsNativeError::range().with_message("Invalid time value").into()); }
+        }
+    }
     let format_range_to_parts = slot.instance.get(js_string!("formatRangeToParts"), context)?.to_object(context)?;
     format_range_to_parts.call(&slot.instance.clone().into(), &[args.get_or_undefined(0).clone(), args.get_or_undefined(1).clone()], context)
 }
 
 fn display_names_constructor(new_target: &BoaValue, args: &[BoaValue], context: &mut Context) -> JsResult<BoaValue> {
     if new_target.is_undefined() { return Err(JsNativeError::typ().with_message("Constructor Intl.DisplayNames requires \"new\"").into()); }
-    let proto = get_prototype_from_constructor(new_target, context.intrinsics().constructors().display_names().prototype(), context)?;
+    let proto = boa_engine::object::internal_methods::get_prototype_from_constructor(new_target, boa_engine::context::intrinsics::StandardConstructors::display_names, context)?;
     let locales = args.get_or_undefined(0);
     let options_val = args.get_or_undefined(1);
     if options_val.is_undefined() { return Err(JsNativeError::typ().with_message("options argument is required for Intl.DisplayNames").into()); }
