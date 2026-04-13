@@ -599,14 +599,9 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         .get(js_string!("dispose"), context)?
         .is_undefined()
     {
-        let sym = for_method
-            .as_callable()
-            .unwrap()
-            .call(
-                &symbol_ctor.clone().into(),
-                &[js_string!("Symbol.dispose").into()],
-                context,
-            )?;
+        let sym: BoaValue = JsSymbol::new(Some(js_string!("Symbol.dispose")))
+            .expect("Symbol.dispose must be created")
+            .into();
         symbol_obj.define_property_or_throw(
             js_string!("dispose"),
             PropertyDescriptor::builder()
@@ -625,14 +620,9 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         .get(js_string!("asyncDispose"), context)?
         .is_undefined()
     {
-        let sym = for_method
-            .as_callable()
-            .unwrap()
-            .call(
-                &symbol_ctor.into(),
-                &[js_string!("Symbol.asyncDispose").into()],
-                context,
-            )?;
+        let sym: BoaValue = JsSymbol::new(Some(js_string!("Symbol.asyncDispose")))
+            .expect("Symbol.asyncDispose must be created")
+            .into();
         symbol_obj.define_property_or_throw(
             js_string!("asyncDispose"),
             PropertyDescriptor::builder()
