@@ -60,6 +60,7 @@
    - deferred namespace 现在使用原生 target metadata + Proxy trap 组合，补上 `[[GetPrototypeOf]]` / `[[IsExtensible]]` / `[[OwnPropertyKeys]]` / `[[GetOwnProperty]]` / `[[HasProperty]]` / `[[SetPrototypeOf]]` / `[[PreventExtensions]]` 这些 exotic object 子集行为
    - `import.defer("./x.js")` 现在真实走 deferred resource loader，并和静态 deferred import 共享 wrapper module 缓存
    - 增加保守版 `ReadyForSyncExecution` 宿主预检查：通过当前执行栈路径和静态依赖图，阻止同步 re-entrancy 场景提前触发错误模块的求值
+   - 增加 host 级“活动模块求值”跟踪，并修正 deferred 依赖图扫描对同一行多个 `import` / `export ... from` 语句的识别；现在 `get-other-while-dep-evaluating` 这类循环图场景会在真正触发第三方依赖求值前同步抛出 `TypeError`
    - runner 对 `import-defer` 相关目录已做完整目录级回归，包含 `evaluation-top-level-await` 组
    - 修正 async module harness 拼接：在 module case 中把 `$DONE` 显式挂到 `globalThis`，让 `asyncHelpers.js` 在 ESM 里也能工作
    - 给 deferred namespace 加了最小 recursion / re-entry 防护，避免自引用 import defer 直接把 runtime 带进无限递归
@@ -73,6 +74,7 @@
      - `test/language/import/import-defer/evaluation-sync/`：`2 / 2` 通过
      - `test/language/import/import-defer/errors/module-throws/`：`3 / 3` 通过
      - `test/language/import/import-defer/errors/get-*.js` 同步子组：`4 / 4` 通过
+     - `test/language/import/import-defer/errors/get-other-while-dep-evaluating/main.js`：`1 / 1` 通过
 14. 启用 Boa 原生 `Temporal`：
    - 在 `Cargo.toml` 为 `boa_engine` 打开 `temporal` feature
    - 确认现有 `Context::builder().build()` / `create_realm()` 路径会自动初始化 Temporal builtins，无需额外 provider wiring

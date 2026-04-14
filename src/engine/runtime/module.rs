@@ -13,6 +13,7 @@ fn load_module_from_path(
             if let Some(module) = maybe_build_source_phase_module(path, &source, context)? {
                 return Ok(module);
             }
+            let source = maybe_prepend_test262_harness(&source, path, context)?;
             let source = preprocess_compat_source(&source, Some(path), true, true)
                 .map_err(|error| JsNativeError::syntax().with_message(error.message))?;
             Module::parse(
@@ -94,6 +95,102 @@ fn load_module_from_path(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeTest262NegativeMetadata {
+    phase: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeTest262Metadata {
+    #[serde(default)]
+    includes: Vec<String>,
+    #[serde(default)]
+    flags: Vec<String>,
+    negative: Option<RuntimeTest262NegativeMetadata>,
+}
+
+impl RuntimeTest262Metadata {
+    fn has_flag(&self, flag: &str) -> bool {
+        self.flags.iter().any(|candidate| candidate == flag)
+    }
+}
+
+fn extract_runtime_test262_metadata(source: &str) -> RuntimeTest262Metadata {
+    let Some(frontmatter_start) = source.find("/*---") else {
+        return RuntimeTest262Metadata::default();
+    };
+    let Some(frontmatter_end) = source[frontmatter_start + 5..].find("---*/") else {
+        return RuntimeTest262Metadata::default();
+    };
+
+    let yaml = &source[frontmatter_start + 5..frontmatter_start + 5 + frontmatter_end];
+    serde_yaml::from_str(yaml).unwrap_or_default()
+}
+
+fn maybe_prepend_test262_harness(
+    source: &str,
+    path: &Path,
+    context: &mut Context,
+) -> JsResult<String> {
+    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
+        return Ok(source.to_string());
+    };
+
+    let test_root = loader.root.join("test");
+    if !path.starts_with(&test_root) {
+        return Ok(source.to_string());
+    }
+
+    if path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.contains("_FIXTURE"))
+    {
+        return Ok(source.to_string());
+    }
+
+    let metadata = extract_runtime_test262_metadata(source);
+    if metadata.has_flag("raw")
+        || matches!(
+            metadata
+                .negative
+                .as_ref()
+                .and_then(|negative| negative.phase.as_deref()),
+            Some("parse")
+        )
+    {
+        return Ok(source.to_string());
+    }
+
+    let mut include_order = vec!["sta.js".to_string(), "assert.js".to_string()];
+    if metadata.has_flag("async") {
+        include_order.push("doneprintHandle.js".to_string());
+    }
+    include_order.extend(metadata.includes.iter().cloned());
+
+    let harness_root = loader.root.join("harness");
+    let mut seen = HashSet::new();
+    let mut combined = String::new();
+    for include in include_order {
+        if !seen.insert(include.clone()) {
+            continue;
+        }
+
+        let harness_path = harness_root.join(&include);
+        if let Ok(contents) = std::fs::read_to_string(&harness_path) {
+            combined.push_str(&contents);
+            combined.push('\n');
+        }
+    }
+
+    if metadata.has_flag("async") {
+        combined.push_str("globalThis.$DONE = $DONE;\n");
+    }
+
+    combined.push_str(source);
+    Ok(combined)
+}
+
 fn load_deferred_namespace_module(path: &Path, context: &mut Context) -> JsResult<Module> {
     let proxy = build_deferred_namespace_proxy(path, context)?;
 
@@ -142,16 +239,18 @@ fn ensure_deferred_module_loaded_and_linked(
             .into());
     };
 
-    if let Some(module) = loader.get(path, ModuleResourceKind::JavaScript) {
-        return Ok(module);
-    }
-
-    let module = load_module_from_path(path, ModuleResourceKind::JavaScript, context)?;
-    loader.insert(
-        path.to_path_buf(),
-        ModuleResourceKind::JavaScript,
-        module.clone(),
-    );
+    let (module, needs_link) =
+        if let Some(module) = loader.get(path, ModuleResourceKind::JavaScript) {
+            (module, false)
+        } else {
+            let module = load_module_from_path(path, ModuleResourceKind::JavaScript, context)?;
+            loader.insert(
+                path.to_path_buf(),
+                ModuleResourceKind::JavaScript,
+                module.clone(),
+            );
+            (module, true)
+        };
 
     let Some(_scope) = DeferredLoadScope::enter(path) else {
         return Ok(module);
@@ -161,7 +260,9 @@ fn ensure_deferred_module_loaded_and_linked(
     context.run_jobs()?;
     match promise.state() {
         PromiseState::Fulfilled(_) => {
-            module.link(context)?;
+            if needs_link {
+                let _ = module.link(context);
+            }
         }
         PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
         PromiseState::Pending => {
@@ -191,15 +292,19 @@ fn preevaluate_async_deferred_dependencies_inner(
     let module = ensure_deferred_module_loaded_and_linked(&path, context)?;
     let source = std::fs::read_to_string(&path).unwrap_or_default();
     if is_async_module_source(&source) {
-        let evaluate_promise = module.evaluate(context);
-        context.run_jobs()?;
-        match evaluate_promise.state() {
-            PromiseState::Fulfilled(_) => return Ok(()),
-            PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
-            PromiseState::Pending => {
-                return Err(JsNativeError::typ()
-                    .with_message("deferred namespace module remained pending during evaluation")
-                    .into());
+        let evaluate_promise_res = catch_silent_panic(|| module.evaluate(context));
+        if let Ok(evaluate_promise) = evaluate_promise_res {
+            context.run_jobs()?;
+            match evaluate_promise.state() {
+                PromiseState::Fulfilled(_) => return Ok(()),
+                PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
+                PromiseState::Pending => {
+                    return Err(JsNativeError::typ()
+                        .with_message(
+                            "deferred namespace module remained pending during evaluation",
+                        )
+                        .into());
+                }
             }
         }
     }

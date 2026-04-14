@@ -339,7 +339,6 @@ async fn load_dyn_import(
     // 2. Let module be moduleCompletion.[[Value]].
     // 3. Let loadPromise be module.LoadRequestedModules().
     let load = module.load(&mut context.borrow_mut());
-
     // 4. Let rejectedClosure be a new Abstract Closure with parameters (reason) that captures promiseCapability and performs the following steps when called:
     // 5. Let onRejected be CreateBuiltinFunction(rejectedClosure, 1, "", « »).
     let on_rejected = FunctionObjectBuilder::new(

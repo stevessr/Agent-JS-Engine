@@ -14,6 +14,7 @@ use boa_engine::{
     realm::Realm,
 };
 use regex::{Captures, Regex};
+use serde::Deserialize;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -43,11 +44,19 @@ static STATIC_IMPORT_FROM_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("static import-with regex must compile")
 });
+static STATIC_IMPORT_FROM_EMPTY_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)(from\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*\}"#)
+        .expect("static import-with-empty regex must compile")
+});
 static STATIC_IMPORT_BARE_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?s)(import\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*type\s*:\s*(['"])(json|text|bytes)(['"])\s*\}"#,
     )
     .expect("bare import-with regex must compile")
+});
+static STATIC_IMPORT_BARE_EMPTY_WITH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)(import\s+)(['"])([^'"]+)(['"])\s+with\s*\{\s*\}"#)
+        .expect("bare import-with-empty regex must compile")
 });
 static STATIC_SOURCE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -62,15 +71,15 @@ static STATIC_DEFER_NAMESPACE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     .expect("static import-defer namespace regex must compile")
 });
 static MODULE_IMPORT_FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*import\s+(?:defer\s+\*\s+as\s+[A-Za-z_$][A-Za-z0-9_$]*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
+    Regex::new(r#"(?m)(?:^|;)\s*import\s+(?:defer\s+\*\s+as\s+[A-Za-z_$][A-Za-z0-9_$]*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
         .expect("module import-from regex must compile")
 });
 static MODULE_BARE_IMPORT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*import\s+(['"])([^'"]+)(['"])"#)
+    Regex::new(r#"(?m)(?:^|;)\s*import\s+(['"])([^'"]+)(['"])"#)
         .expect("module bare import regex must compile")
 });
 static MODULE_EXPORT_FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)^\s*export\s+(?:\*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
+    Regex::new(r#"(?m)(?:^|;)\s*export\s+(?:\*|[^'";]+?)\s+from\s+(['"])([^'"]+)(['"])"#)
         .expect("module export-from regex must compile")
 });
 static MODULE_EXPORT_BINDING_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -343,6 +352,7 @@ struct HostHooksContext {
     data_view_originals: HashMap<&'static str, JsSymbol>,
     promise_then_original: JsSymbol,
     array_flat_original: JsSymbol,
+    active_module_evaluations: RefCell<Vec<PathBuf>>,
     shadow_realm_next_callable_id: Cell<u64>,
     shadow_realm_callables: RefCell<HashMap<u64, BoaValue>>,
 }
@@ -418,6 +428,7 @@ impl HostHooksContext {
             ]),
             promise_then_original: hidden_symbol("agentjs.original.Promise.then"),
             array_flat_original: hidden_symbol("agentjs.original.Array.prototype.flat"),
+            active_module_evaluations: RefCell::new(Vec::new()),
             shadow_realm_next_callable_id: Cell::new(0),
             shadow_realm_callables: RefCell::new(HashMap::new()),
         }

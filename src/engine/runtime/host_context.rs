@@ -25,6 +25,41 @@ fn host_hooks_context(context: &Context) -> JsResult<&HostHooksContext> {
     })
 }
 
+fn normalize_module_tracking_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn push_active_module_evaluation(path: &Path, context: &Context) -> JsResult<()> {
+    host_hooks_context(context)?
+        .active_module_evaluations
+        .borrow_mut()
+        .push(normalize_module_tracking_path(path));
+    Ok(())
+}
+
+fn pop_active_module_evaluation(path: &Path, context: &Context) -> JsResult<()> {
+    let normalized = normalize_module_tracking_path(path);
+    let mut active = host_hooks_context(context)?
+        .active_module_evaluations
+        .borrow_mut();
+    if let Some(index) = active
+        .iter()
+        .rposition(|candidate| candidate == &normalized)
+    {
+        active.remove(index);
+    }
+    Ok(())
+}
+
+fn tracked_active_module_paths(context: &Context) -> JsResult<HashSet<PathBuf>> {
+    Ok(host_hooks_context(context)?
+        .active_module_evaluations
+        .borrow()
+        .iter()
+        .cloned()
+        .collect())
+}
+
 fn array_buffer_original_symbol(
     context: &Context,
     method_name: &'static str,

@@ -144,18 +144,25 @@ impl JsEngine {
             module.clone(),
         );
 
-        let promise = module.load_link_evaluate(&mut context);
-        let value = settle_promise_for_eval(
-            &promise,
-            &mut context,
-            "module promise remained pending after job queue drain",
-        )?;
-        drain_jobs_for_eval(&mut context)?;
+        let entry_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        push_active_module_evaluation(&entry_path, &context)
+            .map_err(|err| convert_error(err, &mut context))?;
+        let result = (|| {
+            let promise = module.load_link_evaluate(&mut context);
+            let value = settle_promise_for_eval(
+                &promise,
+                &mut context,
+                "module promise remained pending after job queue drain",
+            )?;
+            drain_jobs_for_eval(&mut context)?;
 
-        Ok(EvalOutput {
-            value: display_value(&value, &mut context),
-            printed: take_print_buffer(),
-        })
+            Ok(EvalOutput {
+                value: display_value(&value, &mut context),
+                printed: take_print_buffer(),
+            })
+        })();
+        let _ = pop_active_module_evaluation(&entry_path, &context);
+        result
     }
 }
 

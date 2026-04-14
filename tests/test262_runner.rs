@@ -181,7 +181,6 @@ impl HarnessCache {
         let mut files = HashMap::new();
 
         for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
-            println!("DEBUG: WalkDir entry: {:?}", entry.path());
             if !entry.file_type().is_file() {
                 continue;
             }
@@ -196,7 +195,6 @@ impl HarnessCache {
                 .map(|path| path.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_default();
             if !key.is_empty() {
-                eprintln!("DEBUG: Indexed harness file: {}", key);
                 files.insert(key, contents);
             }
         }

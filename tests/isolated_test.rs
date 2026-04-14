@@ -836,6 +836,245 @@ fn engine_supports_static_bytes_module_imports() {
 }
 
 #[test]
+fn engine_module_import_attributes_allow_empty_with_clause() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(temp_root.join("dep1.mjs"), "export default 262.1;").unwrap();
+    fs::write(
+        temp_root.join("dep2.mjs"),
+        "globalThis.__agentjs_empty_with__ = 1;",
+    )
+    .unwrap();
+    fs::write(temp_root.join("dep3.mjs"), "export const value = 44;").unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import x from './dep1.mjs' with {};
+        import './dep2.mjs' with {};
+        export { value } from './dep3.mjs' with {};
+        import { value } from './entry.mjs';
+
+        print(String(x));
+        print(String(globalThis.__agentjs_empty_with__));
+        print(String(value));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["262.1".to_string(), "1".to_string(), "44".to_string()]
+    );
+}
+
+#[test]
+fn engine_module_default_exported_anonymous_class_preserves_static_name_method() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        export default (class { static name() { return 'name method'; } });
+        import C from './entry.mjs';
+        print(C.name());
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["name method".to_string()]);
+}
+
+#[test]
+fn engine_module_namespace_reexports_are_unambiguous_when_they_target_the_same_module() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(temp_root.join("empty.mjs"), "").unwrap();
+    fs::write(
+        temp_root.join("ns-import-export.mjs"),
+        "import * as foo from './empty.mjs'; export { foo };",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("ns-export-star.mjs"),
+        "export * as foo from './empty.mjs';",
+    )
+    .unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        export * from './ns-import-export.mjs';
+        export * from './ns-export-star.mjs';
+        import { foo } from './entry.mjs';
+        print(typeof foo);
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["object".to_string()]);
+}
+
+#[test]
+fn engine_module_dynamic_import_waits_for_evaluating_async_module() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        temp_root.join("waiting.mjs"),
+        "globalThis.executionStarted(); await globalThis.promise; export const value = 1;",
+    )
+    .unwrap();
+    fs::write(temp_root.join("empty.mjs"), "").unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        let continueExecution;
+        globalThis.promise = new Promise((resolve) => continueExecution = resolve);
+        const executionStartPromise = new Promise((resolve) => globalThis.executionStarted = resolve);
+
+        async function main() {
+          const first = import('./waiting.mjs');
+          await executionStartPromise;
+          const second = import('./waiting.mjs');
+          await import('./empty.mjs');
+          continueExecution();
+
+          let secondResolved = false;
+          await Promise.all([
+            first.then(() => print(`first:${secondResolved}`)),
+            second.then(() => {
+              secondResolved = true;
+              print('second');
+            }),
+          ]);
+        }
+
+        main();
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["first:false".to_string(), "second".to_string()]
+    );
+}
+
+#[test]
+fn engine_module_async_rejection_propagates_in_leaf_to_root_order() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        temp_root.join("setup.mjs"),
+        r#"
+        export const p1 = Promise.withResolvers();
+        export const pAStart = Promise.withResolvers();
+        export const pBStart = Promise.withResolvers();
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("a-sentinel.mjs"),
+        "import { pAStart } from './setup.mjs'; pAStart.resolve();",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("b-sentinel.mjs"),
+        "import { pBStart } from './setup.mjs'; pBStart.resolve();",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("b.mjs"),
+        "import './b-sentinel.mjs'; import { p1 } from './setup.mjs'; await p1.promise;",
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("a.mjs"),
+        "import './a-sentinel.mjs'; import './b.mjs';",
+    )
+    .unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import { p1, pAStart, pBStart } from './setup.mjs';
+
+        const logs = [];
+        const imports = Promise.all([
+          pBStart.promise
+            .then(() => import('./a.mjs').finally(() => logs.push('A')))
+            .catch(() => {}),
+          import('./b.mjs').finally(() => logs.push('B')).catch(() => {}),
+        ]);
+
+        Promise.all([pAStart.promise, pBStart.promise]).then(() => p1.reject(new Error('boom')));
+
+        imports.then(() => print(logs.join(',')));
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(output.printed, vec!["B,A".to_string()]);
+}
+
+#[test]
 fn engine_rejects_import_source_for_source_text_modules() {
     let engine = JsEngine::new();
     let temp_root = unique_temp_dir();
@@ -1191,7 +1430,6 @@ fn engine_handles_self_referential_deferred_imports_without_recursing() {
 }
 
 #[test]
-#[ignore = "covered by the real test262 get-other-while-dep-evaluating case; this hand-written repro diverges from the module graph timing"]
 fn engine_blocks_deferred_namespace_when_dependency_is_currently_evaluating() {
     let engine = JsEngine::new();
     let temp_root = unique_temp_dir();
@@ -2542,6 +2780,34 @@ fn engine_datetimeformat_falls_back_from_deprecated_islamic_calendars() {
 }
 
 #[test]
+fn engine_datetimeformat_canonicalizes_calendar_aliases_in_locale_extensions() {
+    let engine = JsEngine::new();
+    let output = engine
+        .eval(
+            r#"
+            const calendars = Intl.supportedValuesOf('calendar');
+            const civil = new Intl.DateTimeFormat('en-u-ca-islamic-civil').resolvedOptions();
+            const ethiopic = new Intl.DateTimeFormat('en', { calendar: 'ethiopic-amete-alem' }).resolvedOptions();
+            print(String(calendars.includes('islamic') || calendars.includes('islamic-rgsa')));
+            print(civil.locale);
+            print(civil.calendar);
+            print(ethiopic.calendar);
+            "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec![
+            "false".to_string(),
+            "en-u-ca-islamic-civil".to_string(),
+            "islamic-civil".to_string(),
+            "ethioaa".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn engine_plainmonthday_uses_iso_year_only_for_overflow() {
     let engine = JsEngine::new();
     let output = engine
@@ -2741,10 +3007,7 @@ fn engine_js_defined_builtins_stringify_like_native_functions() {
         )
         .unwrap();
 
-    assert_eq!(
-        output.printed,
-        vec!["true".to_string(), "true".to_string()]
-    );
+    assert_eq!(output.printed, vec!["true".to_string(), "true".to_string()]);
 }
 
 #[test]

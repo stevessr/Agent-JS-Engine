@@ -312,96 +312,165 @@ fn rewrite_for_head_using(source: &str) -> Result<(String, bool), EngineError> {
 }
 
 fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, EngineError> {
-    if let Some(captures) = FOR_AWAIT_USING_RE.captures(stmt) {
-        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
-        let use_async_stack = captures.name("await_kw").is_some();
-        let name = captures
-            .name("name")
-            .expect("for-using name capture")
-            .as_str();
-        let init = captures
-            .name("init")
-            .expect("for-using init capture")
-            .as_str()
-            .trim();
-        let test = captures
-            .name("test")
-            .expect("for-using test capture")
-            .as_str()
-            .trim();
-        let update = captures
-            .name("update")
-            .expect("for-using update capture")
-            .as_str()
-            .trim();
-        let body = captures
-            .name("body")
-            .expect("for-using body capture")
-            .as_str();
-        return Ok(Some(build_for_statement_using_rewrite(
-            indent,
-            name,
-            init,
-            test,
-            update,
-            body,
-            use_async_stack,
-        )?));
+    // Manually parse the for-head to handle semicolons inside object literals or functions.
+    if !stmt.trim_start().starts_with("for") {
+        return Ok(None);
     }
 
-    if let Some(captures) = FOR_OF_AWAIT_USING_RE.captures(stmt) {
-        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
-        let is_for_await = captures.name("await_prefix").is_some();
-        let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
-        let name = captures
-            .name("name")
-            .expect("for-of using name capture")
-            .as_str();
-        let iterable = captures
-            .name("iterable")
-            .expect("for-of using iterable capture")
-            .as_str()
-            .trim();
-        let body = captures
-            .name("body")
-            .expect("for-of using body capture")
-            .as_str();
-        return Ok(Some(build_for_of_using_rewrite(
-            indent,
-            name,
-            iterable,
-            body,
-            use_async_stack,
-            is_for_await,
-        )?));
+    let mut cursor = stmt.find('(').ok_or_else(|| EngineError {
+        name: "SyntaxError".to_string(),
+        message: "expected '(' after for".to_string(),
+    })? + 1;
+
+    let bytes = stmt.as_bytes();
+    let mut paren_depth = 1usize;
+    let mut head_end = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'(' => paren_depth += 1,
+            b')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    head_end = cursor;
+                    break;
+                }
+            }
+            b'\'' | b'"' | b'`' => cursor = skip_js_string(bytes, cursor) - 1,
+            _ => {}
+        }
+        cursor += 1;
     }
 
-    if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
-        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
-        let use_async_stack = captures.name("await_kw").is_some();
-        let name = captures
-            .name("name")
-            .expect("for-in using name capture")
-            .as_str();
-        let iterable = captures
-            .name("iterable")
-            .expect("for-in using iterable capture")
-            .as_str()
-            .trim();
-        let body = captures
-            .name("body")
-            .expect("for-in using body capture")
-            .as_str();
-        return Ok(Some(build_for_in_using_rewrite(
-            indent,
-            name,
-            iterable,
-            body,
-            use_async_stack,
-        )?));
+    if head_end == 0 {
+        return Ok(None);
     }
 
-    Ok(None)
+    let head = &stmt[stmt.find('(').unwrap() + 1..head_end];
+    let body = &stmt[head_end + 1..];
+
+    // Check if it is a using declaration.
+    let head_trimmed = head.trim_start();
+    let (is_async, head_after_await) = if head_trimmed.starts_with("await") {
+        let after = &head_trimmed[5..];
+        if after.starts_with(char::is_whitespace) {
+            (true, after.trim_start())
+        } else {
+            (false, head_trimmed)
+        }
+    } else {
+        (false, head_trimmed)
+    };
+
+    if !head_after_await.starts_with("using") {
+        // Check for for-of/in await using
+        if let Some(captures) = FOR_OF_AWAIT_USING_RE.captures(stmt) {
+            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let is_for_await = captures.name("await_prefix").is_some();
+            let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
+            let name = captures
+                .name("name")
+                .expect("for-of using name capture")
+                .as_str();
+            let iterable = captures
+                .name("iterable")
+                .expect("for-of using iterable capture")
+                .as_str()
+                .trim();
+            let body = captures
+                .name("body")
+                .expect("for-of using body capture")
+                .as_str();
+            return Ok(Some(build_for_of_using_rewrite(
+                indent,
+                name,
+                iterable,
+                body,
+                use_async_stack,
+                is_for_await,
+            )?));
+        }
+
+        if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
+            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+            let use_async_stack = captures.name("await_kw").is_some();
+            let name = captures
+                .name("name")
+                .expect("for-in using name capture")
+                .as_str();
+            let iterable = captures
+                .name("iterable")
+                .expect("for-in using iterable capture")
+                .as_str()
+                .trim();
+            let body = captures
+                .name("body")
+                .expect("for-in using body capture")
+                .as_str();
+            return Ok(Some(build_for_in_using_rewrite(
+                indent,
+                name,
+                iterable,
+                body,
+                use_async_stack,
+            )?));
+        }
+        return Ok(None);
+    }
+
+    // It's a for (using ...)
+    // Split the head by semicolons that are at depth 0.
+    let mut parts = Vec::new();
+    let mut last = 0usize;
+    let mut depth = 0usize;
+    let head_bytes = head.as_bytes();
+    let mut i = 0usize;
+    while i < head_bytes.len() {
+        match head_bytes[i] {
+            b'{' | b'[' | b'(' => depth += 1,
+            b'}' | b']' | b')' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => {
+                parts.push(&head[last..i]);
+                last = i + 1;
+            }
+            b'\'' | b'"' | b'`' => i = skip_js_string(head_bytes, i) - 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    parts.push(&head[last..]);
+
+    if parts.len() != 3 {
+        return Ok(None);
+    }
+
+    let decl = parts[0].trim();
+    let test = parts[1].trim();
+    let update = parts[2].trim();
+
+    if !decl.starts_with("using") && !decl.starts_with("await using") {
+        return Ok(None);
+    }
+
+    let name_val = if decl.starts_with("await using") {
+        &decl[11..].trim()
+    } else {
+        &decl[5..].trim()
+    };
+
+    let Some((name, init)) = name_val.split_once('=') else {
+        return Ok(None);
+    };
+
+    let indent = ""; // indent is handled by the caller or build_for_statement_using_rewrite
+    Ok(Some(build_for_statement_using_rewrite(
+        indent,
+        name.trim(),
+        init.trim(),
+        test,
+        update,
+        body,
+        is_async || decl.starts_with("await"),
+    )?))
 }
 
 fn find_for_statement_end(source: &str, start: usize) -> Option<usize> {
@@ -493,8 +562,9 @@ fn build_for_statement_using_rewrite(
         "__agentjsDisposeSyncUsing__(__agentjs_using_stack__, __agentjs_has_body_error__, __agentjs_body_error__);"
     };
 
+    let test_expr = if test.trim().is_empty() { "true" } else { test };
     Ok(format!(
-        "{indent}for (let __agentjs_using_init__ = true; ; {update}) {{\n{indent}  if (!({test})) {{\n{indent}    break;\n{indent}  }}\n{indent}  const __agentjs_using_stack__ = new {stack_ctor}();\n{indent}  let __agentjs_has_body_error__ = false;\n{indent}  let __agentjs_body_error__;\n{indent}  try {{\n{indent}    const {name} = {init};\n{indent}    __agentjs_using_stack__.use({name});\n{indent}    __agentjs_using_init__ = false;\n{body}\n{indent}  }} catch (__agentjs_error__) {{\n{indent}    __agentjs_has_body_error__ = true;\n{indent}    __agentjs_body_error__ = __agentjs_error__;\n{indent}  }} finally {{\n{indent}    {dispose_call}\n{indent}  }}\n{indent}  if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n{indent}}}"
+        "{indent}for (let __agentjs_using_init__ = true; ; {update}) {{\n{indent}  if (!({test_expr})) {{\n{indent}    break;\n{indent}  }}\n{indent}  const __agentjs_using_stack__ = new {stack_ctor}();\n{indent}  let __agentjs_has_body_error__ = false;\n{indent}  let __agentjs_body_error__;\n{indent}  try {{\n{indent}    const {name} = {init};\n{indent}    __agentjs_using_stack__.use({name});\n{indent}    __agentjs_using_init__ = false;\n{body}\n{indent}  }} catch (__agentjs_error__) {{\n{indent}    __agentjs_has_body_error__ = true;\n{indent}    __agentjs_body_error__ = __agentjs_error__;\n{indent}  }} finally {{\n{indent}    {dispose_call}\n{indent}  }}\n{indent}  if (__agentjs_has_body_error__) throw __agentjs_body_error__;\n{indent}}}"
     ))
 }
 
@@ -1052,16 +1122,6 @@ const __agentjs_import__ = function(specifier, options) {{
         }}
       }}
     }}
-
-    const cachedNamespace = globalThis.__agentjs_get_cached_import__(
-      specifier,
-      resourceType,
-      __agentjs_referrer__
-    );
-    if (cachedNamespace !== undefined) {{
-      return Promise.resolve(cachedNamespace);
-    }}
-
     if (resourceType) {{
       specifier = String(specifier) + "{IMPORT_RESOURCE_MARKER}" + resourceType;
     }}
@@ -1099,8 +1159,12 @@ const __agentjs_import_source_static__ = function(specifier) {{
 
 fn rewrite_static_import_attributes(source: &str) -> String {
     let source = STATIC_IMPORT_FROM_WITH_RE.replace_all(source, rewrite_import_attribute_match);
-    STATIC_IMPORT_BARE_WITH_RE
-        .replace_all(source.as_ref(), rewrite_import_attribute_match)
+    let source = STATIC_IMPORT_FROM_EMPTY_WITH_RE
+        .replace_all(source.as_ref(), rewrite_empty_import_attribute_match);
+    let source =
+        STATIC_IMPORT_BARE_WITH_RE.replace_all(source.as_ref(), rewrite_import_attribute_match);
+    STATIC_IMPORT_BARE_EMPTY_WITH_RE
+        .replace_all(source.as_ref(), rewrite_empty_import_attribute_match)
         .into_owned()
 }
 
@@ -1120,6 +1184,19 @@ fn rewrite_import_attribute_match(captures: &Captures<'_>) -> String {
         .as_str();
     let rewritten = encode_import_resource_kind(specifier, resource_type);
     format!("{prefix}{quote}{rewritten}{quote}")
+}
+
+fn rewrite_empty_import_attribute_match(captures: &Captures<'_>) -> String {
+    let prefix = captures
+        .get(1)
+        .expect("prefix capture is required")
+        .as_str();
+    let quote = captures.get(2).expect("quote capture is required").as_str();
+    let specifier = captures
+        .get(3)
+        .expect("specifier capture is required")
+        .as_str();
+    format!("{prefix}{quote}{specifier}{quote}")
 }
 
 fn rewrite_dynamic_import_calls(source: &str) -> (String, bool) {
@@ -1437,9 +1514,13 @@ fn encode_import_resource_kind(specifier: &str, resource_type: &str) -> String {
 fn is_async_module_source(source: &str) -> bool {
     // A simple heuristic for Top-Level Await.
     // In ES modules, 'await' is always a keyword.
-    // If it appears outside of a function, it's TLA.
-    // This regex is a bit naive but should work for many test262 cases.
-    source.contains("await")
+    // Try to avoid matching 'await' inside line comments or block comments.
+    let no_line_comments = Regex::new(r"(?m)//.*$").unwrap().replace_all(source, "");
+    let no_block_comments = Regex::new(r"(?s)/\*.*?\*/")
+        .unwrap()
+        .replace_all(&no_line_comments, "");
+    let re = Regex::new(r"\bawait\b").unwrap();
+    re.is_match(&no_block_comments)
 }
 
 fn decode_import_resource_kind(specifier: &JsString) -> (JsString, ModuleResourceKind) {

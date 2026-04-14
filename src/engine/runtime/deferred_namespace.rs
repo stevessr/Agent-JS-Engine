@@ -494,38 +494,48 @@ fn evaluate_deferred_namespace_module(path: &Path, context: &mut Context) -> JsR
     }
 
     let module = ensure_deferred_module_loaded_and_linked(path, context)?;
-    let promise = catch_silent_panic(|| module.evaluate(context)).map_err(|_| {
-        JsNativeError::typ()
-            .with_message("deferred namespace is not ready for synchronous evaluation")
-    })?;
-    catch_silent_panic(|| context.run_jobs())
-        .map_err(|_| {
+    let tracked_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    push_active_module_evaluation(&tracked_path, context)?;
+    let result = (|| {
+        let promise = catch_silent_panic(|| module.evaluate(context)).map_err(|_| {
             JsNativeError::typ()
-                .with_message("deferred namespace evaluation panicked while running jobs")
-        })?
-        .map_err(|error| error)?;
-    match promise.state() {
-        PromiseState::Fulfilled(_) => Ok(module),
-        PromiseState::Rejected(reason) => Err(JsError::from_opaque(reason.clone())),
-        PromiseState::Pending => Err(JsNativeError::typ()
-            .with_message("deferred namespace module remained pending during evaluation")
-            .into()),
-    }
+                .with_message("deferred namespace is not ready for synchronous evaluation")
+        })?;
+        catch_silent_panic(|| context.run_jobs())
+            .map_err(|_| {
+                JsNativeError::typ()
+                    .with_message("deferred namespace evaluation panicked while running jobs")
+            })?
+            .map_err(|error| error)?;
+        match promise.state() {
+            PromiseState::Fulfilled(_) => Ok(module),
+            PromiseState::Rejected(reason) => Err(JsError::from_opaque(reason.clone())),
+            PromiseState::Pending => Err(JsNativeError::typ()
+                .with_message("deferred namespace module remained pending during evaluation")
+                .into()),
+        }
+    })();
+    let _ = pop_active_module_evaluation(&tracked_path, context);
+    result
 }
 
 fn current_executing_module_paths(context: &Context) -> HashSet<PathBuf> {
-    context
-        .stack_trace()
-        .filter_map(|frame| {
-            let rendered = frame.position().path.to_string();
-            let candidate = PathBuf::from(rendered);
-            if candidate.exists() {
-                Some(candidate.canonicalize().unwrap_or(candidate))
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut active = tracked_active_module_paths(context).unwrap_or_default();
+    active.extend(
+        context
+            .stack_trace()
+            .filter_map(|frame| {
+                let rendered = frame.position().path.to_string();
+                let candidate = PathBuf::from(rendered);
+                if candidate.exists() {
+                    Some(candidate.canonicalize().unwrap_or(candidate))
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>(),
+    );
+    active
 }
 
 fn requested_module_paths(path: &Path, context: &mut Context) -> JsResult<Vec<PathBuf>> {
@@ -585,4 +595,3 @@ fn is_ready_for_sync_execution(
 
     Ok(true)
 }
-

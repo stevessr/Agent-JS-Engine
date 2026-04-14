@@ -290,31 +290,39 @@ impl SourceTextModule {
                 ExportEntry::Ordinary(entry) => {
                     // ii. Else,
                     //     1. Let ie be the element of importEntries whose [[LocalName]] is ee.[[LocalName]].
-                    if let Some((module, import)) =
-                        import_entries.iter().find_map(|ie| match ie.import_name() {
-                            ImportName::Name(name) if ie.local_name() == entry.local_name() => {
-                                Some((ie.module_request(), name))
-                            }
-                            _ => None,
-                        })
+                    if let Some(import_entry) = import_entries
+                        .iter()
+                        .find(|ie| ie.local_name() == entry.local_name())
                     {
-                        // 3. Else,
-                        //    a. NOTE: This is a re-export of a single name.
-                        //    b. Append the ExportEntry Record { [[ModuleRequest]]: ie.[[ModuleRequest]],
-                        //       [[ImportName]]: ie.[[ImportName]], [[LocalName]]: null,
-                        //       [[ExportName]]: ee.[[ExportName]] } to indirectExportEntries.
-                        indirect_export_entries.push(IndirectExportEntry::new(
-                            module,
-                            ReExportImportName::Name(import),
-                            entry.export_name(),
-                        ));
+                        match import_entry.import_name() {
+                            // 2. If ie.[[ImportName]] is namespace-object, then
+                            //    a. NOTE: This is a re-export of an imported module namespace object.
+                            //    b. Append the ExportEntry Record { [[ModuleRequest]]: ie.[[ModuleRequest]],
+                            //       [[ImportName]]: ~all~, [[LocalName]]: null,
+                            //       [[ExportName]]: ee.[[ExportName]] } to indirectExportEntries.
+                            ImportName::Namespace => {
+                                indirect_export_entries.push(IndirectExportEntry::new(
+                                    import_entry.module_request(),
+                                    ReExportImportName::Star,
+                                    entry.export_name(),
+                                ));
+                            }
+                            // 3. Else,
+                            //    a. NOTE: This is a re-export of a single name.
+                            //    b. Append the ExportEntry Record { [[ModuleRequest]]: ie.[[ModuleRequest]],
+                            //       [[ImportName]]: ie.[[ImportName]], [[LocalName]]: null,
+                            //       [[ExportName]]: ee.[[ExportName]] } to indirectExportEntries.
+                            ImportName::Name(import) => {
+                                indirect_export_entries.push(IndirectExportEntry::new(
+                                    import_entry.module_request(),
+                                    ReExportImportName::Name(import),
+                                    entry.export_name(),
+                                ));
+                            }
+                        }
                     } else {
                         // i. If importedBoundNames does not contain ee.[[LocalName]], then
                         //    1. Append ee to localExportEntries.
-
-                        //    2. If ie.[[ImportName]] is namespace-object, then
-                        //       a. NOTE: This is a re-export of an imported module namespace object.
-                        //       b. Append ee to localExportEntries.
                         local_export_entries.push(entry);
                     }
                 }
@@ -1961,7 +1969,7 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) {
             //    ii. If result is an abrupt completion, then
             if let Err(e) = result {
                 //    1. Perform AsyncModuleExecutionRejected(m, result.[[Value]]).
-                async_module_execution_rejected(module, &e, context);
+                async_module_execution_rejected(&m, &e, context);
             } else {
                 // iii. Else,
                 //    1. Set m.[[Status]] to evaluated.
@@ -2035,12 +2043,6 @@ fn async_module_execution_rejected(module: &Module, error: &JsError, context: &m
             _ => unreachable!(),
         });
 
-    // 7. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
-    for m in &*module_src.async_parent_modules.borrow() {
-        // a. Perform AsyncModuleExecutionRejected(m, error).
-        async_module_execution_rejected(m, error, context);
-    }
-
     let status = module_src.status.borrow();
     // 8. If module.[[TopLevelCapability]] is not empty, then
     if let Some(cap) = status.top_level_capability() {
@@ -2051,6 +2053,14 @@ fn async_module_execution_rejected(module: &Module, error: &JsError, context: &m
         cap.reject()
             .call(&JsValue::undefined(), &[error.to_opaque(context)], context)
             .expect("default `reject` function cannot fail");
+    }
+
+    drop(status);
+
+    // 7. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
+    for m in &*module_src.async_parent_modules.borrow() {
+        // a. Perform AsyncModuleExecutionRejected(m, error).
+        async_module_execution_rejected(m, error, context);
     }
     // 9. Return unused.
 }
