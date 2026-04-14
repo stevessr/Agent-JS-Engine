@@ -5,5 +5,5 @@ pub mod value;
 
 pub use env::Environment;
 pub use interpreter::Interpreter;
-pub use runtime::{EngineError, EvalOptions, EvalOutput, JsEngine, ReplSession};
+pub use runtime::{EngineError, EvalOptions, EvalOutput, JsEngine, ReplSession, preprocess_compat_source};
 pub use value::JsValue;

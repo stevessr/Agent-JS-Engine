@@ -196,6 +196,93 @@ impl SourceTextModule {
     pub(super) fn is_evaluated_without_error(&self) -> bool {
         matches!(&*self.status.borrow(), ModuleStatus::Evaluated { error: None, .. })
     }
+
+    pub(super) fn ready_for_sync_execution(
+        &self,
+        module_self: &Module,
+        seen: &mut HashSet<Module>,
+    ) -> bool {
+        if !seen.insert(module_self.clone()) {
+            return true;
+        }
+
+        {
+            let status = self.status.borrow();
+            match &*status {
+                ModuleStatus::Evaluated { .. } => return true,
+                ModuleStatus::Evaluating { .. } | ModuleStatus::EvaluatingAsync { .. } => {
+                    return false;
+                }
+                ModuleStatus::Linked { .. } => {}
+                ModuleStatus::Unlinked
+                | ModuleStatus::Linking { .. }
+                | ModuleStatus::PreLinked { .. } => return false,
+            }
+        }
+
+        if self.code.has_tla {
+            return false;
+        }
+
+        let dependencies = {
+            let loaded = self.loaded_modules.borrow();
+            self.code
+                .requested_modules
+                .iter()
+                .map(|specifier| loaded.get(specifier).cloned())
+                .collect::<Option<Vec<_>>>()
+        };
+
+        let Some(dependencies) = dependencies else {
+            return false;
+        };
+
+        dependencies
+            .into_iter()
+            .all(|dependency| dependency.ready_for_sync_execution_inner(seen))
+    }
+
+    pub(super) fn gather_asynchronous_transitive_dependencies(
+        &self,
+        module_self: &Module,
+        seen: &mut HashSet<Module>,
+        result: &mut Vec<Module>,
+    ) {
+        if !seen.insert(module_self.clone()) {
+            return;
+        }
+
+        {
+            let status = self.status.borrow();
+            match &*status {
+                ModuleStatus::Evaluating { .. }
+                | ModuleStatus::EvaluatingAsync { .. }
+                | ModuleStatus::Evaluated { .. } => return,
+                ModuleStatus::Linked { .. } => {}
+                ModuleStatus::Unlinked
+                | ModuleStatus::Linking { .. }
+                | ModuleStatus::PreLinked { .. } => return,
+            }
+        }
+
+        if self.code.has_tla {
+            result.push(module_self.clone());
+            return;
+        }
+
+        let dependencies = {
+            let loaded = self.loaded_modules.borrow();
+            self.code
+                .requested_modules
+                .iter()
+                .filter_map(|specifier| loaded.get(specifier).cloned())
+                .collect::<Vec<_>>()
+        };
+
+        for dependency in dependencies {
+            dependency.gather_asynchronous_transitive_dependencies_inner(seen, result);
+        }
+    }
 }
 
 /// The execution context of a [`SourceTextModule`].

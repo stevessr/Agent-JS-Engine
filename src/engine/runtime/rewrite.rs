@@ -15,7 +15,7 @@ fn finalize_script_source(
     })
 }
 
-fn preprocess_compat_source(
+pub fn preprocess_compat_source(
     source: &str,
     source_path: Option<&Path>,
     is_module: bool,
@@ -272,16 +272,41 @@ fn rewrite_top_level_using(source: &str, is_module: bool) -> Result<(String, boo
 }
 
 fn rewrite_for_head_using(source: &str) -> Result<(String, bool), EngineError> {
+    if !contains_keyword_outside_trivia(source.as_bytes(), b"using") {
+        return Ok((source.to_string(), false));
+    }
+
     let mut output = String::with_capacity(source.len());
     let mut changed = false;
     let mut cursor = 0usize;
+    let bytes = source.as_bytes();
 
     while cursor < source.len() {
-        let Some(for_rel) = source[cursor..].find("for") else {
+        let Some(start) = find_next_keyword_outside_trivia(bytes, cursor, b"for") else {
             break;
         };
-        let start = cursor + for_rel;
-        if !matches_for_keyword_boundary(source, start) {
+
+        let Some(mut head_start) = skip_whitespace_and_comments(bytes, start + 3) else {
+            output.push_str(&source[cursor..]);
+            cursor = source.len();
+            break;
+        };
+        if bytes[head_start] == b'a' && source[head_start..].starts_with("await") {
+            let after_await = head_start + 5;
+            if after_await < bytes.len() && is_identifier_byte(bytes[after_await]) {
+                output.push_str(&source[cursor..start + 3]);
+                cursor = start + 3;
+                continue;
+            }
+            let Some(after_await_ws) = skip_whitespace_and_comments(bytes, after_await) else {
+                output.push_str(&source[cursor..]);
+                cursor = source.len();
+                break;
+            };
+            head_start = after_await_ws;
+        }
+
+        if bytes[head_start] != b'(' {
             output.push_str(&source[cursor..start + 3]);
             cursor = start + 3;
             continue;
@@ -315,6 +340,58 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
     // Manually parse the for-head to handle semicolons inside object literals or functions.
     if !stmt.trim_start().starts_with("for") {
         return Ok(None);
+    }
+
+    if let Some(captures) = FOR_OF_AWAIT_USING_RE.captures(stmt) {
+        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+        let is_for_await = captures.name("await_prefix").is_some();
+        let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
+        let name = captures
+            .name("name")
+            .expect("for-of using name capture")
+            .as_str();
+        let iterable = captures
+            .name("iterable")
+            .expect("for-of using iterable capture")
+            .as_str()
+            .trim();
+        let body = captures
+            .name("body")
+            .expect("for-of using body capture")
+            .as_str();
+        return Ok(Some(build_for_of_using_rewrite(
+            indent,
+            name,
+            iterable,
+            body,
+            use_async_stack,
+            is_for_await,
+        )?));
+    }
+
+    if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
+        let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
+        let use_async_stack = captures.name("await_kw").is_some();
+        let name = captures
+            .name("name")
+            .expect("for-in using name capture")
+            .as_str();
+        let iterable = captures
+            .name("iterable")
+            .expect("for-in using iterable capture")
+            .as_str()
+            .trim();
+        let body = captures
+            .name("body")
+            .expect("for-in using body capture")
+            .as_str();
+        return Ok(Some(build_for_in_using_rewrite(
+            indent,
+            name,
+            iterable,
+            body,
+            use_async_stack,
+        )?));
     }
 
     let mut cursor = stmt.find('(').ok_or_else(|| EngineError {
@@ -362,58 +439,6 @@ fn rewrite_for_head_using_statement(stmt: &str) -> Result<Option<String>, Engine
     };
 
     if !head_after_await.starts_with("using") {
-        // Check for for-of/in await using
-        if let Some(captures) = FOR_OF_AWAIT_USING_RE.captures(stmt) {
-            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
-            let is_for_await = captures.name("await_prefix").is_some();
-            let use_async_stack = captures.name("await_kw").is_some() || is_for_await;
-            let name = captures
-                .name("name")
-                .expect("for-of using name capture")
-                .as_str();
-            let iterable = captures
-                .name("iterable")
-                .expect("for-of using iterable capture")
-                .as_str()
-                .trim();
-            let body = captures
-                .name("body")
-                .expect("for-of using body capture")
-                .as_str();
-            return Ok(Some(build_for_of_using_rewrite(
-                indent,
-                name,
-                iterable,
-                body,
-                use_async_stack,
-                is_for_await,
-            )?));
-        }
-
-        if let Some(captures) = FOR_IN_AWAIT_USING_RE.captures(stmt) {
-            let indent = captures.name("indent").map(|m| m.as_str()).unwrap_or("");
-            let use_async_stack = captures.name("await_kw").is_some();
-            let name = captures
-                .name("name")
-                .expect("for-in using name capture")
-                .as_str();
-            let iterable = captures
-                .name("iterable")
-                .expect("for-in using iterable capture")
-                .as_str()
-                .trim();
-            let body = captures
-                .name("body")
-                .expect("for-in using body capture")
-                .as_str();
-            return Ok(Some(build_for_in_using_rewrite(
-                indent,
-                name,
-                iterable,
-                body,
-                use_async_stack,
-            )?));
-        }
         return Ok(None);
     }
 
@@ -641,14 +666,45 @@ fn normalize_loop_body(body: &str, indent: &str) -> Result<String, EngineError> 
     }
 }
 
-fn matches_for_keyword_boundary(source: &str, start: usize) -> bool {
-    let bytes = source.as_bytes();
-    if start + 3 > bytes.len() || &source[start..start + 3] != "for" {
-        return false;
+fn contains_keyword_outside_trivia(bytes: &[u8], keyword: &[u8]) -> bool {
+    find_next_keyword_outside_trivia(bytes, 0, keyword).is_some()
+}
+
+fn find_next_keyword_outside_trivia(bytes: &[u8], start: usize, keyword: &[u8]) -> Option<usize> {
+    let mut cursor = start;
+    while cursor + keyword.len() <= bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                cursor = skip_js_string(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'/' => {
+                cursor = skip_line_comment(bytes, cursor);
+                continue;
+            }
+            b'/' if cursor + 1 < bytes.len() && bytes[cursor + 1] == b'*' => {
+                cursor = skip_block_comment(bytes, cursor);
+                continue;
+            }
+            _ => {}
+        }
+
+        if bytes[cursor] == keyword[0]
+            && cursor + keyword.len() <= bytes.len()
+            && &bytes[cursor..cursor + keyword.len()] == keyword
+        {
+            let before_ok = cursor == 0 || !is_identifier_byte(bytes[cursor - 1]);
+            let after_ok =
+                cursor + keyword.len() == bytes.len() || !is_identifier_byte(bytes[cursor + keyword.len()]);
+            if before_ok && after_ok {
+                return Some(cursor);
+            }
+        }
+
+        cursor += 1;
     }
-    let before_ok = start == 0 || !is_identifier_byte(bytes[start - 1]);
-    let after_ok = start + 3 == bytes.len() || !is_identifier_byte(bytes[start + 3]);
-    before_ok && after_ok
+
+    None
 }
 
 fn rewrite_using_blocks(source: &str) -> Result<(String, bool), EngineError> {

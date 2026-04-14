@@ -261,6 +261,36 @@ await using x = {
         ));
         assert!(!rewritten.contains("await using x ="));
     }
+
+    #[test]
+    fn preprocess_does_not_treat_for_inside_comments_as_for_statement() {
+        let source = r#"/*---
+description: returns data desc for functions on built-ins
+---*/
+
+verifyProperty(Date.prototype, "getYear", {
+  enumerable: false,
+  writable: true,
+  configurable: true
+});
+"#;
+
+        let rewritten = preprocess_compat_source(source, None, false, false).unwrap();
+        assert!(rewritten.contains("returns data desc for functions on built-ins"));
+        assert!(!rewritten.contains("__agentjs_using_stack__"));
+    }
+
+    #[test]
+    fn preprocess_does_not_treat_identifier_name_for_as_for_statement() {
+        let source = r#"
+const obj = { for: 1, using: 2 };
+obj.for + obj.using;
+"#;
+
+        let rewritten = preprocess_compat_source(source, None, false, false).unwrap();
+        assert!(rewritten.contains("{ for: 1, using: 2 }"));
+        assert!(!rewritten.contains("__agentjs_using_value__"));
+    }
 }
 
 fn call_hidden_data_view_method(

@@ -425,6 +425,14 @@ fn run_case(case: &TestCase, harness: &HarnessCache, suite_root: &Path) -> CaseR
                     Ok(out) => format!("Ok: {:?}", out.value),
                     Err(err) => format!("Err: {err}"),
                 };
+                if !quiet_output() {
+                    eprintln!("Failure: {} (actual: {actual})", case.path.display());
+                    if let Ok(out) = &result {
+                        for line in &out.printed {
+                            eprintln!("  [PRINT] {line}");
+                        }
+                    }
+                }
                 Some(format!("assertion or runtime mismatch (actual: {actual})"))
             }
             _ => None,

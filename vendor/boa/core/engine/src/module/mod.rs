@@ -620,6 +620,41 @@ impl Module {
         self.inner.namespace.borrow().clone()
     }
 
+    /// Returns whether this module can be synchronously evaluated according to
+    /// `ReadyForSyncExecution`.
+    #[must_use]
+    pub fn ready_for_sync_execution(&self) -> bool {
+        self.ready_for_sync_execution_inner(&mut HashSet::default())
+    }
+
+    fn ready_for_sync_execution_inner(&self, seen: &mut HashSet<Module>) -> bool {
+        match self.kind() {
+            ModuleKind::SourceText(src) => src.ready_for_sync_execution(self, seen),
+            ModuleKind::Synthetic(_) => true,
+        }
+    }
+
+    /// Returns the asynchronous transitive dependencies gathered in module-request order.
+    #[must_use]
+    pub fn gather_asynchronous_transitive_dependencies(&self) -> Vec<Module> {
+        let mut result = Vec::new();
+        self.gather_asynchronous_transitive_dependencies_inner(&mut HashSet::default(), &mut result);
+        result
+    }
+
+    fn gather_asynchronous_transitive_dependencies_inner(
+        &self,
+        seen: &mut HashSet<Module>,
+        result: &mut Vec<Module>,
+    ) {
+        match self.kind() {
+            ModuleKind::SourceText(src) => {
+                src.gather_asynchronous_transitive_dependencies(self, seen, result);
+            }
+            ModuleKind::Synthetic(_) => {}
+        }
+    }
+
     /// Get an exported value from the module.
     #[inline]
     pub fn get_value<K>(&self, name: K, context: &mut Context) -> JsResult<JsValue>

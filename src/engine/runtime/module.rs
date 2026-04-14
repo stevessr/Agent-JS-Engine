@@ -282,41 +282,19 @@ fn preevaluate_async_deferred_dependencies(path: &Path, context: &mut Context) -
     let Some(_scope) = DeferredPreevalScope::enter(path) else {
         return Ok(());
     };
-    preevaluate_async_deferred_dependencies_inner(path, &mut HashSet::new(), context)
-}
+    let module = ensure_deferred_module_loaded_and_linked(path, context)?;
+    for dependency in module.gather_asynchronous_transitive_dependencies() {
+        let evaluate_promise = catch_silent_panic(|| dependency.evaluate(context)).map_err(|_| {
+            JsNativeError::typ().with_message(
+                "deferred namespace async dependency panicked during evaluation",
+            )
+        })?;
 
-fn preevaluate_async_deferred_dependencies_inner(
-    path: &Path,
-    seen: &mut HashSet<PathBuf>,
-    context: &mut Context,
-) -> JsResult<()> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(path.clone()) {
-        return Ok(());
-    }
+        context.run_jobs()?;
 
-    let module = ensure_deferred_module_loaded_and_linked(&path, context)?;
-    let source = std::fs::read_to_string(&path).unwrap_or_default();
-    if is_async_module_source(&source) {
-        let evaluate_promise_res = catch_silent_panic(|| module.evaluate(context));
-        if let Ok(evaluate_promise) = evaluate_promise_res {
-            context.run_jobs()?;
-            match evaluate_promise.state() {
-                PromiseState::Fulfilled(_) => return Ok(()),
-                PromiseState::Rejected(reason) => return Err(JsError::from_opaque(reason.clone())),
-                PromiseState::Pending => {
-                    return Err(JsNativeError::typ()
-                        .with_message(
-                            "deferred namespace module remained pending during evaluation",
-                        )
-                        .into());
-                }
-            }
+        if let PromiseState::Rejected(reason) = evaluate_promise.state() {
+            return Err(JsError::from_opaque(reason.clone()));
         }
-    }
-
-    for dependency in requested_module_paths(&path, context)? {
-        preevaluate_async_deferred_dependencies_inner(&dependency, seen, context)?;
     }
 
     Ok(())

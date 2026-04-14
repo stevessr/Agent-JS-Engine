@@ -486,14 +486,13 @@ fn parse_deferred_module_export_names(path: &Path) -> JsResult<Vec<String>> {
 }
 
 fn evaluate_deferred_namespace_module(path: &Path, context: &mut Context) -> JsResult<Module> {
-    let active_paths = current_executing_module_paths(context);
-    if !is_ready_for_sync_execution(path, &active_paths, &mut HashSet::new(), context)? {
+    let module = ensure_deferred_module_loaded_and_linked(path, context)?;
+    if !module.ready_for_sync_execution() {
         return Err(JsNativeError::typ()
             .with_message("deferred namespace is not ready for synchronous evaluation")
             .into());
     }
 
-    let module = ensure_deferred_module_loaded_and_linked(path, context)?;
     let tracked_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     push_active_module_evaluation(&tracked_path, context)?;
     let result = (|| {
@@ -517,81 +516,4 @@ fn evaluate_deferred_namespace_module(path: &Path, context: &mut Context) -> JsR
     })();
     let _ = pop_active_module_evaluation(&tracked_path, context);
     result
-}
-
-fn current_executing_module_paths(context: &Context) -> HashSet<PathBuf> {
-    let mut active = tracked_active_module_paths(context).unwrap_or_default();
-    active.extend(
-        context
-            .stack_trace()
-            .filter_map(|frame| {
-                let rendered = frame.position().path.to_string();
-                let candidate = PathBuf::from(rendered);
-                if candidate.exists() {
-                    Some(candidate.canonicalize().unwrap_or(candidate))
-                } else {
-                    None
-                }
-            })
-            .collect::<HashSet<_>>(),
-    );
-    active
-}
-
-fn requested_module_paths(path: &Path, context: &mut Context) -> JsResult<Vec<PathBuf>> {
-    let source = std::fs::read_to_string(path).map_err(|error| {
-        JsNativeError::typ()
-            .with_message(format!("could not open file `{}`", path.display()))
-            .with_cause(JsError::from_opaque(js_string!(error.to_string()).into()))
-    })?;
-
-    let Some(loader) = context.downcast_module_loader::<CompatModuleLoader>() else {
-        return Ok(Vec::new());
-    };
-
-    let mut paths = HashSet::new();
-    for regex in [
-        &*MODULE_IMPORT_FROM_RE,
-        &*MODULE_BARE_IMPORT_RE,
-        &*MODULE_EXPORT_FROM_RE,
-    ] {
-        for captures in regex.captures_iter(&source) {
-            let specifier = captures
-                .get(2)
-                .expect("specifier capture is required")
-                .as_str();
-            let resolved = resolve_module_specifier(
-                Some(&loader.root),
-                &JsString::from(specifier),
-                Some(path),
-                context,
-            )?;
-            paths.insert(resolved);
-        }
-    }
-
-    Ok(paths.into_iter().collect())
-}
-
-fn is_ready_for_sync_execution(
-    path: &Path,
-    active_paths: &HashSet<PathBuf>,
-    seen: &mut HashSet<PathBuf>,
-    context: &mut Context,
-) -> JsResult<bool> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    if !seen.insert(path.clone()) {
-        return Ok(true);
-    }
-    if active_paths.contains(&path) {
-        return Ok(false);
-    }
-
-    for dependency in requested_module_paths(&path, context)? {
-        if !is_ready_for_sync_execution(&dependency, active_paths, seen, context)? {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
 }

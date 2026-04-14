@@ -222,11 +222,34 @@
   - `TEST262_FILTER='test/language/import/import-defer/errors/get-self-while-evaluating-async/main.js' cargo test --test test262_runner test262_core_profile -- --exact --test-threads=20`：通过
   - `TEST262_OFFSET=40500 TEST262_MAX_CASES=250 target/debug/deps/test262_runner-* --exact test262_core_profile --nocapture --test-threads=1`：整块跑完，不再挂住
   - `TEST262_OFFSET=40000 TEST262_MAX_CASES=1000 target/debug/deps/test262_runner-* --exact test262_core_profile --nocapture --test-threads=1`：整块跑完，退出码 `0`
+  - `TEST262_FULL=1 TEST262_PARALLEL_CHUNKS=16 TEST262_QUIET=1 cargo test --test test262_runner test262_core_profile -- --exact --test-threads=16`：**完整跑完**
+    - `Total cases: 53125`
+    - `Executed: 53059`
+    - `Passed: 42127`
+    - `Skipped: 66`
+    - 这次 16 并发整轮已正常结束，说明此前 `offset 40000` 的 hang 已解除
+    - 本轮 summary 文件：`/tmp/test262_summary16.iTFf0F`
+    - 本轮 failures 文件：`/tmp/test262_failures16.hSeo3B`
+- 已修复一批 `SyntaxError: expected '(' after for` 的假阳性：
+  - 根因：`src/engine/runtime/rewrite.rs` 中 `rewrite_for_head_using()` 之前是用朴素字符串搜索扫描所有 `for`，会把注释里的 `for`、对象字面量属性名 `for` 等误判为 `for` 语句，再在后续路径里抛出 `expected '(' after for`
+  - 修复方式：
+    - 只在源码里存在 **trivia 外部** 的 `using` 关键字时才尝试 `for-head using` 重写
+    - 新增跳过字符串 / 行注释 / 块注释的关键字扫描
+    - 只对 `for` 后经过空白和注释归一化后真正跟着 `(`（或 `await ... (`）的情况进入 `for` 语句重写
+  - 新增回归单测：
+    - `preprocess_does_not_treat_for_inside_comments_as_for_statement`
+    - `preprocess_does_not_treat_identifier_name_for_as_for_statement`
+  - 验证：
+    - `TEST262_FILTER='test/annexB/built-ins/Date/prototype/getYear/B.2.4.js' ...`：通过
+    - `TEST262_FILTER='test/language/global-code/decl-func.js' ...`：通过
+    - `TEST262_OFFSET=40500 TEST262_MAX_CASES=250 ...`：
+      - 修复前：`213 / 250` 通过（`85.20%`）
+      - 修复后：`243 / 250` 通过（`97.20%`）
 
 ## Next Steps
 
 - [ ] 补齐 `for (await using x of iterable)` 这条 `await using` + `for...of` 头部语法/执行路径；当前常规测试仍被 `engine_parses_await_using_in_for_of_heads` 卡住。
-- [ ] 在修复 `offset 40000` hang 后，重新跑完整 `TEST262_PARALLEL_CHUNKS=20` 全量回归，拿到新的正式 summary / failures 文件。
+- [ ] 如需进一步验证调度稳定性，补跑一轮 `TEST262_PARALLEL_CHUNKS=20` 全量回归并与 16 并发结果比对。
 - [ ] 继续清理 `dynamic-import` 目录里剩余真实失败（当前 `offset 36000..36999` 子块可跑完，但仍有若干语义失败）。
 - [x] ~~评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖~~（已完成）
 - [x] ~~启用 `Temporal` 测试~~（已完成）

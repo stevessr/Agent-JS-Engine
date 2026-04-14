@@ -31,3 +31,11 @@ path = "parse_error_stats.rs"
 [[bin]]
 name = "parse_error_stats_runner"
 path = "parse_error_stats_runner.rs"
+
+[[bin]]
+name = "debug_preprocess"
+path = "tmp_scripts/debug_preprocess.rs"
+
+[[bin]]
+name = "reproduce_issue"
+path = "tmp_scripts/reproduce_issue.rs"

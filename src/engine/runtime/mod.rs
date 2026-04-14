@@ -275,6 +275,7 @@ impl ModuleLoader for CompatModuleLoader {
             referrer.path(),
             &mut context.borrow_mut(),
         )?;
+        let path = path.canonicalize().unwrap_or(path);
 
         if let Some(module) = self.get(&path, kind) {
             return Ok(module);
