@@ -176,10 +176,58 @@
 
 详细实现说明见：`TEST262_IMPLEMENTATION.md`
 
+## Latest Verification (2026-04-14)
+
+- `cargo test -- --test-threads=20`
+  - 常规 Rust 测试在 20 线程下只剩 1 个失败用例。
+  - 当前唯一明确失败的回归是 `tests/isolated_test.rs::engine_parses_await_using_in_for_of_heads`。
+  - 失败信息：`SyntaxError: expected token ';', got 'x' in for statement at line 8, col 32`
+- 已修复 `test262` 20 并发长跑里的一个真实炸栈点：
+  - 根因定位到 `test/language/expressions/dynamic-import/reuse-namespace-object-from-import.js`
+  - 根因细化：Boa 的 dynamic import 路径在把 `result.[[Value]]` 写回 referrer 的 `[[LoadedModules]]` 时，命中了“相同 specifier 已有旧模块记录，但 loader 返回了另一份模块对象”的分支；原来的 `debug_assert_eq!` / `assert_eq!` 在打印递归模块结构时把测试线程栈打爆
+  - 修复方式：直接在 `vendor/boa` 里修补模块身份归一化逻辑
+    - `vendor/boa/core/engine/src/vm/opcode/call/mod.rs`
+    - `vendor/boa/core/engine/src/module/source.rs`
+    - dynamic import / static module loading 现在都会优先复用 referrer `[[LoadedModules]]` 里已有的模块对象
+    - 对已经成功 evaluate 且已有 namespace 的模块，dynamic import 直接走 cached namespace 快路径
+  - 新增 isolated regression：`engine_dynamic_import_reuses_namespace_object_from_static_import`
+- 修复后的回归验证：
+  - `cargo test --test isolated_test engine_dynamic_import_reuses_namespace_object_from_static_import -- --exact --test-threads=20`：通过
+  - `TEST262_FILTER='test/language/expressions/dynamic-import/reuse-namespace-object-from-import.js' cargo test --test test262_runner test262_core_profile -- --exact --test-threads=20`：通过
+  - `TEST262_OFFSET=36000 TEST262_MAX_CASES=1000 target/debug/deps/test262_runner-* --exact test262_core_profile --nocapture --test-threads=1`：整块跑完，不再栈溢出
+  - 使用临时最小 suite 走真实 chunked subprocess 路径（`TEST262_PARALLEL_CHUNKS=20 TEST262_CHUNK_SIZE=1`）验证 `reuse-namespace-object-from-import.js`：通过
+- 完整 `TEST262_PARALLEL_CHUNKS=20` 全量回归再次执行后，未再出现此前的 `offset 36000` 栈溢出，但整轮长跑目前 **没有完成**：
+  - 跑到最后剩余 1 个子进程时卡住
+  - 通过 `/proc/<pid>/environ` 确认卡住的是 `TEST262_OFFSET=40000`、`TEST262_MAX_CASES=1000`
+  - 该子进程长期停在 `futex_wait`，CPU time 不再增长，表现更像 hang / deadlock，而不是新的 stack overflow
+  - 在手动终止前，已累计生成 `10927` 条失败记录；由于父进程未正常结束，因此这次没有最终 summary 文件，暂不能把它视为正式全量统计结果
+- 已定位并修复 `offset 40000` 子块里的真实 hang：
+  - 具体卡住的 case 是 `test/language/import/import-defer/errors/get-self-while-evaluating-async/main.js`
+  - 根因分成两层：
+    - runtime 的 `preevaluate_async_deferred_dependencies()` 在自引用 `import defer` + async module 组合下会对同一路径重入，导致死锁式递归预评估
+    - Boa 的 `SyntheticModule::evaluate()` 对重入不安全；同一个 synthetic module 在 initializer 尚未返回时再次 evaluate，会触发状态机 panic
+  - 修复方式：
+    - `src/engine/runtime/mod.rs`
+      - 新增 `DeferredPreevalScope`，对同一路径的 async deferred pre-evaluation 做作用域级防重入
+    - `src/engine/runtime/module.rs`
+      - `preevaluate_async_deferred_dependencies()` 命中重入时直接复用外层 pre-eval，不再递归触发同一路径 evaluate
+    - `vendor/boa/core/engine/src/module/synthetic.rs`
+      - 为 synthetic module 增加 evaluate 重入 guard；若同一 synthetic module 正在执行 initializer，则内层 evaluate 直接返回 fulfilled promise，避免重复执行和状态机 panic
+  - 新增 isolated regression：
+    - `engine_blocks_async_self_referential_deferred_namespace_access_until_evaluated`
+- 修复后的验证：
+  - `cargo test --test isolated_test self_referential_deferred -- --test-threads=20`：通过
+  - `cargo test --test isolated_test engine_blocks_async_self_referential_deferred_namespace_access_until_evaluated -- --exact --test-threads=20`：通过
+  - `cargo test --test isolated_test engine_blocks_deferred_namespace_when_dependency_is_currently_evaluating -- --exact --test-threads=20`：通过
+  - `TEST262_FILTER='test/language/import/import-defer/errors/get-self-while-evaluating-async/main.js' cargo test --test test262_runner test262_core_profile -- --exact --test-threads=20`：通过
+  - `TEST262_OFFSET=40500 TEST262_MAX_CASES=250 target/debug/deps/test262_runner-* --exact test262_core_profile --nocapture --test-threads=1`：整块跑完，不再挂住
+  - `TEST262_OFFSET=40000 TEST262_MAX_CASES=1000 target/debug/deps/test262_runner-* --exact test262_core_profile --nocapture --test-threads=1`：整块跑完，退出码 `0`
+
 ## Next Steps
 
-- [ ] 继续补 `import-defer` 的 deferred namespace / evaluation 语义，以及更完整的 `source-phase-imports`。
-- [ ] 继续扩充其余 host hooks，例如 `gc` 等较少见的测试接口。
+- [ ] 补齐 `for (await using x of iterable)` 这条 `await using` + `for...of` 头部语法/执行路径；当前常规测试仍被 `engine_parses_await_using_in_for_of_heads` 卡住。
+- [ ] 在修复 `offset 40000` hang 后，重新跑完整 `TEST262_PARALLEL_CHUNKS=20` 全量回归，拿到新的正式 summary / failures 文件。
+- [ ] 继续清理 `dynamic-import` 目录里剩余真实失败（当前 `offset 36000..36999` 子块可跑完，但仍有若干语义失败）。
 - [x] ~~评估是否启用 `Intl` 特性，拉高 `intl402` 覆盖~~（已完成）
 - [x] ~~启用 `Temporal` 测试~~（已完成）
 - [x] ~~启用 `cross-realm` 测试~~（已完成）

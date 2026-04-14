@@ -300,7 +300,7 @@ async fn load_dyn_import(
     };
 
     // 1. If result is a normal completion, then
-    match referrer {
+    let module = match referrer {
         Referrer::Module(module) => {
             let ModuleKind::SourceText(src) = module.kind() else {
                 panic!("referrer cannot be a synthetic module");
@@ -311,29 +311,36 @@ async fn load_dyn_import(
             //     a. If referrer.[[LoadedModules]] contains a Record whose [[Specifier]] is specifier, then
             //     b. Else,
             //         i. Append the Record { [[Specifier]]: specifier, [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
-            let entry = loaded_modules
+            loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
-
-            //         i. Assert: That Record's [[Module]] is result.[[Value]].
-            debug_assert_eq!(&module, entry);
-
-            // Same steps apply to referrers below
+                .or_insert_with(|| module.clone())
+                .clone()
         }
         Referrer::Realm(realm) => {
             let mut loaded_modules = realm.loaded_modules().borrow_mut();
-            let entry = loaded_modules
+            loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
-            debug_assert_eq!(&module, entry);
+                .or_insert_with(|| module.clone())
+                .clone()
         }
         Referrer::Script(script) => {
             let mut loaded_modules = script.loaded_modules().borrow_mut();
-            let entry = loaded_modules
+            loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
-            debug_assert_eq!(&module, entry);
+                .or_insert_with(|| module.clone())
+                .clone()
         }
+    };
+
+    if let Some(namespace) = module.ready_cached_namespace() {
+        cap.resolve()
+            .call(
+                &JsValue::undefined(),
+                &[namespace.into()],
+                &mut context.borrow_mut(),
+            )
+            .expect("default `resolve` function cannot throw");
+        return;
     }
 
     // 2. Let module be moduleCompletion.[[Value]].

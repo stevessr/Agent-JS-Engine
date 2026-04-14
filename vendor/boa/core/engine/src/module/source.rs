@@ -192,6 +192,12 @@ impl ModuleStatus {
     }
 }
 
+impl SourceTextModule {
+    pub(super) fn is_evaluated_without_error(&self) -> bool {
+        matches!(&*self.status.borrow(), ModuleStatus::Evaluated { error: None, .. })
+    }
+}
+
 /// The execution context of a [`SourceTextModule`].
 ///
 /// Stores the required context data that needs to be in place before executing the
@@ -411,22 +417,26 @@ impl SourceTextModule {
             // FinishLoadingImportedModule ( referrer, specifier, payload, result )
             // https://tc39.es/ecma262/#sec-FinishLoadingImportedModule
 
-            // 1. If result is a normal completion, then
-            if let Ok(loaded) = &completion {
-                let ModuleKind::SourceText(src) = src.kind() else {
-                    unreachable!("captured src must be a source text module");
-                };
-                // a. If referrer.[[LoadedModules]] contains a Record whose [[Specifier]] is specifier, then
-                // b. Else,
-                //    i. Append the Record { [[Specifier]]: specifier, [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
-                let mut loaded_modules = src.loaded_modules.borrow_mut();
-                let entry = loaded_modules
-                    .entry(specifier)
-                    .or_insert_with(|| loaded.clone());
-
-                //    i. Assert: That Record's [[Module]] is result.[[Value]].
-                assert_eq!(entry, loaded);
-            }
+            let completion = match completion {
+                Ok(loaded) => {
+                    let ModuleKind::SourceText(src) = src.kind() else {
+                        unreachable!("captured src must be a source text module");
+                    };
+                    // 1. If result is a normal completion, then
+                    // a. If referrer.[[LoadedModules]] contains a Record whose [[Specifier]] is specifier, then
+                    // b. Else,
+                    //    i. Append the Record { [[Specifier]]: specifier, [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
+                    let loaded = {
+                        let mut loaded_modules = src.loaded_modules.borrow_mut();
+                        loaded_modules
+                            .entry(specifier)
+                            .or_insert_with(|| loaded.clone())
+                            .clone()
+                    };
+                    Ok(loaded)
+                }
+                Err(err) => Err(err),
+            };
 
             // 2. If payload is a GraphLoadingState Record, then
             //    a. Perform ContinueModuleLoading(payload, result).

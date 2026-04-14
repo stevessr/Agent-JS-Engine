@@ -1,6 +1,7 @@
 use boa_ast::scope::Scope;
 use boa_gc::{Finalize, Gc, GcRefCell, Trace};
 use rustc_hash::FxHashSet;
+use std::cell::Cell;
 
 use super::{BindingName, ResolveExportError, ResolvedBinding};
 use crate::{
@@ -176,6 +177,8 @@ pub struct SyntheticModule {
     export_names: FxHashSet<JsString>,
     eval_steps: SyntheticModuleInitializer,
     state: GcRefCell<ModuleStatus>,
+    #[unsafe_ignore_trace]
+    evaluating: Cell<bool>,
 }
 
 impl std::fmt::Debug for SyntheticModule {
@@ -250,6 +253,7 @@ impl SyntheticModule {
             export_names: names,
             eval_steps,
             state: GcRefCell::default(),
+            evaluating: Cell::new(false),
         }
     }
 
@@ -368,6 +372,10 @@ impl SyntheticModule {
     ///
     /// [spec]: https://tc39.es/proposal-json-modules/#sec-smr-Evaluate
     pub(super) fn evaluate(&self, module_self: &Module, context: &mut Context) -> JsPromise {
+        if self.evaluating.get() {
+            return JsPromise::resolve(JsValue::undefined(), context);
+        }
+
         let (environments, codeblock) = match &*self.state.borrow() {
             ModuleStatus::Unlinked => {
                 let (promise, ResolvingFunctions { reject, .. }) = JsPromise::new_pending(context);
@@ -387,6 +395,10 @@ impl SyntheticModule {
             ModuleStatus::Evaluated { promise, .. } => return promise.clone(),
         };
         // 1. Let moduleContext be a new ECMAScript code execution context.
+        self.evaluating.set(true);
+        let _evaluating_guard = SyntheticEvaluationGuard {
+            flag: &self.evaluating,
+        };
 
         let realm = module_self.realm().clone();
 
@@ -448,5 +460,15 @@ impl SyntheticModule {
             ModuleStatus::Linked { environment, .. }
             | ModuleStatus::Evaluated { environment, .. } => Some(environment.clone()),
         }
+    }
+}
+
+struct SyntheticEvaluationGuard<'a> {
+    flag: &'a Cell<bool>,
+}
+
+impl Drop for SyntheticEvaluationGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.set(false);
     }
 }

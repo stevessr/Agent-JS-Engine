@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 thread_local! {
     static PRINT_BUFFER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static DEFERRED_LOAD_GUARD: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
+    static DEFERRED_PREEVAL_GUARD: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::new());
 }
 
 static PANIC_HOOK_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -198,6 +199,32 @@ impl DeferredLoadScope {
 impl Drop for DeferredLoadScope {
     fn drop(&mut self) {
         DEFERRED_LOAD_GUARD.with(|guard| {
+            guard.borrow_mut().remove(&self.path);
+        });
+    }
+}
+
+#[derive(Debug)]
+struct DeferredPreevalScope {
+    path: PathBuf,
+}
+
+impl DeferredPreevalScope {
+    fn enter(path: &Path) -> Option<Self> {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        DEFERRED_PREEVAL_GUARD.with(|guard| {
+            let mut guard = guard.borrow_mut();
+            if !guard.insert(path.clone()) {
+                return None;
+            }
+            Some(Self { path })
+        })
+    }
+}
+
+impl Drop for DeferredPreevalScope {
+    fn drop(&mut self) {
+        DEFERRED_PREEVAL_GUARD.with(|guard| {
             guard.borrow_mut().remove(&self.path);
         });
     }

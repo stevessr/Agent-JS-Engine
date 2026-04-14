@@ -605,6 +605,21 @@ impl Module {
             .clone()
     }
 
+    /// Returns the cached namespace object when the module has already completed successful
+    /// evaluation and its namespace was previously created.
+    pub(crate) fn ready_cached_namespace(&self) -> Option<JsObject> {
+        let ready = match self.kind() {
+            ModuleKind::SourceText(src) => src.is_evaluated_without_error(),
+            ModuleKind::Synthetic(_) => true,
+        };
+
+        if !ready {
+            return None;
+        }
+
+        self.inner.namespace.borrow().clone()
+    }
+
     /// Get an exported value from the module.
     #[inline]
     pub fn get_value<K>(&self, name: K, context: &mut Context) -> JsResult<JsValue>

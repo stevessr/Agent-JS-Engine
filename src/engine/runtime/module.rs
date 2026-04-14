@@ -276,6 +276,12 @@ fn ensure_deferred_module_loaded_and_linked(
 }
 
 fn preevaluate_async_deferred_dependencies(path: &Path, context: &mut Context) -> JsResult<()> {
+    // Self-referential deferred imports can re-enter the synthetic module initializer while we are
+    // still pre-evaluating async dependencies for the same module. Reusing the outer pre-eval keeps
+    // us on the spec path without recursively re-triggering evaluation of the same module.
+    let Some(_scope) = DeferredPreevalScope::enter(path) else {
+        return Ok(());
+    };
     preevaluate_async_deferred_dependencies_inner(path, &mut HashSet::new(), context)
 }
 

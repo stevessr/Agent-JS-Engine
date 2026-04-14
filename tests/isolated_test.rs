@@ -1007,6 +1007,56 @@ fn engine_module_dynamic_import_waits_for_evaluating_async_module() {
 }
 
 #[test]
+fn engine_dynamic_import_reuses_namespace_object_from_static_import() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("entry.mjs");
+    fs::write(
+        temp_root.join("module-code_FIXTURE.js"),
+        r#"
+        export var local1 = 'Test262';
+        var local2 = 'TC39';
+        export { local2 as renamed };
+        export { local1 as indirect } from './module-code_FIXTURE.js';
+        export default 42;
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        &entry_path,
+        r#"
+        import * as ns from './module-code_FIXTURE.js';
+
+        Promise.all([
+          import('./module-code_FIXTURE.js'),
+          import('./module-code_FIXTURE.js'),
+        ]).then(([a, b]) => {
+          print(String(a === b));
+          print(String(a === ns));
+          print(String(b === ns));
+        });
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["true".to_string(), "true".to_string(), "true".to_string()]
+    );
+}
+
+#[test]
 fn engine_module_async_rejection_propagates_in_leaf_to_root_order() {
     let engine = JsEngine::new();
     let temp_root = unique_temp_dir();
@@ -1427,6 +1477,48 @@ fn engine_handles_self_referential_deferred_imports_without_recursing() {
         .unwrap();
 
     assert_eq!(output.printed, vec!["TypeError".to_string()]);
+}
+
+#[test]
+fn engine_blocks_async_self_referential_deferred_namespace_access_until_evaluated() {
+    let engine = JsEngine::new();
+    let temp_root = unique_temp_dir();
+    fs::create_dir_all(&temp_root).unwrap();
+
+    let entry_path = temp_root.join("main.mjs");
+    fs::write(
+        &entry_path,
+        r#"
+        import defer * as ns from './dep.mjs';
+        print(String(globalThis['error on ns.foo']?.name));
+        print(String(ns.foo));
+        "#,
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("dep.mjs"),
+        r#"
+        import defer * as ns from './dep.mjs';
+        await Promise.resolve(0);
+        try { ns.foo; } catch (error) { globalThis['error on ns.foo'] = error; }
+        export const foo = 1;
+        "#,
+    )
+    .unwrap();
+
+    let output = engine
+        .eval_module_with_options(
+            &fs::read_to_string(&entry_path).unwrap(),
+            &entry_path,
+            &temp_root,
+            &Default::default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.printed,
+        vec!["TypeError".to_string(), "1".to_string()]
+    );
 }
 
 #[test]
