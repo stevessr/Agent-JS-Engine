@@ -595,54 +595,34 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
         .expect("Global Symbol object is missing")
         .clone();
 
-    let dispose_sym = if symbol_obj
-        .get(js_string!("dispose"), context)?
-        .is_undefined()
-    {
-        let sym: BoaValue = JsSymbol::new(Some(js_string!("Symbol.dispose")))
-            .expect("Symbol.dispose must be created")
-            .into();
-        symbol_obj.define_property_or_throw(
-            js_string!("dispose"),
-            PropertyDescriptor::builder()
-                .value(sym.clone())
-                .writable(false)
-                .enumerable(false)
-                .configurable(false),
-            context,
-        )?;
-        sym
-    } else {
-        symbol_obj.get(js_string!("dispose"), context)?
-    };
+    let host = host_hooks_context(context)?;
+    let dispose_sym: BoaValue = host.dispose_symbol.clone().into();
+    let async_dispose_sym: BoaValue = host.async_dispose_symbol.clone().into();
 
-    let async_dispose_sym = if symbol_obj
-        .get(js_string!("asyncDispose"), context)?
-        .is_undefined()
-    {
-        let sym: BoaValue = JsSymbol::new(Some(js_string!("Symbol.asyncDispose")))
-            .expect("Symbol.asyncDispose must be created")
-            .into();
-        symbol_obj.define_property_or_throw(
-            js_string!("asyncDispose"),
-            PropertyDescriptor::builder()
-                .value(sym.clone())
-                .writable(false)
-                .enumerable(false)
-                .configurable(false),
-            context,
-        )?;
-        sym
-    } else {
-        symbol_obj.get(js_string!("asyncDispose"), context)?
-    };
+    symbol_obj.define_property_or_throw(
+        js_string!("dispose"),
+        PropertyDescriptor::builder()
+            .value(dispose_sym.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
+
+    symbol_obj.define_property_or_throw(
+        js_string!("asyncDispose"),
+        PropertyDescriptor::builder()
+            .value(async_dispose_sym.clone())
+            .writable(false)
+            .enumerable(false)
+            .configurable(false),
+        context,
+    )?;
 
     // 1.5 Fix Symbol.keyFor to return undefined for our well-known-like symbols
     let key_for_method = symbol_obj.get(js_string!("keyFor"), context)?;
     if key_for_method.is_callable() {
         let original_key_for = key_for_method.clone();
-        let dispose_sym_val = symbol_obj.get(js_string!("dispose"), context)?;
-        let async_dispose_sym_val = symbol_obj.get(js_string!("asyncDispose"), context)?;
 
         let new_key_for = FunctionObjectBuilder::new(
             context.realm(),
@@ -658,8 +638,8 @@ fn install_disposable_stack_builtins(context: &mut Context) -> JsResult<()> {
                 },
                 (
                     original_key_for,
-                    dispose_sym_val,
-                    async_dispose_sym_val,
+                    dispose_sym.clone(),
+                    async_dispose_sym.clone(),
                 ),
             )
         )

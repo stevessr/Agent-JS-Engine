@@ -383,6 +383,8 @@ struct HostHooksContext {
     active_module_evaluations: RefCell<Vec<PathBuf>>,
     shadow_realm_next_callable_id: Cell<u64>,
     shadow_realm_callables: RefCell<HashMap<u64, BoaValue>>,
+    dispose_symbol: JsSymbol,
+    async_dispose_symbol: JsSymbol,
 }
 
 impl HostHooksContext {
@@ -459,6 +461,8 @@ impl HostHooksContext {
             active_module_evaluations: RefCell::new(Vec::new()),
             shadow_realm_next_callable_id: Cell::new(0),
             shadow_realm_callables: RefCell::new(HashMap::new()),
+            dispose_symbol: hidden_symbol("Symbol.dispose"),
+            async_dispose_symbol: hidden_symbol("Symbol.asyncDispose"),
         }
     }
 }
